@@ -1,0 +1,12 @@
+[
+    {
+        "Product_Display_Name": "Microsoft Defender for Office 365 F2",
+        "String_Id": "Microsoft_Defender_for_Office_365_F2",
+        "GUID": "d262ed92-2ec6-43bc-9c3a-2a03e2078023"
+    },
+    {
+        "Product_Display_Name": "Microsoft Defender Suite for Microsoft 365 Business Premium",
+        "String_Id": "DEFENDER_SUITE_FOR_BUSINESS_PREMIUM",
+        "GUID": "89ffc14b-c219-4a04-889d-bfe733b6b474"
+    }
+]
