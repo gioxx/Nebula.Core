@@ -58,83 +58,6 @@ function Invoke-NCRetry {
     }
 }
 
-function Set-ProgressAndInfoPreferences {
-    <#
-    .SYNOPSIS
-        Forces Information/Progress preference variables to Continue.
-    .DESCRIPTION
-        Saves current preference values (once per session) and sets global
-        InformationPreference and ProgressPreference to Continue for verbose output.
-    #>
-    [CmdletBinding()]
-    param()
-
-    if (-not $script:PreferencesCaptured) {
-        $script:PreviousInformationPreference = $InformationPreference
-        $script:PreviousProgressPreference = $ProgressPreference
-        $script:PreferencesCaptured = $true
-    }
-
-    Set-Variable -Name InformationPreference -Value Continue -Scope Global
-    Set-Variable -Name ProgressPreference -Value Continue -Scope Global
-}
-
-function Restore-ProgressAndInfoPreferences {
-    <#
-    .SYNOPSIS
-        Restores Information/Progress preference variables.
-    .DESCRIPTION
-        Reverts preference variables previously captured by Set-ProgressAndInfoPreferences.
-        No-ops if nothing was captured.
-    #>
-    [CmdletBinding()]
-    param()
-
-    if (-not $script:PreferencesCaptured) {
-        return
-    }
-
-    if ($null -ne $script:PreviousInformationPreference) {
-        Set-Variable -Name InformationPreference -Value $script:PreviousInformationPreference -Scope Global
-    }
-
-    if ($null -ne $script:PreviousProgressPreference) {
-        Set-Variable -Name ProgressPreference -Value $script:PreviousProgressPreference -Scope Global
-    }
-
-    $script:PreferencesCaptured = $false
-    $script:PreviousInformationPreference = $null
-    $script:PreviousProgressPreference = $null
-}
-
-function Test-Folder {
-    <#
-    .SYNOPSIS
-        Normalizes and validates a folder path.
-    .DESCRIPTION
-        Returns the current directory when input is blank, trims trailing separators,
-        and throws if the path is invalid.
-    .PARAMETER Path
-        Folder path to validate (optional).
-    #>
-    [CmdletBinding()]
-    param(
-        [string]$Path
-    )
-
-    if ([string]::IsNullOrWhiteSpace($Path)) {
-        return (Get-Location).ProviderPath
-    }
-
-    $normalized = $Path.TrimEnd('\')
-    try {
-        return [System.IO.Path]::GetFullPath($normalized)
-    }
-    catch {
-        throw "Invalid folder path '$Path'. $($_.Exception.Message)"
-    }
-}
-
 function New-File {
     <#
     .SYNOPSIS
@@ -166,4 +89,111 @@ function New-File {
     }
 
     return $candidate
+}
+
+function Restore-ProgressAndInfoPreferences {
+    <#
+    .SYNOPSIS
+        Restores Information/Progress preference variables.
+    .DESCRIPTION
+        Reverts preference variables previously captured by Set-ProgressAndInfoPreferences.
+        No-ops if nothing was captured.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (-not $script:PreferencesCaptured) {
+        return
+    }
+
+    if ($null -ne $script:PreviousInformationPreference) {
+        Set-Variable -Name InformationPreference -Value $script:PreviousInformationPreference -Scope Global
+    }
+
+    if ($null -ne $script:PreviousProgressPreference) {
+        Set-Variable -Name ProgressPreference -Value $script:PreviousProgressPreference -Scope Global
+    }
+
+    $script:PreferencesCaptured = $false
+    $script:PreviousInformationPreference = $null
+    $script:PreviousProgressPreference = $null
+}
+
+function Set-ProgressAndInfoPreferences {
+    <#
+    .SYNOPSIS
+        Forces Information/Progress preference variables to Continue.
+    .DESCRIPTION
+        Saves current preference values (once per session) and sets global
+        InformationPreference and ProgressPreference to Continue for verbose output.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (-not $script:PreferencesCaptured) {
+        $script:PreviousInformationPreference = $InformationPreference
+        $script:PreviousProgressPreference = $ProgressPreference
+        $script:PreferencesCaptured = $true
+    }
+
+    Set-Variable -Name InformationPreference -Value Continue -Scope Global
+    Set-Variable -Name ProgressPreference -Value Continue -Scope Global
+}
+
+function Show-Table {
+    <#
+    .SYNOPSIS
+        Outputs a table of rows.
+    .DESCRIPTION
+        Outputs a table of rows with a title.
+    .PARAMETER Rows
+        Table rows.
+    .PARAMETER AsTable
+        Output as a table.
+    #>
+    [CmdletBinding()]
+    param(
+        [array]$Rows,
+        [switch]$AsTable
+    )
+
+    if (-not $Rows -or $Rows.Count -eq 0) {
+        Write-NCMessage "(none)" -Level INFO
+        return
+    }
+
+    if ($AsTable) {
+        $Rows | Format-Table -AutoSize
+    }
+    else {
+        $Rows | Format-List
+    }
+}
+
+function Test-Folder {
+    <#
+    .SYNOPSIS
+        Normalizes and validates a folder path.
+    .DESCRIPTION
+        Returns the current directory when input is blank, trims trailing separators,
+        and throws if the path is invalid.
+    .PARAMETER Path
+        Folder path to validate (optional).
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return (Get-Location).ProviderPath
+    }
+
+    $normalized = $Path.TrimEnd('\')
+    try {
+        return [System.IO.Path]::GetFullPath($normalized)
+    }
+    catch {
+        throw "Invalid folder path '$Path'. $($_.Exception.Message)"
+    }
 }

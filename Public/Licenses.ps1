@@ -149,6 +149,8 @@ function Export-MsolAccountSku {
                 Write-NCMessage (" - {0} ({1} occurrence{2})" -f $sku, $count, $(if ($count -ne 1) { 's' } else { '' })) -Level WARNING
             }
         }
+
+        Write-Progress -Activity "Export complete" -Completed
     }
     finally {
         Restore-ProgressAndInfoPreferences

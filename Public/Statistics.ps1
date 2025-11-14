@@ -140,6 +140,8 @@ function Export-MboxStatistics {
         else {
             $statsBuffer
         }
+
+        Write-Progress -Activity "Export complete" -Completed
     }
     finally {
         Restore-ProgressAndInfoPreferences

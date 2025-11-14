@@ -15,7 +15,9 @@
         'Disconnect-Nebula',
         'Export-MboxStatistics',
         'Export-MsolAccountSku',
+        'Get-NebulaConfig',
         'Get-UserMsolAccountSku',
+        'Sync-NebulaConfig',
         'Update-LicenseCatalog'
     )
     CmdletsToExport      = @()
