@@ -13,16 +13,27 @@
         'Connect-EOL',
         'Connect-Nebula',
         'Disconnect-Nebula',
+        'Export-DistributionGroups',
+        'Export-DynamicDistributionGroups',
+        'Get-DynamicDistributionGroupFilter',
+        'Export-M365Group',
         'Export-MboxStatistics',
         'Export-MsolAccountSku',
         'Get-NebulaConfig',
+        'Get-RoleGroupsMembers',
+        'Get-UserGroups',
         'Get-UserMsolAccountSku',
         'Sync-NebulaConfig',
         'Update-LicenseCatalog'
     )
     CmdletsToExport      = @()
     VariablesToExport    = @()
-    AliasesToExport      = @('Leave-Nebula')
+    AliasesToExport      = @(
+        'Export-DG',
+        'Export-DDG',
+        'Get-DDGRecipientFilter',
+        'Leave-Nebula'
+    )
 
     PrivateData          = @{
         PSData = @{
