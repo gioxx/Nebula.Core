@@ -809,43 +809,13 @@ function Get-UserGroups {
             }
         }
 
-        if ([string]::IsNullOrWhiteSpace($UserPrincipalName)) {
-            return
-        }
-
-        try {
-            $recipient = Get-Recipient -Identity $UserPrincipalName -ErrorAction Stop
-        }
-        catch {
-            Write-NCMessage "Recipient not available or not found ($UserPrincipalName). $($_.Exception.Message)" -Level ERROR
-            return
-        }
-
-        if (-not $recipient) {
-            Write-NCMessage "Recipient not available or not found ($UserPrincipalName)." -Level ERROR
-            return
-        }
-
-        $resolvedPrincipal = $recipient.PrimarySmtpAddress
+        $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $UserPrincipalName
         if (-not $resolvedPrincipal) {
-            $resolvedPrincipal = $recipient.WindowsLiveID
+            Write-NCMessage "Unable to resolve user recipient for $UserPrincipalName" -Level ERROR
+            return
         }
-
-        if ($UserPrincipalName -notmatch '@') {
-            $primaryMatches = @($recipient.EmailAddresses | Where-Object { $_ -clike 'SMTP:*' })
-            if ($primaryMatches.Count -eq 0) {
-                Write-NCMessage "Complete e-mail address not specified and no primary SMTP address found for $UserPrincipalName." -Level WARNING
-                return
-            }
-
-            if ($primaryMatches.Count -gt 1) {
-                Write-NCMessage "Multiple SMTP addresses detected for $UserPrincipalName. Using the first match ($($primaryMatches[0].Substring(5)))." -Level WARNING
-            }
-
-            $resolvedPrincipal = $primaryMatches[0].Substring(5)
-        }
-
-        $recipientType = $recipient.RecipientTypeDetails
+        
+        $recipientType = (Get-Recipient -Identity $resolvedPrincipal).RecipientTypeDetails
         $memberships = @()
 
         switch ($recipientType) {
@@ -914,7 +884,7 @@ function Get-UserGroups {
             }
         }
 
-        Write-NCMessage "$recipientType ($resolvedPrincipal) - Groups found: $($memberships.Count)" -Level INFO
+        Write-NCMessage "`n$recipientType ($resolvedPrincipal) - Groups found: $($memberships.Count)" -Level VERBOSE
 
         if (-not $memberships -or $memberships.Count -eq 0) {
             Write-NCMessage "No groups found for $resolvedPrincipal." -Level WARNING

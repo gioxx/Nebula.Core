@@ -175,7 +175,7 @@ function Get-UserMsolAccountSku {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "User Principal Name (e.g. user@contoso.com)")]
         [string] $UserPrincipalName,
-        [switch]$ForceLicenseCatalogRefresh
+        [switch] $ForceLicenseCatalogRefresh
     )
 
     Set-ProgressAndInfoPreferences
@@ -197,6 +197,14 @@ function Get-UserMsolAccountSku {
         $licenseLookup = $licenseCatalog.Lookup
         $customLookup = $licenseCatalog.CustomLookup
         $maxAttempts = 3
+
+        $resolvedRecipient = Find-UserRecipient -UserPrincipalName $UserPrincipalName
+        if (-not $resolvedRecipient) {
+            Write-NCMessage "Unable to resolve user recipient for $UserPrincipalName" -Level ERROR
+            return
+        } else {
+            $UserPrincipalName = $resolvedRecipient
+        }
 
         try {
             $User = Get-MgUser -UserId $UserPrincipalName -ErrorAction Stop

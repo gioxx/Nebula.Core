@@ -10,20 +10,39 @@
     CompatiblePSEditions = @('Desktop', 'Core')
     RequiredAssemblies   = @()
     FunctionsToExport    = @(
+        'Add-MboxAlias',
+        'Add-MboxPermission',
         'Connect-EOL',
         'Connect-Nebula',
         'Disconnect-Nebula',
         'Export-DistributionGroups',
         'Export-DynamicDistributionGroups',
-        'Get-DynamicDistributionGroupFilter',
         'Export-M365Group',
+        'Export-MboxAlias',
+        'Export-MboxPermission',
         'Export-MboxStatistics',
         'Export-MsolAccountSku',
+        'Export-QuarantineEml',
+        'Get-DynamicDistributionGroupFilter',
+        'Get-MboxAlias',
+        'Get-MboxPermission',
         'Get-NebulaConfig',
+        'Get-QuarantineFrom',
+        'Get-QuarantineFromDomain',
+        'Get-QuarantineToRelease',
         'Get-RoleGroupsMembers',
         'Get-UserGroups',
         'Get-UserMsolAccountSku',
+        'New-SharedMailbox',
+        'Remove-MboxAlias',
+        'Remove-MboxPermission',
+        'Set-MboxLanguage',
+        'Set-MboxRulesQuota',
+        'Set-SharedMboxCopyForSent',
         'Sync-NebulaConfig',
+        'Test-SharedMailboxCompliance',
+        'Unlock-QuarantineFrom',
+        'Unlock-QuarantineMessageId',
         'Update-LicenseCatalog'
     )
     CmdletsToExport      = @()
@@ -32,7 +51,8 @@
         'Export-DG',
         'Export-DDG',
         'Get-DDGRecipientFilter',
-        'Leave-Nebula'
+        'Leave-Nebula',
+        'rqf'
     )
 
     PrivateData          = @{

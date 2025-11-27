@@ -3,6 +3,36 @@ using namespace System.Management.Automation
 
 # Nebula.Core: (Private) Module's Utilities =========================================================================================================
 
+function Format-OutputString {
+    <#
+    .SYNOPSIS
+        Truncates a string to a maximum length.
+    .DESCRIPTION
+        Returns the original value when shorter than the specified length; otherwise appends ellipsis.
+    .PARAMETER Value
+        String to trim.
+    .PARAMETER MaxLength
+        Maximum allowed length (defaults to module configuration).
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Value,
+        [ValidateRange(3, 260)]
+        [int]$MaxLength = $NCVars.MaxFieldLength
+    )
+
+    if ([string]::IsNullOrEmpty($Value)) {
+        return $Value
+    }
+
+    if ($Value.Length -le $MaxLength) {
+        return $Value
+    }
+
+    $length = [Math]::Max(3, $MaxLength)
+    return $Value.Substring(0, $length - 3) + '...'
+}
+
 function Invoke-NCRetry {
     <#
     .SYNOPSIS
