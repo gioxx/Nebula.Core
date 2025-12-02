@@ -62,7 +62,7 @@
 
     PrivateData          = @{
         PSData = @{
-            Tags         = @('Microsoft', 'PowerShell', 'Microsoft 365', 'Office 365', 'Exchange', 'Microsoft Entra')
+            Tags         = @('Microsoft', 'PowerShell', 'Microsoft365', 'Office365', 'Exchange', 'Entra')
             ProjectUri   = 'https://github.com/gioxx/Nebula.Core'
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/Assets/icon.png'
