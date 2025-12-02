@@ -23,6 +23,8 @@
         'Export-MboxStatistics',
         'Export-MsolAccountSku',
         'Export-QuarantineEml',
+        'Format-MessageIDsFromClipboard',
+        'Format-SortedEmailsFromClipboard',
         'Get-DynamicDistributionGroupFilter',
         'Get-MboxAlias',
         'Get-MboxPermission',
@@ -48,10 +50,13 @@
     CmdletsToExport      = @()
     VariablesToExport    = @()
     AliasesToExport      = @(
-        'Export-DG',
         'Export-DDG',
+        'Export-DG',
+        'fse',
         'Get-DDGRecipientFilter',
         'Leave-Nebula',
+        'mids',
+        'qrel',
         'rqf'
     )
 

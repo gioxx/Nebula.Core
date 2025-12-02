@@ -226,7 +226,7 @@ function Get-UserMsolAccountSku {
         }
         else { '' }
 
-        Write-NCMessage ("`nProcessing user: {0} <{1}>{2}`n" -f $User.DisplayName, $User.UserPrincipalName, $catalogInfo) -Level VERBOSE
+        Write-NCMessage ("`nProcessing user: {0} <{1}>{2}`n" -f $User.DisplayName, $User.UserPrincipalName, $catalogInfo) -Level SUCCESS
 
         try {
             $GraphLicense = Invoke-NCRetry -Action {
@@ -249,7 +249,7 @@ function Get-UserMsolAccountSku {
                 $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $skuPart -FallbackLookup $customLookup -MatchSource ([ref]$matchSource)
                 if ($display) {
                     $suffix = if ($matchSource -and $matchSource -ne 'Primary') { ' (custom)' } else { '' }
-                    Write-NCMessage ("  - {0}{2} ({1})" -f $display, $skuId, $suffix) -Level SUCCESS
+                    Write-NCMessage ("  - {0}{2} ({1})" -f $display, $skuId, $suffix) -Level INFO
                 }
                 else {
                     Write-Verbose ("  - Unknown license: {0} ({1})" -f $skuPart, $skuId)
@@ -262,6 +262,7 @@ function Get-UserMsolAccountSku {
         }
     }
     finally {
+        Add-EmptyLine
         Restore-ProgressAndInfoPreferences
     }
 }

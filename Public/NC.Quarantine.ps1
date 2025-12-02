@@ -687,3 +687,5 @@ function Unlock-QuarantineMessageId {
         $results
     }
 }
+
+Set-Alias -Name qrel -Value Unlock-QuarantineMessageId -Description "Releases quarantined messages by MessageId (function)"

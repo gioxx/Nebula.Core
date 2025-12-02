@@ -15,7 +15,28 @@ Set-Variable -Name InfoColorMap -Scope Script -Force -Value ([ordered]@{
     VERBOSE = @{ Foreground = [ConsoleColor]::DarkGray; Background = $null }
 })
 
-Function Set-InfoColorMap {
+function Add-EmptyLine {
+    <#
+    .SYNOPSIS
+        Inserts an empty row on console.
+    .DESCRIPTION
+        Shows an empty row on the console for better readability.
+    .EXAMPLE
+        Add-EmptyLine
+    #>
+    [CmdletBinding()]
+    param(
+    )
+
+    try {
+        Write-Output ""
+    }
+    catch {
+        # Ignore
+    }
+}
+
+function Set-InfoColorMap {
     <#
     .SYNOPSIS
         Overrides one or more level color mappings.
@@ -48,7 +69,7 @@ Function Set-InfoColorMap {
     }
 }
 
-Function Write-NCMessage {
+function Write-NCMessage {
     <#
     .SYNOPSIS
         Writes messages to the Information stream with color and level tagging.

@@ -864,6 +864,7 @@ function Get-UserGroups {
                 }
             }
             default {
+                $recipient = Get-Mailbox -Identity $resolvedPrincipal -ErrorAction Stop # To get WindowsLiveID when UPN differs / when Get-Recipient can't provide it
                 $userId = if ($recipient.WindowsLiveID) { $recipient.WindowsLiveID } else { $resolvedPrincipal }
 
                 try {

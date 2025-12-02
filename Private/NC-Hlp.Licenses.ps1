@@ -212,7 +212,7 @@ function Get-LicenseSourceData {
 
             $licenseItems | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $cacheFile -Encoding UTF8
             $source = 'Remote'
-            Write-NCMessage "License file downloaded and cached at $cacheFile." -Level SUCCESS
+            Write-NCMessage "License file downloaded and cached at $cacheFile." -Level VERBOSE
 
             if (-not $remoteCommitUtc) {
                 $remoteCommitUtc = $nowUtc
