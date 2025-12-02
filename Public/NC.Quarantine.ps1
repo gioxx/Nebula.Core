@@ -426,7 +426,7 @@ function Get-QuarantineToRelease {
             try {
                 $folder = Test-Folder -Path $OutputFolder
                 $csvPath = New-File (Join-Path -Path $folder -ChildPath "$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-QuarantineToRelease-Report.csv")
-                $items | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -DefaultLimiter $NCVars.CSV_DefaultLimiter
+                $items | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
                 Write-NCMessage ("CSV exported to {0}" -f $csvPath) -Level SUCCESS
             }
             catch {

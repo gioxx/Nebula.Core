@@ -114,10 +114,10 @@ function Export-MboxStatistics {
 
             if ($writeToCsv -and (($processedCount % $BatchSize) -eq 0)) {
                 if ($csvInitialized) {
-                    $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -DefaultLimiter $($NCVars.CSV_DefaultLimiter) -Append
+                    $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter) -Append
                 }
                 else {
-                    $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -DefaultLimiter $($NCVars.CSV_DefaultLimiter)
+                    $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter)
                     $csvInitialized = $true
                 }
                 Write-NCMessage "Processed $processedCount / $totalMailboxes mailboxes, flushed batch to CSV." -Level VERBOSE
@@ -128,10 +128,10 @@ function Export-MboxStatistics {
         if ($writeToCsv) {
             if ($statsBuffer.Count -gt 0) {
                 if ($csvInitialized) {
-                    $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -DefaultLimiter $($NCVars.CSV_DefaultLimiter) -Append
+                    $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter) -Append
                 }
                 else {
-                    $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -DefaultLimiter $($NCVars.CSV_DefaultLimiter)
+                    $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter)
                 }
             }
 

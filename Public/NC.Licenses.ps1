@@ -128,11 +128,11 @@ function Export-MsolAccountSku {
 
             if ($ProcessedCount % 50 -eq 0) {
                 Write-NCMessage "Processed $ProcessedCount out of $totalUsers, saving partial results ..." -Level VERBOSE
-                $arr_MsolAccountSku | Export-CSV $CSV -NoTypeInformation -DefaultLimiter $($NCVars.CSV_DefaultLimiter) -Encoding $($NCVars.CSV_Encoding) -Append
+                $arr_MsolAccountSku | Export-CSV $CSV -NoTypeInformation -Delimiter $($NCVars.CSV_DefaultLimiter) -Encoding $($NCVars.CSV_Encoding) -Append
             }
         }
 
-        $arr_MsolAccountSku | Export-CSV $CSV -NoTypeInformation -DefaultLimiter $($NCVars.CSV_DefaultLimiter) -Encoding $($NCVars.CSV_Encoding)
+        $arr_MsolAccountSku | Export-CSV $CSV -NoTypeInformation -Delimiter $($NCVars.CSV_DefaultLimiter) -Encoding $($NCVars.CSV_Encoding)
 
         if ($resolvedViaCustom.Count -gt 0) {
             Write-NCMessage "Licenses not found, but resolved via custom catalog:" -Level WARNING

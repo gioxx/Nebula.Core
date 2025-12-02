@@ -515,7 +515,7 @@ function Export-MboxAlias {
             if ($Csv) {
                 $folder = if ($script:ExportMboxAliasFolder) { $script:ExportMboxAliasFolder } else { Test-Folder $CsvFolder }
                 $csvPath = New-File "$folder\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-Alias-Report.csv"
-                $aliases | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -DefaultLimiter $NCVars.CSV_DefaultLimiter
+                $aliases | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
                 Write-NCMessage "Alias report exported to $csvPath" -Level SUCCESS
                 $csvPath
             }
@@ -598,7 +598,7 @@ function Export-MboxPermission {
         try {
             $folder = Test-Folder $CsvFolder
             $csvPath = New-File "$folder\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-MboxPermissions-Report.csv"
-            $permissions | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -DefaultLimiter $NCVars.CSV_DefaultLimiter
+            $permissions | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
             Write-NCMessage "Mailbox permissions exported to $csvPath" -Level SUCCESS
             $csvPath
         }

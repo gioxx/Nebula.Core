@@ -169,7 +169,7 @@ function Export-DistributionGroups {
             }
             elseif ($emitCsv) {
                 $csvPath = New-File("$($folder)\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-DistributionGroups-Report.csv")
-                $results | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -DefaultLimiter $($NCVars.CSV_DefaultLimiter)
+                $results | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter)
                 Write-NCMessage "Distribution group membership exported to $csvPath." -Level SUCCESS
             }
             else {
@@ -349,7 +349,7 @@ function Export-DynamicDistributionGroups {
             }
             elseif ($emitCsv) {
                 $csvPath = New-File("$($folder)\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-DynamicDistributionGroups-Report.csv")
-                $results | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -DefaultLimiter $($NCVars.CSV_DefaultLimiter)
+                $results | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter)
                 Write-NCMessage "Dynamic distribution group membership exported to $csvPath." -Level SUCCESS
             }
             else {
@@ -672,7 +672,7 @@ function Export-M365Group {
             }
             elseif ($emitCsv) {
                 $csvPath = New-File("$($folder)\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-UnifiedGroups-Report.csv")
-                $results | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -DefaultLimiter $($NCVars.CSV_DefaultLimiter)
+                $results | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter)
                 Write-NCMessage "Microsoft 365 group membership exported to $csvPath." -Level SUCCESS
             }
             else {
