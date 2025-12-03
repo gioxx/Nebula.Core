@@ -42,7 +42,7 @@ jobs:
             if (Test-Path $file) { Copy-Item -Path $file -Destination $moduleDir -Force }
           }
 
-          $foldersToInclude = @("Private", "Public", "Assets")
+          $foldersToInclude = @("Private", "Public")
           foreach ($folder in $foldersToInclude) {
             if (Test-Path $folder) { Copy-Item -Path $folder -Destination $moduleDir -Recurse -Force }
           }
