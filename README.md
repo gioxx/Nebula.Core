@@ -1,9 +1,6 @@
 # Nebula.Core
 
-Work in progress.
-
-> [!WARNING]  
-> This module is not yet available on PowerShell Gallery.
+**Nebula.Core** is a PowerShell module that wraps common Microsoft 365 and Exchange Online admin tasks with safer defaults, clear logging, and CSV-friendly outputs. Use it to connect, inspect, export, and remediate faster.
 
 ![PowerShell Gallery](https://img.shields.io/powershellgallery/v/Nebula.Core?label=PowerShell%20Gallery)
 ![Downloads](https://img.shields.io/powershellgallery/dt/Nebula.Core?color=blue)
@@ -17,6 +14,12 @@ Install from PowerShell Gallery:
 ```powershell
 Install-Module -Name Nebula.Core -Scope CurrentUser
 ```
+
+---
+
+## 🚀 Usage
+
+All documentation for using the module is available at **[kb.gioxx.org/docs/Nebula/Core](https://kb.gioxx.org/docs/Nebula/Core/intro)**.
 
 ---
 
