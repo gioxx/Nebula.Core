@@ -1,4 +1,6 @@
 name: Update license file
+permissions:
+  contents: write
 
 on:
   schedule:
