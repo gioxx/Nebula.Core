@@ -1111,3 +1111,88 @@ function Set-SharedMboxCopyForSent {
         }
     }
 }
+
+function Get-UserLastSeen {
+    <#
+    .SYNOPSIS
+        Returns the most recent activity timestamps for a user mailbox.
+    .DESCRIPTION
+        Combines Exchange Online LastUserActionTime with Entra ID (Microsoft Graph) interactive sign-in logs.
+        Falls back to mailbox activity if Graph sign-in logs are unavailable or permissions are missing.
+    .PARAMETER User
+        Mailbox identity (UPN, SMTP address, alias). Accepts pipeline input.
+    .EXAMPLE
+        Get-UserLastSeen -User alice@contoso.com
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('Identity', 'UserPrincipalName')]
+        [string]$User
+    )
+
+    begin { Set-ProgressAndInfoPreferences }
+
+    process {
+        if (-not (Test-EOLConnection)) {
+            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            return
+        }
+
+        try {
+            $mailbox = Get-Mailbox -Identity $User -ErrorAction Stop
+        }
+        catch {
+            Write-NCMessage "Mailbox '$User' not found or not accessible. $($_.Exception.Message)" -Level ERROR
+            return
+        }
+
+        $mailboxIdentity = $mailbox.PrimarySmtpAddress
+        $lastMailboxAction = $null
+        $lastSignIn = $null
+
+        $stats = Get-MailboxStatisticsSafe -Identity $mailboxIdentity
+        if ($stats) {
+            $lastMailboxAction = $stats.LastUserActionTime
+        }
+
+        $graphReady = Test-MgGraphConnection -Scopes @('AuditLog.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        if ($graphReady) {
+            try {
+                $signIns = Get-MgAuditLogSignIn -Filter "userId eq '$($mailbox.ExternalDirectoryObjectId)'" -All:$true -Top 20 -ErrorAction Stop
+                if ($signIns) {
+                    $lastSignIn = $signIns | Sort-Object -Property CreatedDateTime -Descending | Select-Object -First 1 -ExpandProperty CreatedDateTime
+                }
+            }
+            catch {
+                Write-NCMessage ("Unable to retrieve sign-in logs for {0}. {1}" -f $mailboxIdentity, $_.Exception.Message) -Level WARNING
+            }
+        }
+        else {
+            Write-NCMessage "Microsoft Graph AuditLog.Read.All is not available. Returning mailbox activity only." -Level WARNING
+        }
+
+        $sources = @()
+        if ($lastMailboxAction) { $sources += 'MailboxAction' }
+        if ($lastSignIn) { $sources += 'SignInLog' }
+
+        $lastSeen = $null
+        if ($sources.Count -gt 0) {
+            $timestamps = @()
+            if ($lastMailboxAction) { $timestamps += $lastMailboxAction }
+            if ($lastSignIn) { $timestamps += $lastSignIn }
+            $lastSeen = $timestamps | Sort-Object -Descending | Select-Object -First 1
+        }
+
+        [pscustomobject][ordered]@{
+            DisplayName           = $mailbox.DisplayName
+            PrimarySmtpAddress    = $mailboxIdentity
+            LastUserActionTime    = $lastMailboxAction
+            LastInteractiveSignIn = if ($lastSignIn) { [datetime]$lastSignIn } else { $null }
+            LastSeen              = if ($lastSeen) { [datetime]$lastSeen } else { $null }
+            Source                = if ($sources.Count -gt 0) { $sources -join ',' } else { 'None' }
+        }
+    }
+
+    end { Restore-ProgressAndInfoPreferences }
+}

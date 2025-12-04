@@ -327,9 +327,9 @@ function Get-LicenseCatalog {
         Source              = $primaryData.Source
         CachePath           = $primaryData.CachePath
         CustomLookup        = $customLookup
-        CustomLastCommitUtc = $customData?.LastCommitUtc
-        CustomSource        = $customData?.Source
-        CustomCachePath     = $customData?.CachePath
+        CustomLastCommitUtc = if ($customData -and $customData.PSObject.Properties['LastCommitUtc']) { $customData.LastCommitUtc } else { $null }
+        CustomSource        = if ($customData -and $customData.PSObject.Properties['Source']) { $customData.Source } else { $null }
+        CustomCachePath     = if ($customData -and $customData.PSObject.Properties['CachePath']) { $customData.CachePath } else { $null }
     }
 }
 
