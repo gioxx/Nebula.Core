@@ -75,6 +75,10 @@
 - Added Move-MsolAccountSku to transfer licenses from one user to another.
 - Added Add-MsolAccountSku to assign licenses by friendly name, SKU part number, or SKU ID.
 - Added Get-UserLastSeen to retrieve the last sign-in date for users.
+- Added UsageLocation default setting (configurable in settings.psd1) and automatic UsageLocation update in Add-MsolAccountSku before license assignment; improved retry error logging.
+- Fixed license cache metadata parsing (UTC, invariant) to respect LicenseCacheDays and avoid unnecessary downloads.
+- Get-TenantMsolAccountSku -AsTable now trims long names to MaxFieldLength and shows key columns only.
+- Unlock-QuarantineMessageId now accepts MessageId or Identity; Format-MessageIDsFromClipboard (mids) works with quarantine identities, trims existing quotes, and releases via -Identity.
 '@
         }
     }
