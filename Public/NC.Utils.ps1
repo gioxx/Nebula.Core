@@ -6,13 +6,12 @@ using namespace System.Management.Automation
 function Format-MessageIDsFromClipboard {
     <#
     .SYNOPSIS
-        Formats MessageId values from the clipboard.
+        Formats quarantine identities from the clipboard.
     .DESCRIPTION
-        Reads MessageId values (one per line) from the clipboard, normalizes them for quarantine
-        operations, copies the formatted list back to the clipboard, and optionally releases the
-        messages immediately.
+        Reads quarantine identities (one per line) from the clipboard, deduplicates them, copies the
+        formatted list back to the clipboard, and optionally releases the messages immediately.
     .PARAMETER NoRelease
-        Skip the automatic release of the MessageId entries.
+        Skip the automatic release of the identity entries.
     .PARAMETER PassThru
         Emit the formatted, comma-separated string to the pipeline in addition to copying it to
         the clipboard.
@@ -27,25 +26,25 @@ function Format-MessageIDsFromClipboard {
 
     $clipboard = Get-Clipboard
     if ([string]::IsNullOrWhiteSpace($clipboard)) {
-        Write-NCMessage "Clipboard is empty. Copy MessageId values first." -Level WARNING
+        Write-NCMessage "Clipboard is empty. Copy quarantine identities first." -Level WARNING
         return
     }
 
-    $ids = $clipboard -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    $ids = $clipboard -split "`r?`n" | ForEach-Object { $_.Trim().Trim('"').Trim("'") } | Where-Object { $_ }
     if (-not $ids -or $ids.Count -eq 0) {
-        Write-NCMessage "No MessageId values found in clipboard." -Level WARNING
+        Write-NCMessage "No quarantine identities found in clipboard." -Level WARNING
         return
     }
 
-    $normalized = $ids | ForEach-Object { ConvertTo-QuarantineMessageId -MessageId $_ } | Select-Object -Unique
+    $normalized = $ids | Select-Object -Unique
     $quoted = $normalized | ForEach-Object { "`"$($_)`"" }
     $output = $quoted -join ", "
 
     $output | Set-Clipboard
-    Write-NCMessage ("Copied {0} MessageId value(s) to clipboard." -f $normalized.Count) -Level INFO
+    Write-NCMessage ("Copied {0} quarantine identity value(s) to clipboard." -f $normalized.Count) -Level INFO
 
-    if (-not $NoRelease.IsPresent -and $PSCmdlet.ShouldProcess("quarantine", "Release messages by MessageId")) {
-        Unlock-QuarantineMessageId -MessageId $normalized
+    if (-not $NoRelease.IsPresent -and $PSCmdlet.ShouldProcess("quarantine", "Release messages by Identity")) {
+        Unlock-QuarantineMessageId -Identity $normalized
     }
 
     if ($PassThru.IsPresent) { $output }

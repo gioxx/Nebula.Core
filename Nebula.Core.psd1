@@ -1,6 +1,6 @@
 @{
     RootModule           = 'Nebula.Core.psm1'
-    ModuleVersion        = '1.0.0'
+    ModuleVersion        = '1.1.0'
     GUID                 = '07acc3c0-14dc-4c1d-a1d0-6140e83c2a41'
     Author               = 'Giovanni Solone'
     Description          = 'A PowerShell module that go beyond your workstations. It will make your Microsoft 365 life easier!'
@@ -12,6 +12,7 @@
     FunctionsToExport    = @(
         'Add-MboxAlias',
         'Add-MboxPermission',
+        'Add-MsolAccountSku',
         'Connect-EOL',
         'Connect-Nebula',
         'Disconnect-Nebula',
@@ -33,8 +34,11 @@
         'Get-QuarantineFromDomain',
         'Get-QuarantineToRelease',
         'Get-RoleGroupsMembers',
+        'Get-TenantMsolAccountSku',
+        'Get-UserLastSeen',
         'Get-UserGroups',
         'Get-UserMsolAccountSku',
+        'Move-MsolAccountSku',
         'New-SharedMailbox',
         'Remove-MboxAlias',
         'Remove-MboxPermission',
@@ -67,7 +71,14 @@
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/Assets/icon.png'
             ReleaseNotes = @'
-- Hello World :-) This is the first public version of the module!
+- Added Get-TenantMsolAccountSku to list tenant license availability with resolved names and counts.
+- Added Move-MsolAccountSku to transfer licenses from one user to another.
+- Added Add-MsolAccountSku to assign licenses by friendly name, SKU part number, or SKU ID.
+- Added Get-UserLastSeen to retrieve the last sign-in date for users.
+- Added UsageLocation default setting (configurable in settings.psd1) and automatic UsageLocation update in Add-MsolAccountSku before license assignment; improved retry error logging.
+- Fixed license cache metadata parsing (UTC, invariant) to respect LicenseCacheDays and avoid unnecessary downloads.
+- Get-TenantMsolAccountSku -AsTable now trims long names to MaxFieldLength and shows key columns only.
+- Unlock-QuarantineMessageId now accepts MessageId or Identity; Format-MessageIDsFromClipboard (mids) works with quarantine identities, trims existing quotes, and releases via -Identity.
 '@
         }
     }
