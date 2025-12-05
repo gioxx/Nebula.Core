@@ -367,7 +367,11 @@ function Get-TenantMsolAccountSku {
             $sorted | Out-GridView -Title "M365 Tenant Licenses"
         }
         elseif ($AsTable.IsPresent) {
-            Show-Table -Rows $sorted -AsTable
+            $limited = $sorted | Select-Object @{
+                    Name       = 'Name'
+                    Expression = { Format-OutputString -Value $_.Name -MaxLength $NCVars.MaxFieldLength }
+                }, SkuPartNumber, Total, Consumed, Available
+            Show-Table -Rows $limited -AsTable
         }
         else {
             $sorted
@@ -605,6 +609,24 @@ function Add-MsolAccountSku {
             return
         }
 
+        $defaultUsageLocation = if (($NCVars -is [System.Collections.IDictionary]) -and $NCVars.Contains('UsageLocation') -and $NCVars.UsageLocation) {
+            [string]$NCVars.UsageLocation
+        }
+        else { 'US' }
+
+        if ([string]::IsNullOrWhiteSpace($user.UsageLocation)) {
+            $targetUsage = $defaultUsageLocation
+            try {
+                Update-MgUser -UserId $user.Id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
+                $user.UsageLocation = $targetUsage
+                Write-NCMessage "Usage location set to $targetUsage for $($user.UserPrincipalName)." -Level VERBOSE
+            }
+            catch {
+                Write-NCMessage "Unable to set usage location ($targetUsage) for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
+                return
+            }
+        }
+
         try {
             $licenseCatalog = Get-LicenseCatalog -IncludeMetadata -ForceRefresh:$ForceLicenseCatalogRefresh.IsPresent
         }
@@ -723,7 +745,7 @@ function Add-MsolAccountSku {
                 Set-MgUserLicense -UserId $user.Id -AddLicenses $addLicenses -RemoveLicenses @() -ErrorAction Stop
             } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "assign licenses to $($user.UserPrincipalName)" -OnError {
                 param($attempt, $max, $err)
-                Write-NCMessage "Failed to assign licenses to $($user.UserPrincipalName), attempt $attempt of $max." -Level ERROR
+                Write-NCMessage ("Failed to assign licenses to {0}, attempt {1} of {2}. {3}" -f $user.UserPrincipalName, $attempt, $max, $err.Exception.Message) -Level ERROR
             } | Out-Null
             Write-NCMessage ("Assigned license(s) to {0}: {1}" -f $user.UserPrincipalName, (($resolved | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', ')) -Level SUCCESS
         }

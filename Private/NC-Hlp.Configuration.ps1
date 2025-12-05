@@ -62,6 +62,7 @@ if (-not $script:NC_Defaults) {
         LicenseCacheDays        = 7
         LicenseCacheDirectory   = (Join-Path $env:USERPROFILE '.NebulaCore\Cache')
         MaxFieldLength          = 35
+        UsageLocation           = 'US'
         UserConfigRoot          = (Join-Path $env:USERPROFILE '.NebulaCore')
     }
 }

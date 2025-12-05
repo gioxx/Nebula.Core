@@ -609,22 +609,26 @@ Set-Alias -Name rqf -Value Unlock-QuarantineFrom -Description "Release Quarantin
 function Unlock-QuarantineMessageId {
     <#
     .SYNOPSIS
-        Releases quarantined messages by MessageId.
+        Releases quarantined messages by MessageId or Identity.
     .DESCRIPTION
-        Accepts MessageId values (with or without angle brackets), releases the messages to all recipients,
+        Accepts MessageId values (with or without angle brackets) or quarantine Identity strings, releases the messages to all recipients,
         and returns the release status.
     .PARAMETER MessageId
         One or more MessageId values. Accepts pipeline input.
+    .PARAMETER Identity
+        One or more quarantine Identity values (e.g., GUID\GUID). Accepts pipeline input.
     .PARAMETER ReportFalsePositive
         Also report the released messages as false positives.
     .EXAMPLE
         Unlock-QuarantineMessageId -MessageId CAH_w85uSio_cz4HsFxJAGQDd-kzxGijLaMagZU95m3A1G8hWBA@mail.contoso.com
     #>
-    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'MessageId')]
     param(
-        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'MessageId')]
         [Alias('Id')]
         [string[]]$MessageId,
+        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'Identity')]
+        [string[]]$Identity,
         [switch]$ReportFalsePositive
     )
 
@@ -639,44 +643,58 @@ function Unlock-QuarantineMessageId {
             return
         }
 
-        foreach ($id in $MessageId) {
-            $normalizedId = ConvertTo-QuarantineMessageId -MessageId $id
-
-            try {
-                $messages = Get-QuarantineMessage -MessageId $normalizedId -ErrorAction Stop | Where-Object { $_.ReleaseStatus -ne "Released" -and $_.QuarantinedUser }
-            }
-            catch {
-                Write-NCMessage "Unable to retrieve quarantined message '$normalizedId'. $($_.Exception.Message)" -Level ERROR
-                continue
-            }
-
-            if (-not $messages -or $messages.Count -eq 0) {
-                Write-NCMessage "No quarantined messages to release with id $normalizedId (already released or not found yet)." -Level WARNING
-                continue
-            }
-
-            foreach ($msg in $messages) {
-                if ($PSCmdlet.ShouldProcess($msg.Identity, "Release quarantined message")) {
+        $targets = switch ($PSCmdlet.ParameterSetName) {
+            'Identity' {
+                foreach ($id in $Identity) {
+                    if ([string]::IsNullOrWhiteSpace($id)) { continue }
                     try {
-                        $releaseParams = @{
-                            Identity            = $msg.Identity
-                            ReleaseToAll        = $true
-                            Confirm             = $false
-                            ReportFalsePositive = $ReportFalsePositive.IsPresent
-                        }
-                        Release-QuarantineMessage @releaseParams | Out-Null
-                        $details = Get-QuarantineMessage -Identity $msg.Identity
-                        $results.Add([pscustomobject]@{
-                                Subject       = Format-OutputString -Value $details.Subject 40
-                                SenderAddress = $details.SenderAddress
-                                ReceivedTime  = $details.ReceivedTime
-                                Released      = $details.Released
-                                ReleasedUser  = $details.ReleasedUser
-                            }) | Out-Null
+                        Get-QuarantineMessage -Identity $id -ErrorAction Stop
                     }
                     catch {
-                        Write-NCMessage "Unable to release message '$($msg.Identity)'. $($_.Exception.Message)" -Level ERROR
+                        Write-NCMessage "Unable to retrieve quarantined message '$id'. $($_.Exception.Message)" -Level ERROR
+                        continue
                     }
+                }
+            }
+            default {
+                foreach ($id in $MessageId) {
+                    if ([string]::IsNullOrWhiteSpace($id)) { continue }
+                    $normalizedId = ConvertTo-QuarantineMessageId -MessageId $id
+                    try {
+                        Get-QuarantineMessage -MessageId $normalizedId -ErrorAction Stop | Where-Object { $_.ReleaseStatus -ne "Released" -and $_.QuarantinedUser }
+                    }
+                    catch {
+                        Write-NCMessage "Unable to retrieve quarantined message '$normalizedId'. $($_.Exception.Message)" -Level ERROR
+                        continue
+                    }
+                }
+            }
+        }
+
+        foreach ($msg in $targets) {
+            if (-not $msg) { continue }
+            if ($msg.ReleaseStatus -eq "Released") { continue }
+
+            if ($PSCmdlet.ShouldProcess($msg.Identity, "Release quarantined message")) {
+                try {
+                    $releaseParams = @{
+                        Identity            = $msg.Identity
+                        ReleaseToAll        = $true
+                        Confirm             = $false
+                        ReportFalsePositive = $ReportFalsePositive.IsPresent
+                    }
+                    Release-QuarantineMessage @releaseParams | Out-Null
+                    $details = Get-QuarantineMessage -Identity $msg.Identity
+                    $results.Add([pscustomobject]@{
+                            Subject       = Format-OutputString -Value $details.Subject 40
+                            SenderAddress = $details.SenderAddress
+                            ReceivedTime  = $details.ReceivedTime
+                            Released      = $details.Released
+                            ReleasedUser  = $details.ReleasedUser
+                        }) | Out-Null
+                }
+                catch {
+                    Write-NCMessage "Unable to release message '$($msg.Identity)'. $($_.Exception.Message)" -Level ERROR
                 }
             }
         }

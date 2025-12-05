@@ -76,7 +76,18 @@ function Find-UserRecipient {
         $recipient = Get-Recipient -Identity $UserPrincipalName -ErrorAction Stop
     }
     catch {
-        Write-NCMessage "Recipient not available or not found ($UserPrincipalName). $($_.Exception.Message)" -Level ERROR
+        # If no Exchange recipient exists yet (e.g., user without mailbox), fall back to Graph user info
+        try {
+            $user = Get-MgUser -UserId $UserPrincipalName -ErrorAction Stop
+            $fallbackUpn = if ($user.Mail) { $user.Mail } else { $user.UserPrincipalName }
+            if ($fallbackUpn) {
+                return $fallbackUpn
+            }
+        }
+        catch {
+            Write-NCMessage "Recipient not available or not found ($UserPrincipalName). $($_.Exception.Message)" -Level ERROR
+        }
+
         return
     }
 

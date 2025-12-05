@@ -138,7 +138,14 @@ function Get-LicenseSourceData {
     $tryParseUtc = {
         param($value)
         if (-not $value) { return $null }
-        try { return [DateTime]::Parse($value, $null, [System.Globalization.DateTimeStyles]::AdjustToUniversal) }
+        try {
+            return [DateTime]::ParseExact(
+                [string]$value,
+                'o',
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::AdjustToUniversal
+            )
+        }
         catch { return $null }
     }
 
@@ -149,6 +156,10 @@ function Get-LicenseSourceData {
     }
 
     $needDownload = $ForceRefresh.IsPresent -or -not (Test-Path -LiteralPath $cacheFile)
+    
+    Write-Verbose ("License cache state: ForceRefresh={0} CacheExists={1} LastCheckedUtc={2:o} CacheDays={3} TTL={4} NeedDownload={5} CurrentCommit={6:o} RemoteCommit={7:o}" -f `
+            $ForceRefresh.IsPresent, (Test-Path -LiteralPath $cacheFile), $lastCheckedUtc, $CacheDays, $ttl, $needDownload, $currentCommitUtc, $remoteCommitUtc)
+
     if (-not $needDownload -and $lastCheckedUtc) {
         if ($nowUtc - $lastCheckedUtc -ge $ttl) {
             $needDownload = $true
