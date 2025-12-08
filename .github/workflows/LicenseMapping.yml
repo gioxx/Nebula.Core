@@ -14,7 +14,7 @@ jobs:
     steps:
       # Checkout del repository
       - name: Checkout repository
-        uses: actions/checkout@v6.0.0
+        uses: actions/checkout@v6
 
       # Configurazione di Git per gestire CRLF e LF
       - name: Setup git to handle CRLF/LF differences
