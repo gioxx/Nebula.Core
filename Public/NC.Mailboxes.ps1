@@ -224,198 +224,6 @@ function Add-MboxPermission {
     end { Restore-ProgressAndInfoPreferences }
 }
 
-function Set-MboxLanguage {
-    <#
-    .SYNOPSIS
-        Sets mailbox regional language.
-    .DESCRIPTION
-        Changes language for a single mailbox or a list provided via CSV (EmailAddress column).
-    .PARAMETER SourceMailbox
-        Mailbox to update. Accepts pipeline input. Ignored when -Csv is provided.
-    .PARAMETER Language
-        Language tag (default it-IT).
-    .PARAMETER Csv
-        CSV file with EmailAddress column containing mailboxes to update.
-    .EXAMPLE
-        Set-MboxLanguage -SourceMailbox info@contoso.com -Language en-US
-    .EXAMPLE
-        Set-MboxLanguage -Csv C:\temp\mailboxes.csv -Language it-IT
-    #>
-    [CmdletBinding(DefaultParameterSetName = 'Mailbox')]
-    param(
-        [Parameter(ParameterSetName = 'Mailbox', Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Alias('Identity')]
-        [string[]]$SourceMailbox,
-        [Parameter()]
-        [string]$Language = 'it-IT',
-        [Parameter(ParameterSetName = 'Csv', Mandatory = $true)]
-        [string]$Csv
-    )
-
-    begin { Set-ProgressAndInfoPreferences }
-
-    process {
-        if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
-            return
-        }
-
-        $mailboxes = @()
-        if ($PSCmdlet.ParameterSetName -eq 'Csv') {
-            if (-not (Test-Path -LiteralPath $Csv)) {
-                Write-NCMessage "CSV file '$Csv' not found." -Level ERROR
-                return
-            }
-
-            try {
-                $mailboxes = (Import-Csv -LiteralPath $Csv) | Where-Object { $_.EmailAddress }
-            }
-            catch {
-                Write-NCMessage "Unable to read CSV file '$Csv'. $($_.Exception.Message)" -Level ERROR
-                return
-            }
-        }
-        else {
-            $mailboxes = $SourceMailbox
-        }
-
-        $counter = 0
-        $total = $mailboxes.Count
-        foreach ($entry in $mailboxes) {
-            $address = if ($entry.PSObject.Properties.Match('EmailAddress')) { $entry.EmailAddress } else { $entry }
-            if (-not $address) { continue }
-
-            $counter++
-            $percentComplete = (($counter / $total) * 100)
-            Write-Progress -Activity "Changing language to $Language" -Status "$counter of $total ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
-
-            try {
-                Set-MailboxRegionalConfiguration -Identity $address -LocalizeDefaultFolderName:$true -Language $Language -ErrorAction Stop
-                $result = Get-MailboxRegionalConfiguration -Identity $address -ErrorAction Stop
-                [pscustomobject]@{
-                    PrimarySmtpAddress = $result.Identity
-                    Language           = $result.Language
-                    TimeZone           = $result.TimeZone
-                }
-            }
-            catch {
-                Write-NCMessage "Failed to update mailbox '$address'. $($_.Exception.Message)" -Level ERROR
-            }
-        }
-    }
-
-    end {
-        Write-Progress -Activity "Changing mailbox language" -Completed
-        Restore-ProgressAndInfoPreferences
-    }
-}
-
-function Test-SharedMailboxCompliance {
-    <#
-    .SYNOPSIS
-        Reports shared mailbox sign-in activity and licensing.
-    .DESCRIPTION
-        Uses Microsoft Graph sign-in logs and assigned plans to flag shared mailboxes with successful sign-ins and missing licenses.
-    .PARAMETER GridView
-        Show the result in Out-GridView (default behaviour). Specify -GridView:$false to return objects.
-    .EXAMPLE
-        Test-SharedMailboxCompliance
-    #>
-    [CmdletBinding()]
-    param(
-        [switch]$GridView
-    )
-
-    begin { Set-ProgressAndInfoPreferences }
-
-    process {
-        if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
-            return
-        }
-
-        $graphConnected = Test-MgGraphConnection -Scopes @('AuditLog.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
-        if (-not $graphConnected) {
-            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
-            return
-        }
-
-        Write-NCMessage "`nFinding shared mailboxes..." -NoNewline
-        $mailboxes = Get-ExoMailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | Sort-Object DisplayName
-        if (-not $mailboxes) {
-            Write-NCMessage "No shared mailboxes found." -Level WARNING
-            return
-        }
-
-        Write-NCMessage (" {0} shared mailboxes found." -f $mailboxes.Count) -Level SUCCESS
-        $exoPlan1 = '9aaf7827-d63c-4b61-89c3-182f06f82e5c'
-        $exoPlan2 = 'efb87545-963c-4e0d-99df-69c6916d9eb0'
-        $report = [System.Collections.Generic.List[object]]::new()
-        $counter = 0
-
-        foreach ($mbx in $mailboxes) {
-            $counter++
-            $percentComplete = (($counter / $mailboxes.Count) * 100)
-            Write-Progress -Activity "Checking $($mbx.DisplayName)" -Status "$counter of $($mailboxes.Count) ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
-
-            $logsFound = $false
-            $exoPlan1Found = $false
-            $exoPlan2Found = $false
-
-            try {
-                $signIns = Get-MgAuditLogSignIn -Filter "userid eq '$($mbx.ExternalDirectoryObjectId)'" -All -Top 20 -ErrorAction Stop
-                if ($signIns) {
-                    foreach ($log in $signIns) {
-                        if ($log.Status.ErrorCode -eq 0) {
-                            $logsFound = $true
-                            break
-                        }
-                    }
-                }
-            }
-            catch {
-                Write-NCMessage ("Unable to retrieve sign-in records for {0}. {1}" -f $mbx.DisplayName, $_.Exception.Message) -Level ERROR
-            }
-
-            if ($logsFound) {
-                Write-NCMessage ("Sign-in records found for shared mailbox {0}" -f $mbx.DisplayName) -Level WARNING
-                try {
-                    $user = Get-MgUser -UserId $mbx.ExternalDirectoryObjectId -Property UserPrincipalName, assignedPlans
-                    $exoPlans = @($user.AssignedPlans | Where-Object { $_.Service -eq 'exchange' -and $_.capabilityStatus -eq 'Enabled' })
-                    $exoPlan1Found = $exoPlan1 -in $exoPlans.ServicePlanId
-                    $exoPlan2Found = $exoPlan2 -in $exoPlans.ServicePlanId
-                }
-                catch {
-                    Write-NCMessage ("Unable to read license info for {0}. {1}" -f $mbx.DisplayName, $_.Exception.Message) -Level ERROR
-                }
-            }
-            else {
-                Write-NCMessage ("No successful sign-in records found for shared mailbox {0}" -f $mbx.DisplayName) -Level SUCCESS
-            }
-
-            $report.Add([pscustomobject]@{
-                    DisplayName               = $mbx.DisplayName
-                    ExternalDirectoryObjectId = $mbx.ExternalDirectoryObjectId
-                    'Sign in Record Found'    = if ($logsFound) { 'Yes' } else { 'No' }
-                    'Exchange Online Plan 1'  = $exoPlan1Found
-                    'Exchange Online Plan 2'  = $exoPlan2Found
-                }) | Out-Null
-        }
-
-        Write-Progress -Activity "Checking shared mailboxes" -Completed
-
-        $showGrid = if ($PSBoundParameters.ContainsKey('GridView')) { $GridView.IsPresent } else { $true }
-        if ($showGrid) {
-            $report | Out-GridView -Title "Shared Mailbox Sign-In Records and Licensing Status"
-        }
-        else {
-            $report
-        }
-    }
-
-    end { Restore-ProgressAndInfoPreferences }
-}
-
 function Export-MboxAlias {
     <#
     .SYNOPSIS
@@ -793,6 +601,91 @@ function Get-MboxPermission {
     end { Restore-ProgressAndInfoPreferences }
 }
 
+function Get-UserLastSeen {
+    <#
+    .SYNOPSIS
+        Returns the most recent activity timestamps for a user mailbox.
+    .DESCRIPTION
+        Combines Exchange Online LastUserActionTime with Entra ID (Microsoft Graph) interactive sign-in logs.
+        Falls back to mailbox activity if Graph sign-in logs are unavailable or permissions are missing.
+    .PARAMETER User
+        Mailbox identity (UPN, SMTP address, alias). Accepts pipeline input.
+    .EXAMPLE
+        Get-UserLastSeen -User alice@contoso.com
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('Identity', 'UserPrincipalName')]
+        [string]$User
+    )
+
+    begin { Set-ProgressAndInfoPreferences }
+
+    process {
+        if (-not (Test-EOLConnection)) {
+            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            return
+        }
+
+        try {
+            $mailbox = Get-Mailbox -Identity $User -ErrorAction Stop
+        }
+        catch {
+            Write-NCMessage "Mailbox '$User' not found or not accessible. $($_.Exception.Message)" -Level ERROR
+            return
+        }
+
+        $mailboxIdentity = $mailbox.PrimarySmtpAddress
+        $lastMailboxAction = $null
+        $lastSignIn = $null
+
+        $stats = Get-MailboxStatisticsSafe -Identity $mailboxIdentity
+        if ($stats) {
+            $lastMailboxAction = $stats.LastUserActionTime
+        }
+
+        $graphReady = Test-MgGraphConnection -Scopes @('AuditLog.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        if ($graphReady) {
+            try {
+                $signIns = Get-MgAuditLogSignIn -Filter "userId eq '$($mailbox.ExternalDirectoryObjectId)'" -All:$true -Top 20 -ErrorAction Stop
+                if ($signIns) {
+                    $lastSignIn = $signIns | Sort-Object -Property CreatedDateTime -Descending | Select-Object -First 1 -ExpandProperty CreatedDateTime
+                }
+            }
+            catch {
+                Write-NCMessage ("Unable to retrieve sign-in logs for {0}. {1}" -f $mailboxIdentity, $_.Exception.Message) -Level WARNING
+            }
+        }
+        else {
+            Write-NCMessage "Microsoft Graph AuditLog.Read.All is not available. Returning mailbox activity only." -Level WARNING
+        }
+
+        $sources = @()
+        if ($lastMailboxAction) { $sources += 'MailboxAction' }
+        if ($lastSignIn) { $sources += 'SignInLog' }
+
+        $lastSeen = $null
+        if ($sources.Count -gt 0) {
+            $timestamps = @()
+            if ($lastMailboxAction) { $timestamps += $lastMailboxAction }
+            if ($lastSignIn) { $timestamps += $lastSignIn }
+            $lastSeen = $timestamps | Sort-Object -Descending | Select-Object -First 1
+        }
+
+        [pscustomobject][ordered]@{
+            DisplayName           = $mailbox.DisplayName
+            PrimarySmtpAddress    = $mailboxIdentity
+            LastUserActionTime    = $lastMailboxAction
+            LastInteractiveSignIn = if ($lastSignIn) { [datetime]$lastSignIn } else { $null }
+            LastSeen              = if ($lastSeen) { [datetime]$lastSeen } else { $null }
+            Source                = if ($sources.Count -gt 0) { $sources -join ',' } else { 'None' }
+        }
+    }
+
+    end { Restore-ProgressAndInfoPreferences }
+}
+
 function New-SharedMailbox {
     <#
     .SYNOPSIS
@@ -878,7 +771,7 @@ function Remove-MboxAlias {
             switch ($recipient.RecipientTypeDetails) {
                 'MailContact' { Set-MailContact -Identity $recipient.Identity -EmailAddresses @{ remove = $MailboxAlias } -ErrorAction Stop }
                 'MailUser' { Set-MailUser -Identity $recipient.Identity -EmailAddresses @{ remove = $MailboxAlias } -ErrorAction Stop }
-                {($_ -eq 'MailUniversalDistributionGroup') -or ($_ -eq 'DynamicDistributionGroup') -or ($_ -eq 'MailUniversalSecurityGroup')} {
+                { ($_ -eq 'MailUniversalDistributionGroup') -or ($_ -eq 'DynamicDistributionGroup') -or ($_ -eq 'MailUniversalSecurityGroup') } {
                     Set-DistributionGroup -Identity $recipient.Identity -EmailAddresses @{ remove = $MailboxAlias } -ErrorAction Stop
                 }
                 default { Set-Mailbox -Identity $recipient.Identity -EmailAddresses @{ remove = $MailboxAlias } -ErrorAction Stop }
@@ -976,6 +869,92 @@ function Remove-MboxPermission {
     }
 
     end { Restore-ProgressAndInfoPreferences }
+}
+
+function Set-MboxLanguage {
+    <#
+    .SYNOPSIS
+        Sets mailbox regional language.
+    .DESCRIPTION
+        Changes language for a single mailbox or a list provided via CSV (EmailAddress column).
+    .PARAMETER SourceMailbox
+        Mailbox to update. Accepts pipeline input. Ignored when -Csv is provided.
+    .PARAMETER Language
+        Language tag (default it-IT).
+    .PARAMETER Csv
+        CSV file with EmailAddress column containing mailboxes to update.
+    .EXAMPLE
+        Set-MboxLanguage -SourceMailbox info@contoso.com -Language en-US
+    .EXAMPLE
+        Set-MboxLanguage -Csv C:\temp\mailboxes.csv -Language it-IT
+    #>
+    [CmdletBinding(DefaultParameterSetName = 'Mailbox')]
+    param(
+        [Parameter(ParameterSetName = 'Mailbox', Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('Identity')]
+        [string[]]$SourceMailbox,
+        [Parameter()]
+        [string]$Language = 'it-IT',
+        [Parameter(ParameterSetName = 'Csv', Mandatory = $true)]
+        [string]$Csv
+    )
+
+    begin { Set-ProgressAndInfoPreferences }
+
+    process {
+        if (-not (Test-EOLConnection)) {
+            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            return
+        }
+
+        $mailboxes = @()
+        if ($PSCmdlet.ParameterSetName -eq 'Csv') {
+            if (-not (Test-Path -LiteralPath $Csv)) {
+                Write-NCMessage "CSV file '$Csv' not found." -Level ERROR
+                return
+            }
+
+            try {
+                $mailboxes = (Import-Csv -LiteralPath $Csv) | Where-Object { $_.EmailAddress }
+            }
+            catch {
+                Write-NCMessage "Unable to read CSV file '$Csv'. $($_.Exception.Message)" -Level ERROR
+                return
+            }
+        }
+        else {
+            $mailboxes = $SourceMailbox
+        }
+
+        $counter = 0
+        $total = $mailboxes.Count
+        foreach ($entry in $mailboxes) {
+            $address = if ($entry.PSObject.Properties.Match('EmailAddress')) { $entry.EmailAddress } else { $entry }
+            if (-not $address) { continue }
+
+            $counter++
+            $percentComplete = (($counter / $total) * 100)
+            Write-Progress -Activity "Changing language to $Language" -Status "$counter of $total ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+
+            try {
+                Set-MailboxRegionalConfiguration -Identity $address -LocalizeDefaultFolderName:$true -Language $Language -ErrorAction Stop
+                $result = Get-MailboxRegionalConfiguration -Identity $address -ErrorAction Stop
+                [pscustomobject]@{
+                    PrimarySmtpAddress = $result.Identity
+                    Language           = $result.Language
+                    TimeZone           = $result.TimeZone
+                }
+            }
+            catch {
+                Write-NCMessage "Failed to update mailbox '$address'. $($_.Exception.Message)" -Level ERROR
+            }
+        }
+    }
+
+    end {
+        Write-Progress -Activity "Changing mailbox language" -Completed
+        Restore-ProgressAndInfoPreferences
+    }
 }
 
 function Set-MboxRulesQuota {
@@ -1112,23 +1091,20 @@ function Set-SharedMboxCopyForSent {
     }
 }
 
-function Get-UserLastSeen {
+function Test-SharedMailboxCompliance {
     <#
     .SYNOPSIS
-        Returns the most recent activity timestamps for a user mailbox.
+        Reports shared mailbox sign-in activity and licensing.
     .DESCRIPTION
-        Combines Exchange Online LastUserActionTime with Entra ID (Microsoft Graph) interactive sign-in logs.
-        Falls back to mailbox activity if Graph sign-in logs are unavailable or permissions are missing.
-    .PARAMETER User
-        Mailbox identity (UPN, SMTP address, alias). Accepts pipeline input.
+        Uses Microsoft Graph sign-in logs and assigned plans to flag shared mailboxes with successful sign-ins and missing licenses.
+    .PARAMETER GridView
+        Show the result in Out-GridView (default behaviour). Specify -GridView:$false to return objects.
     .EXAMPLE
-        Get-UserLastSeen -User alice@contoso.com
+        Test-SharedMailboxCompliance
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Alias('Identity', 'UserPrincipalName')]
-        [string]$User
+        [switch]$GridView
     )
 
     begin { Set-ProgressAndInfoPreferences }
@@ -1139,58 +1115,82 @@ function Get-UserLastSeen {
             return
         }
 
-        try {
-            $mailbox = Get-Mailbox -Identity $User -ErrorAction Stop
-        }
-        catch {
-            Write-NCMessage "Mailbox '$User' not found or not accessible. $($_.Exception.Message)" -Level ERROR
+        $graphConnected = Test-MgGraphConnection -Scopes @('AuditLog.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        if (-not $graphConnected) {
+            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
             return
         }
 
-        $mailboxIdentity = $mailbox.PrimarySmtpAddress
-        $lastMailboxAction = $null
-        $lastSignIn = $null
-
-        $stats = Get-MailboxStatisticsSafe -Identity $mailboxIdentity
-        if ($stats) {
-            $lastMailboxAction = $stats.LastUserActionTime
+        Write-NCMessage "`nFinding shared mailboxes..." -NoNewline
+        $mailboxes = Get-ExoMailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | Sort-Object DisplayName
+        if (-not $mailboxes) {
+            Write-NCMessage "No shared mailboxes found." -Level WARNING
+            return
         }
 
-        $graphReady = Test-MgGraphConnection -Scopes @('AuditLog.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
-        if ($graphReady) {
+        Write-NCMessage (" {0} shared mailboxes found." -f $mailboxes.Count) -Level SUCCESS
+        $exoPlan1 = '9aaf7827-d63c-4b61-89c3-182f06f82e5c'
+        $exoPlan2 = 'efb87545-963c-4e0d-99df-69c6916d9eb0'
+        $report = [System.Collections.Generic.List[object]]::new()
+        $counter = 0
+
+        foreach ($mbx in $mailboxes) {
+            $counter++
+            $percentComplete = (($counter / $mailboxes.Count) * 100)
+            Write-Progress -Activity "Checking $($mbx.DisplayName)" -Status "$counter of $($mailboxes.Count) ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+
+            $logsFound = $false
+            $exoPlan1Found = $false
+            $exoPlan2Found = $false
+
             try {
-                $signIns = Get-MgAuditLogSignIn -Filter "userId eq '$($mailbox.ExternalDirectoryObjectId)'" -All:$true -Top 20 -ErrorAction Stop
+                $signIns = Get-MgAuditLogSignIn -Filter "userid eq '$($mbx.ExternalDirectoryObjectId)'" -All -Top 20 -ErrorAction Stop
                 if ($signIns) {
-                    $lastSignIn = $signIns | Sort-Object -Property CreatedDateTime -Descending | Select-Object -First 1 -ExpandProperty CreatedDateTime
+                    foreach ($log in $signIns) {
+                        if ($log.Status.ErrorCode -eq 0) {
+                            $logsFound = $true
+                            break
+                        }
+                    }
                 }
             }
             catch {
-                Write-NCMessage ("Unable to retrieve sign-in logs for {0}. {1}" -f $mailboxIdentity, $_.Exception.Message) -Level WARNING
+                Write-NCMessage ("Unable to retrieve sign-in records for {0}. {1}" -f $mbx.DisplayName, $_.Exception.Message) -Level ERROR
             }
+
+            if ($logsFound) {
+                Write-NCMessage ("Sign-in records found for shared mailbox {0}" -f $mbx.DisplayName) -Level WARNING
+                try {
+                    $user = Get-MgUser -UserId $mbx.ExternalDirectoryObjectId -Property UserPrincipalName, assignedPlans
+                    $exoPlans = @($user.AssignedPlans | Where-Object { $_.Service -eq 'exchange' -and $_.capabilityStatus -eq 'Enabled' })
+                    $exoPlan1Found = $exoPlan1 -in $exoPlans.ServicePlanId
+                    $exoPlan2Found = $exoPlan2 -in $exoPlans.ServicePlanId
+                }
+                catch {
+                    Write-NCMessage ("Unable to read license info for {0}. {1}" -f $mbx.DisplayName, $_.Exception.Message) -Level ERROR
+                }
+            }
+            else {
+                Write-NCMessage ("No successful sign-in records found for shared mailbox {0}" -f $mbx.DisplayName) -Level SUCCESS
+            }
+
+            $report.Add([pscustomobject]@{
+                    DisplayName               = $mbx.DisplayName
+                    ExternalDirectoryObjectId = $mbx.ExternalDirectoryObjectId
+                    'Sign in Record Found'    = if ($logsFound) { 'Yes' } else { 'No' }
+                    'Exchange Online Plan 1'  = $exoPlan1Found
+                    'Exchange Online Plan 2'  = $exoPlan2Found
+                }) | Out-Null
+        }
+
+        Write-Progress -Activity "Checking shared mailboxes" -Completed
+
+        $showGrid = if ($PSBoundParameters.ContainsKey('GridView')) { $GridView.IsPresent } else { $true }
+        if ($showGrid) {
+            $report | Out-GridView -Title "Shared Mailbox Sign-In Records and Licensing Status"
         }
         else {
-            Write-NCMessage "Microsoft Graph AuditLog.Read.All is not available. Returning mailbox activity only." -Level WARNING
-        }
-
-        $sources = @()
-        if ($lastMailboxAction) { $sources += 'MailboxAction' }
-        if ($lastSignIn) { $sources += 'SignInLog' }
-
-        $lastSeen = $null
-        if ($sources.Count -gt 0) {
-            $timestamps = @()
-            if ($lastMailboxAction) { $timestamps += $lastMailboxAction }
-            if ($lastSignIn) { $timestamps += $lastSignIn }
-            $lastSeen = $timestamps | Sort-Object -Descending | Select-Object -First 1
-        }
-
-        [pscustomobject][ordered]@{
-            DisplayName           = $mailbox.DisplayName
-            PrimarySmtpAddress    = $mailboxIdentity
-            LastUserActionTime    = $lastMailboxAction
-            LastInteractiveSignIn = if ($lastSignIn) { [datetime]$lastSignIn } else { $null }
-            LastSeen              = if ($lastSeen) { [datetime]$lastSeen } else { $null }
-            Source                = if ($sources.Count -gt 0) { $sources -join ',' } else { 'None' }
+            $report
         }
     }
 

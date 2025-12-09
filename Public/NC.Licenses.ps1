@@ -3,6 +3,208 @@ using namespace System.Management.Automation
 
 # Nebula.Core: Licenses =============================================================================================================================
 
+function Add-UserMsolAccountSku {
+    <#
+    .SYNOPSIS
+        Assigns licenses to a user by friendly name or SKU identifier.
+    .DESCRIPTION
+        Resolves the provided license names using the cached license catalog and the tenant's subscribed SKUs,
+        then assigns them to the target user (preserving existing licenses). Accepts friendly product names,
+        SKU part numbers, or SKU IDs.
+    .PARAMETER UserPrincipalName
+        Target user UPN or object ID.
+    .PARAMETER License
+        One or more license identifiers: friendly name (as resolved by the catalog), SKU part number, or SKU ID (GUID).
+    .PARAMETER ForceLicenseCatalogRefresh
+        Force a refresh of the cached license catalog before resolving friendly names.
+    .EXAMPLE
+        Add-MsolAccountSku -UserPrincipalName user@contoso.com -License "Microsoft 365 E3"
+    .EXAMPLE
+        Add-MsolAccountSku -UserPrincipalName user@contoso.com -License "ENTERPRISEPACK","VISIOCLIENT"
+    .EXAMPLE
+        Add-MsolAccountSku -UserPrincipalName user@contoso.com -License "18181a46-0d4e-45cd-891e-60aabd171b4e"
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Alias('User', 'UPN')]
+        [string]$UserPrincipalName,
+        [Parameter(Mandatory = $true)]
+        [string[]]$License,
+        [switch]$ForceLicenseCatalogRefresh
+    )
+
+    Set-ProgressAndInfoPreferences
+    try {
+        $GraphConnection = Test-MgGraphConnection
+        if (-not $GraphConnection) {
+            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+            return
+        }
+
+        $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $UserPrincipalName
+        if (-not $resolvedPrincipal) {
+            Write-NCMessage "Unable to resolve user recipient for $UserPrincipalName" -Level ERROR
+            return
+        }
+
+        try {
+            $user = Get-MgUser -UserId $resolvedPrincipal -ErrorAction Stop
+        }
+        catch {
+            Write-NCMessage "User $UserPrincipalName not found or query failed: $($_.Exception.Message)" -Level ERROR
+            return
+        }
+
+        $defaultUsageLocation = if (($NCVars -is [System.Collections.IDictionary]) -and $NCVars.Contains('UsageLocation') -and $NCVars.UsageLocation) {
+            [string]$NCVars.UsageLocation
+        }
+        else { 'US' }
+
+        if ([string]::IsNullOrWhiteSpace($user.UsageLocation)) {
+            $targetUsage = $defaultUsageLocation
+            try {
+                Update-MgUser -UserId $user.Id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
+                $user.UsageLocation = $targetUsage
+                Write-NCMessage "Usage location set to $targetUsage for $($user.UserPrincipalName)." -Level VERBOSE
+            }
+            catch {
+                Write-NCMessage "Unable to set usage location ($targetUsage) for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
+                return
+            }
+        }
+
+        try {
+            $licenseCatalog = Get-LicenseCatalog -IncludeMetadata -ForceRefresh:$ForceLicenseCatalogRefresh.IsPresent
+        }
+        catch {
+            Write-NCMessage $_ -Level WARNING
+            $licenseCatalog = $null
+        }
+
+        $licenseLookup = $null
+        $customLookup = $null
+        if ($licenseCatalog) {
+            if ($licenseCatalog.PSObject.Properties['Lookup']) { $licenseLookup = $licenseCatalog.Lookup }
+            if ($licenseCatalog.PSObject.Properties['CustomLookup']) { $customLookup = $licenseCatalog.CustomLookup }
+        }
+
+        $maxAttempts = 3
+        try {
+            $tenantSkus = Invoke-NCRetry -Action {
+                Get-MgSubscribedSku -All -ErrorAction Stop
+            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve tenant licenses" -OnError {
+                param($attempt, $max, $err)
+                Write-NCMessage "Failed to retrieve tenant licenses, attempt $attempt of $max." -Level ERROR
+            }
+        }
+        catch {
+            Write-NCMessage "Unable to retrieve tenant licenses after $maxAttempts attempts." -Level ERROR
+            return
+        }
+
+        if (-not $tenantSkus -or $tenantSkus.Count -eq 0) {
+            Write-NCMessage "No tenant licenses available to assign." -Level WARNING
+            return
+        }
+
+        $normalizeString = {
+            param($value)
+            if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+            return ($value.Trim().ToUpperInvariant())
+        }
+
+        $resolved = @()
+        $unmatched = @()
+        $inputLicenses = $License | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() } | Select-Object -Unique
+
+        foreach ($entry in $inputLicenses) {
+            $target = & $normalizeString $entry
+            $match = $null
+
+            foreach ($sku in $tenantSkus) {
+                $skuIdString = [string]$sku.SkuId
+                $skuPart = & $normalizeString $sku.SkuPartNumber
+
+                $display = $null
+                $matchSource = $null
+                if ($licenseLookup) {
+                    $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $sku.SkuPartNumber -FallbackLookup $customLookup -MatchSource ([ref]$matchSource)
+                }
+                $displayNormalized = if ($display) { & $normalizeString $display } else { $null }
+
+                if ($target -eq $skuPart -or $target -eq ($skuIdString.ToUpperInvariant()) -or ($displayNormalized -and $target -eq $displayNormalized)) {
+                    $match = @{
+                        SkuId         = $sku.SkuId
+                        SkuPartNumber = $sku.SkuPartNumber
+                        Name          = if ($display) { $display } else { $sku.SkuPartNumber }
+                        Available     = ($sku.PrepaidUnits.Enabled + $sku.PrepaidUnits.Warning + $sku.PrepaidUnits.Suspended) - $sku.ConsumedUnits
+                    }
+                    break
+                }
+            }
+
+            if ($match) {
+                $resolved += $match
+            }
+            else {
+                $unmatched += $entry
+            }
+        }
+
+        if ($unmatched.Count -gt 0) {
+            Write-NCMessage ("Unable to resolve license(s): {0}" -f ($unmatched -join ', ')) -Level ERROR
+            return
+        }
+
+        $uniqueAdds = $resolved | Group-Object SkuId | ForEach-Object {
+            $_.Group | Select-Object -First 1
+        }
+
+        $addLicenses = @()
+        $namesNoAvailability = @()
+        foreach ($item in $uniqueAdds) {
+            $available = $item.Available
+            if ($available -le 0) {
+                Write-NCMessage ("No available units for license {0} ({1}) (available: {2})" -f $item.Name, $item.SkuPartNumber, $available) -Level WARNING
+                $namesNoAvailability += $item.Name
+                continue
+            }
+            $addLicenses += @{
+                SkuId         = $item.SkuId
+                DisabledPlans = @()
+            }
+        }
+
+        if ($addLicenses.Count -eq 0) {
+            $requestedList = ($resolved | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', '
+            Write-NCMessage ("No licenses to assign: none available. Requested: {0}" -f $requestedList) -Level ERROR
+            return
+        }
+
+        $summary = "Assign license(s): {0} to {1}" -f (($resolved | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', '), $user.UserPrincipalName
+        if (-not $PSCmdlet.ShouldProcess($user.UserPrincipalName, $summary)) {
+            return
+        }
+
+        try {
+            Invoke-NCRetry -Action {
+                Set-MgUserLicense -UserId $user.Id -AddLicenses $addLicenses -RemoveLicenses @() -ErrorAction Stop
+            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "assign licenses to $($user.UserPrincipalName)" -OnError {
+                param($attempt, $max, $err)
+                Write-NCMessage ("Failed to assign licenses to {0}, attempt {1} of {2}. {3}" -f $user.UserPrincipalName, $attempt, $max, $err.Exception.Message) -Level ERROR
+            } | Out-Null
+            Write-NCMessage ("Assigned license(s) to {0}: {1}" -f $user.UserPrincipalName, (($resolved | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', ')) -Level SUCCESS
+        }
+        catch {
+            Write-NCMessage "License assignment failed for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
+        }
+    }
+    finally {
+        Restore-ProgressAndInfoPreferences
+    }
+}
+
 function Export-MsolAccountSku {
     <#
     .SYNOPSIS
@@ -382,7 +584,7 @@ function Get-TenantMsolAccountSku {
     }
 }
 
-function Move-MsolAccountSku {
+function Move-UserMsolAccountSku {
     <#
     .SYNOPSIS
         Moves all licenses from one user to another.
@@ -556,14 +758,13 @@ function Move-MsolAccountSku {
     }
 }
 
-function Add-MsolAccountSku {
+function Remove-UserMsolAccountSku {
     <#
     .SYNOPSIS
-        Assigns licenses to a user by friendly name or SKU identifier.
+        Removes licenses from a user by friendly name or SKU identifier.
     .DESCRIPTION
-        Resolves the provided license names using the cached license catalog and the tenant's subscribed SKUs,
-        then assigns them to the target user (preserving existing licenses). Accepts friendly product names,
-        SKU part numbers, or SKU IDs.
+        Resolves provided license names using the cached license catalog and the user's assigned licenses,
+        then removes them from the target user. Accepts friendly product names, SKU part numbers, or SKU IDs.
     .PARAMETER UserPrincipalName
         Target user UPN or object ID.
     .PARAMETER License
@@ -571,11 +772,11 @@ function Add-MsolAccountSku {
     .PARAMETER ForceLicenseCatalogRefresh
         Force a refresh of the cached license catalog before resolving friendly names.
     .EXAMPLE
-        Add-MsolAccountSku -UserPrincipalName user@contoso.com -License "Microsoft 365 E3"
+        Remove-UserMsolAccountSku -UserPrincipalName user@contoso.com -License "Microsoft 365 E3"
     .EXAMPLE
-        Add-MsolAccountSku -UserPrincipalName user@contoso.com -License "ENTERPRISEPACK","VISIOCLIENT"
+        Remove-UserMsolAccountSku -UserPrincipalName user@contoso.com -License "ENTERPRISEPACK","VISIOCLIENT"
     .EXAMPLE
-        Add-MsolAccountSku -UserPrincipalName user@contoso.com -License "18181a46-0d4e-45cd-891e-60aabd171b4e"
+        Remove-UserMsolAccountSku -UserPrincipalName user@contoso.com -License "18181a46-0d4e-45cd-891e-60aabd171b4e"
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
@@ -609,24 +810,6 @@ function Add-MsolAccountSku {
             return
         }
 
-        $defaultUsageLocation = if (($NCVars -is [System.Collections.IDictionary]) -and $NCVars.Contains('UsageLocation') -and $NCVars.UsageLocation) {
-            [string]$NCVars.UsageLocation
-        }
-        else { 'US' }
-
-        if ([string]::IsNullOrWhiteSpace($user.UsageLocation)) {
-            $targetUsage = $defaultUsageLocation
-            try {
-                Update-MgUser -UserId $user.Id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
-                $user.UsageLocation = $targetUsage
-                Write-NCMessage "Usage location set to $targetUsage for $($user.UserPrincipalName)." -Level VERBOSE
-            }
-            catch {
-                Write-NCMessage "Unable to set usage location ($targetUsage) for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
-                return
-            }
-        }
-
         try {
             $licenseCatalog = Get-LicenseCatalog -IncludeMetadata -ForceRefresh:$ForceLicenseCatalogRefresh.IsPresent
         }
@@ -644,20 +827,20 @@ function Add-MsolAccountSku {
 
         $maxAttempts = 3
         try {
-            $tenantSkus = Invoke-NCRetry -Action {
-                Get-MgSubscribedSku -All -ErrorAction Stop
-            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve tenant licenses" -OnError {
+            $assignedLicenses = Invoke-NCRetry -Action {
+                Get-MgUserLicenseDetail -UserId $user.Id -ErrorAction Stop
+            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve licenses for $($user.UserPrincipalName)" -OnError {
                 param($attempt, $max, $err)
-                Write-NCMessage "Failed to retrieve tenant licenses, attempt $attempt of $max." -Level ERROR
+                Write-NCMessage "Failed to retrieve licenses for $($user.UserPrincipalName), attempt $attempt of $max." -Level ERROR
             }
         }
         catch {
-            Write-NCMessage "Unable to retrieve tenant licenses after $maxAttempts attempts." -Level ERROR
+            Write-NCMessage "Unable to retrieve licenses for $($user.UserPrincipalName) after $maxAttempts attempts." -Level ERROR
             return
         }
 
-        if (-not $tenantSkus -or $tenantSkus.Count -eq 0) {
-            Write-NCMessage "No tenant licenses available to assign." -Level WARNING
+        if (-not $assignedLicenses -or $assignedLicenses.Count -eq 0) {
+            Write-NCMessage "User $($user.UserPrincipalName) has no licenses to remove." -Level WARNING
             return
         }
 
@@ -675,23 +858,22 @@ function Add-MsolAccountSku {
             $target = & $normalizeString $entry
             $match = $null
 
-            foreach ($sku in $tenantSkus) {
-                $skuIdString = [string]$sku.SkuId
-                $skuPart = & $normalizeString $sku.SkuPartNumber
+            foreach ($lic in $assignedLicenses) {
+                $skuIdString = [string]$lic.SkuId
+                $skuPart = & $normalizeString $lic.SkuPartNumber
 
-                $display = $null
                 $matchSource = $null
+                $display = $null
                 if ($licenseLookup) {
-                    $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $sku.SkuPartNumber -FallbackLookup $customLookup -MatchSource ([ref]$matchSource)
+                    $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $lic.SkuPartNumber -FallbackLookup $customLookup -MatchSource ([ref]$matchSource)
                 }
                 $displayNormalized = if ($display) { & $normalizeString $display } else { $null }
 
                 if ($target -eq $skuPart -or $target -eq ($skuIdString.ToUpperInvariant()) -or ($displayNormalized -and $target -eq $displayNormalized)) {
                     $match = @{
-                        SkuId         = $sku.SkuId
-                        SkuPartNumber = $sku.SkuPartNumber
-                        Name          = if ($display) { $display } else { $sku.SkuPartNumber }
-                        Available     = ($sku.PrepaidUnits.Enabled + $sku.PrepaidUnits.Warning + $sku.PrepaidUnits.Suspended) - $sku.ConsumedUnits
+                        SkuId         = $lic.SkuId
+                        SkuPartNumber = $lic.SkuPartNumber
+                        Name          = if ($display) { $display } else { $lic.SkuPartNumber }
                     }
                     break
                 }
@@ -706,51 +888,35 @@ function Add-MsolAccountSku {
         }
 
         if ($unmatched.Count -gt 0) {
-            Write-NCMessage ("Unable to resolve license(s): {0}" -f ($unmatched -join ', ')) -Level ERROR
+            Write-NCMessage ("Unable to resolve license(s) for removal: {0}" -f ($unmatched -join ', ')) -Level ERROR
             return
         }
 
-        $uniqueAdds = $resolved | Group-Object SkuId | ForEach-Object {
+        $removeLicenses = $resolved | Group-Object SkuId | ForEach-Object {
             $_.Group | Select-Object -First 1
         }
 
-        $addLicenses = @()
-        $namesNoAvailability = @()
-        foreach ($item in $uniqueAdds) {
-            $available = $item.Available
-            if ($available -le 0) {
-                Write-NCMessage ("No available units for license {0} ({1}) (available: {2})" -f $item.Name, $item.SkuPartNumber, $available) -Level WARNING
-                $namesNoAvailability += $item.Name
-                continue
-            }
-            $addLicenses += @{
-                SkuId         = $item.SkuId
-                DisabledPlans = @()
-            }
-        }
-
-        if ($addLicenses.Count -eq 0) {
-            $requestedList = ($resolved | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', '
-            Write-NCMessage ("No licenses to assign: none available. Requested: {0}" -f $requestedList) -Level ERROR
+        if ($removeLicenses.Count -eq 0) {
+            Write-NCMessage "No licenses matched for removal." -Level ERROR
             return
         }
 
-        $summary = "Assign license(s): {0} to {1}" -f (($resolved | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', '), $user.UserPrincipalName
+        $summary = "Remove license(s): {0} from {1}" -f (($removeLicenses | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', '), $user.UserPrincipalName
         if (-not $PSCmdlet.ShouldProcess($user.UserPrincipalName, $summary)) {
             return
         }
 
         try {
             Invoke-NCRetry -Action {
-                Set-MgUserLicense -UserId $user.Id -AddLicenses $addLicenses -RemoveLicenses @() -ErrorAction Stop
-            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "assign licenses to $($user.UserPrincipalName)" -OnError {
+                Set-MgUserLicense -UserId $user.Id -AddLicenses @() -RemoveLicenses ($removeLicenses.SkuId) -ErrorAction Stop
+            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "remove licenses from $($user.UserPrincipalName)" -OnError {
                 param($attempt, $max, $err)
-                Write-NCMessage ("Failed to assign licenses to {0}, attempt {1} of {2}. {3}" -f $user.UserPrincipalName, $attempt, $max, $err.Exception.Message) -Level ERROR
+                Write-NCMessage ("Failed to remove licenses from {0}, attempt {1} of {2}. {3}" -f $user.UserPrincipalName, $attempt, $max, $err.Exception.Message) -Level ERROR
             } | Out-Null
-            Write-NCMessage ("Assigned license(s) to {0}: {1}" -f $user.UserPrincipalName, (($resolved | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', ')) -Level SUCCESS
+            Write-NCMessage ("Removed license(s) from {0}: {1}" -f $user.UserPrincipalName, (($removeLicenses | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', ')) -Level SUCCESS
         }
         catch {
-            Write-NCMessage "License assignment failed for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
+            Write-NCMessage "License removal failed for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
         }
     }
     finally {
