@@ -50,6 +50,8 @@ function Format-MessageIDsFromClipboard {
     if ($PassThru.IsPresent) { $output }
 }
 
+Set-Alias -Name fse -Value Format-SortedEmailsFromClipboard -Description "Format sorted e-mails from clipboard"
+
 function Format-SortedEmailsFromClipboard {
     <#
     .SYNOPSIS
@@ -91,5 +93,4 @@ function Format-SortedEmailsFromClipboard {
     if ($PassThru.IsPresent) { $output }
 }
 
-Set-Alias -Name fse -Value Format-SortedEmailsFromClipboard -Description "Format sorted e-mails from clipboard"
 Set-Alias -Name mids -Value Format-MessageIDsFromClipboard -Description "Format MessageId values from clipboard"

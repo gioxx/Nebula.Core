@@ -100,140 +100,6 @@ function Copy-OoOMessage {
     end { Restore-ProgressAndInfoPreferences }
 }
 
-function Get-RoomDetails {
-    <#
-    .SYNOPSIS
-        Lists room list members with capacity and location details.
-    .DESCRIPTION
-        Ensures Exchange Online connectivity, enumerates room lists (optionally filtered by City),
-        expands member rooms, and returns/export details. Supports CSV export and grid view.
-    .PARAMETER City
-        Optional city/name filter applied to room list name or display name.
-    .PARAMETER Csv
-        Export results to CSV.
-    .PARAMETER OutputFolder
-        Destination folder for CSV (defaults to current directory).
-    .PARAMETER GridView
-        Show the results in Out-GridView.
-    .PARAMETER PassThru
-        Emit the room details objects to the pipeline (also when exporting).
-    .EXAMPLE
-        Get-RoomDetails -City Milan -Csv -OutputFolder C:\Temp
-    .EXAMPLE
-        Get-RoomDetails -GridView
-    #>
-    [CmdletBinding()]
-    param(
-        [string[]]$City,
-        [switch]$Csv,
-        [string]$OutputFolder,
-        [switch]$GridView,
-        [switch]$PassThru
-    )
-
-    begin {
-        Set-ProgressAndInfoPreferences
-        $results = [System.Collections.Generic.List[object]]::new()
-    }
-
-    process {}
-
-    end {
-        try {
-            if (-not (Test-EOLConnection)) {
-                Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
-                return
-            }
-
-            $roomGroups = Get-DistributionGroup -RecipientTypeDetails RoomList -ResultSize Unlimited -WarningAction SilentlyContinue
-            if ($City -and $City.Count -gt 0) {
-                $roomGroups = $roomGroups | Where-Object {
-                    foreach ($c in $City) {
-                        if ($_.Name -like "*$c*" -or $_.DisplayName -like "*$c*") { return $true }
-                    }
-                    return $false
-                }
-            }
-
-            if (-not $roomGroups -or $roomGroups.Count -eq 0) {
-                Write-NCMessage "No room lists found with the specified filters." -Level WARNING
-                return
-            }
-
-            $counter = 0
-            foreach ($group in $roomGroups) {
-                $counter++
-                $percentComplete = (($counter / $roomGroups.Count) * 100)
-                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $($roomGroups.Count) ($($percentComplete.ToString('0.0'))%)" -PercentComplete $percentComplete
-
-                try {
-                    $members = Get-DistributionGroupMember -Identity $group.PrimarySmtpAddress -ResultSize Unlimited -ErrorAction Stop
-                }
-                catch {
-                    Write-NCMessage "Unable to retrieve members for room list '$($group.PrimarySmtpAddress)'. $($_.Exception.Message)" -Level ERROR
-                    continue
-                }
-
-                foreach ($member in $members) {
-                    try {
-                        $mailbox = Get-Mailbox -Identity $member.PrimarySmtpAddress -ErrorAction Stop
-                    }
-                    catch {
-                        Write-NCMessage "Unable to load mailbox '$($member.PrimarySmtpAddress)'. $($_.Exception.Message)" -Level ERROR
-                        continue
-                    }
-
-                    $results.Add([pscustomobject]@{
-                            Location                    = $group.Name
-                            LocationPrimarySmtpAddress  = $group.PrimarySmtpAddress
-                            RoomDisplayName             = $member.DisplayName
-                            RoomPrimarySmtpAddress      = $member.PrimarySmtpAddress
-                            RoomCapacity                = $mailbox.ResourceCapacity
-                        }) | Out-Null
-                }
-            }
-
-            Write-Progress -Activity "Processing room lists" -Completed
-
-            if ($results.Count -eq 0) {
-                Write-NCMessage "No room details found. Check filters or RoomList definitions." -Level WARNING
-                return
-            }
-
-            $csvPath = $null
-            if ($Csv.IsPresent) {
-                try {
-                    $folder = Test-Folder -Path $OutputFolder
-                    $csvPath = New-File (Join-Path -Path $folder -ChildPath "$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-Rooms.csv")
-                    $results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
-                    Write-NCMessage ("Export completed: {0}" -f $csvPath) -Level SUCCESS
-                }
-                catch {
-                    Write-NCMessage "Unable to export CSV. $($_.Exception.Message)" -Level ERROR
-                }
-            }
-
-            if ($GridView.IsPresent) {
-                try {
-                    $results | Out-GridView -Title "M365 Rooms Details"
-                }
-                catch {
-                    Write-NCMessage "Unable to show grid view. $($_.Exception.Message)" -Level WARNING
-                }
-            }
-
-            if ($PassThru.IsPresent -or -not $Csv.IsPresent -or $GridView.IsPresent) {
-                $results
-            }
-            elseif ($csvPath) {
-                $csvPath
-            }
-        }
-        finally {
-            Restore-ProgressAndInfoPreferences
-        }
-    }
-}
 function Export-CalendarPermission {
     <#
     .SYNOPSIS
@@ -422,6 +288,141 @@ function Export-CalendarPermission {
         }
         finally {
             Write-Progress -Activity "Processing calendar permissions" -Completed
+            Restore-ProgressAndInfoPreferences
+        }
+    }
+}
+
+function Get-RoomDetails {
+    <#
+    .SYNOPSIS
+        Lists room list members with capacity and location details.
+    .DESCRIPTION
+        Ensures Exchange Online connectivity, enumerates room lists (optionally filtered by City),
+        expands member rooms, and returns/export details. Supports CSV export and grid view.
+    .PARAMETER City
+        Optional city/name filter applied to room list name or display name.
+    .PARAMETER Csv
+        Export results to CSV.
+    .PARAMETER OutputFolder
+        Destination folder for CSV (defaults to current directory).
+    .PARAMETER GridView
+        Show the results in Out-GridView.
+    .PARAMETER PassThru
+        Emit the room details objects to the pipeline (also when exporting).
+    .EXAMPLE
+        Get-RoomDetails -City Milan -Csv -OutputFolder C:\Temp
+    .EXAMPLE
+        Get-RoomDetails -GridView
+    #>
+    [CmdletBinding()]
+    param(
+        [string[]]$City,
+        [switch]$Csv,
+        [string]$OutputFolder,
+        [switch]$GridView,
+        [switch]$PassThru
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $results = [System.Collections.Generic.List[object]]::new()
+    }
+
+    process {}
+
+    end {
+        try {
+            if (-not (Test-EOLConnection)) {
+                Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+                return
+            }
+
+            $roomGroups = Get-DistributionGroup -RecipientTypeDetails RoomList -ResultSize Unlimited -WarningAction SilentlyContinue
+            if ($City -and $City.Count -gt 0) {
+                $roomGroups = $roomGroups | Where-Object {
+                    foreach ($c in $City) {
+                        if ($_.Name -like "*$c*" -or $_.DisplayName -like "*$c*") { return $true }
+                    }
+                    return $false
+                }
+            }
+
+            if (-not $roomGroups -or $roomGroups.Count -eq 0) {
+                Write-NCMessage "No room lists found with the specified filters." -Level WARNING
+                return
+            }
+
+            $counter = 0
+            foreach ($group in $roomGroups) {
+                $counter++
+                $percentComplete = (($counter / $roomGroups.Count) * 100)
+                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $($roomGroups.Count) ($($percentComplete.ToString('0.0'))%)" -PercentComplete $percentComplete
+
+                try {
+                    $members = Get-DistributionGroupMember -Identity $group.PrimarySmtpAddress -ResultSize Unlimited -ErrorAction Stop
+                }
+                catch {
+                    Write-NCMessage "Unable to retrieve members for room list '$($group.PrimarySmtpAddress)'. $($_.Exception.Message)" -Level ERROR
+                    continue
+                }
+
+                foreach ($member in $members) {
+                    try {
+                        $mailbox = Get-Mailbox -Identity $member.PrimarySmtpAddress -ErrorAction Stop
+                    }
+                    catch {
+                        Write-NCMessage "Unable to load mailbox '$($member.PrimarySmtpAddress)'. $($_.Exception.Message)" -Level ERROR
+                        continue
+                    }
+
+                    $results.Add([pscustomobject]@{
+                            Location                    = $group.Name
+                            LocationPrimarySmtpAddress  = $group.PrimarySmtpAddress
+                            RoomDisplayName             = $member.DisplayName
+                            RoomPrimarySmtpAddress      = $member.PrimarySmtpAddress
+                            RoomCapacity                = $mailbox.ResourceCapacity
+                        }) | Out-Null
+                }
+            }
+
+            Write-Progress -Activity "Processing room lists" -Completed
+
+            if ($results.Count -eq 0) {
+                Write-NCMessage "No room details found. Check filters or RoomList definitions." -Level WARNING
+                return
+            }
+
+            $csvPath = $null
+            if ($Csv.IsPresent) {
+                try {
+                    $folder = Test-Folder -Path $OutputFolder
+                    $csvPath = New-File (Join-Path -Path $folder -ChildPath "$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-Rooms.csv")
+                    $results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+                    Write-NCMessage ("Export completed: {0}" -f $csvPath) -Level SUCCESS
+                }
+                catch {
+                    Write-NCMessage "Unable to export CSV. $($_.Exception.Message)" -Level ERROR
+                }
+            }
+
+            if ($GridView.IsPresent) {
+                try {
+                    $results | Out-GridView -Title "M365 Rooms Details"
+                }
+                catch {
+                    Write-NCMessage "Unable to show grid view. $($_.Exception.Message)" -Level WARNING
+                }
+            }
+
+            if ($PassThru.IsPresent -or -not $Csv.IsPresent -or $GridView.IsPresent) {
+                $results
+            }
+            elseif ($csvPath) {
+                $csvPath
+            }
+        }
+        finally {
             Restore-ProgressAndInfoPreferences
         }
     }

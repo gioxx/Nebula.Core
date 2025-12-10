@@ -3,6 +3,356 @@ using namespace System.Management.Automation
 
 # Nebula.Core: Groups ===============================================================================================================================
 
+function Add-EntraGroupDevice {
+    <#
+    .SYNOPSIS
+        Adds one or more devices to an Entra group.
+    .DESCRIPTION
+        Connects to Microsoft Graph, resolves the target group by display name or ID, then adds
+        the provided devices by display name or object ID. Accepts pipeline input for devices.
+    .PARAMETER GroupName
+        Display name of the Entra group.
+    .PARAMETER GroupId
+        Object ID of the Entra group.
+    .PARAMETER DeviceIdentifier
+        Device display name or object ID. Accepts pipeline input and common Id/DisplayName property names.
+    .PARAMETER TreatInputAsId
+        Treat every DeviceIdentifier as an object ID without attempting name resolution.
+    .PARAMETER PassThru
+        Emit a summary object for each processed device.
+    .EXAMPLE
+        "PC1", "PC2" | Add-EntraGroupDevice -GroupName "My Entra Group"
+    .EXAMPLE
+        Add-EntraGroupDevice -GroupId "00000000-0000-0000-0000-000000000000" -DeviceIdentifier "PC1"
+    #>
+    [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Alias('Group', 'DisplayName')]
+        [string]$GroupName,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [string]$GroupId,
+
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('Device', 'DeviceName', 'Id', 'DeviceId', 'Name')]
+        [string[]]$DeviceIdentifier,
+
+        [switch]$TreatInputAsId,
+        [switch]$PassThru
+    )
+
+    begin {
+        $graphConnected = Test-MgGraphConnection -Scopes @('Group.ReadWrite.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        if (-not $graphConnected) {
+            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+        }
+
+        $devices = [System.Collections.Generic.List[string]]::new()
+    }
+
+    process {
+        if (-not $graphConnected) { return }
+
+        foreach ($entry in $DeviceIdentifier) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                [void]$devices.Add($entry.Trim())
+            }
+        }
+    }
+
+    end {
+        if (-not $graphConnected) { return }
+        if ($devices.Count -eq 0) {
+            Write-NCMessage "No devices specified" -Level WARNING
+            return
+        }
+
+        $resolvedGroup = $null
+        if ($PSCmdlet.ParameterSetName -eq 'ById') {
+            try {
+                $resolvedGroup = Get-MgGroup -GroupId $GroupId -ErrorAction Stop
+            }
+            catch {
+                Write-NCMessage "Entra group with ID '$GroupId' not found: $($_.Exception.Message)" -Level ERROR
+                return
+            }
+        }
+        else {
+            $escapedName = $GroupName.Replace("'", "''")
+            try {
+                $resolvedGroup = Get-MgGroup -Filter "displayName eq '$escapedName'" -All -ErrorAction Stop | Select-Object -First 1
+            }
+            catch {
+                Write-NCMessage "Unable to resolve group '$GroupName': $($_.Exception.Message)" -Level ERROR
+                return
+            }
+
+            if (-not $resolvedGroup) {
+                try {
+                    $resolvedGroup = Get-MgGroup -GroupId $GroupName -ErrorAction Stop
+                }
+                catch {
+                    Write-NCMessage "Entra group '$GroupName' not found by name or ID" -Level ERROR
+                    return
+                }
+            }
+        }
+
+        $results = [System.Collections.Generic.List[object]]::new()
+        $uniqueDevices = $devices | Select-Object -Unique
+
+        foreach ($device in $uniqueDevices) {
+            $deviceId = $null
+            $deviceLabel = $device
+
+            if ($TreatInputAsId.IsPresent -or $device -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+                $deviceId = $device
+            }
+            else {
+                $escapedDevice = $device.Replace("'", "''")
+                try {
+                    $deviceMatches = Get-MgDevice -Filter "displayName eq '$escapedDevice'" -All -ErrorAction Stop
+                }
+                catch {
+                    Write-NCMessage "Unable to resolve device '$device': $($_.Exception.Message)" -Level ERROR
+                    continue
+                }
+
+                if (-not $deviceMatches -or $deviceMatches.Count -eq 0) {
+                    Write-NCMessage "Device '$device' not found" -Level WARNING
+                    continue
+                }
+
+                if ($deviceMatches.Count -gt 1) {
+                    Write-NCMessage "Multiple devices matched '$device'. Using the first result ($($deviceMatches[0].DisplayName))" -Level WARNING
+                }
+
+                $selected = $deviceMatches | Select-Object -First 1
+                $deviceId = $selected.Id
+                $deviceLabel = $selected.DisplayName
+            }
+
+            if (-not $deviceId) {
+                Write-NCMessage "Unable to determine object ID for device '$device'." -Level ERROR
+                continue
+            }
+
+            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add device '$deviceLabel'")) {
+                $status = 'Added'
+                try {
+                    New-MgGroupMember -GroupId $resolvedGroup.Id -DirectoryObjectId $deviceId -ErrorAction Stop | Out-Null
+                    Write-NCMessage "Added device '$deviceLabel' to group '$($resolvedGroup.DisplayName)'" -Level SUCCESS
+                }
+                catch {
+                    if ($_.Exception.Message -match 'added object references already exist') {
+                        $status = 'Exists'
+                        Write-NCMessage "Device '$deviceLabel' is already a member of '$($resolvedGroup.DisplayName)'" -Level WARNING
+                    }
+                    else {
+                        $status = 'Failed'
+                        Write-NCMessage "Failed to add device '$deviceLabel' to '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
+                    }
+                }
+
+                if ($PassThru.IsPresent) {
+                    $results.Add([pscustomobject][ordered]@{
+                            GroupName  = $resolvedGroup.DisplayName
+                            GroupId    = $resolvedGroup.Id
+                            MemberName = $deviceLabel
+                            MemberId   = $deviceId
+                            MemberType = 'Device'
+                            Status     = $status
+                        }) | Out-Null
+                }
+            }
+        }
+
+        if ($PassThru.IsPresent -and $results.Count -gt 0) {
+            $results
+        }
+    }
+}
+
+function Add-EntraGroupUser {
+    <#
+    .SYNOPSIS
+        Adds one or more users to an Entra group.
+    .DESCRIPTION
+        Connects to Microsoft Graph, resolves the target group by display name or ID, then adds
+        the provided users by UPN/display name or object ID. Accepts pipeline input for users.
+    .PARAMETER GroupName
+        Display name of the Entra group.
+    .PARAMETER GroupId
+        Object ID of the Entra group.
+    .PARAMETER UserIdentifier
+        User principal name, display name, or object ID. Accepts pipeline input and common Id/DisplayName property names.
+    .PARAMETER TreatInputAsId
+        Treat every UserIdentifier as an object ID without attempting name resolution.
+    .PARAMETER PassThru
+        Emit a summary object for each processed user.
+    .EXAMPLE
+        "user1@contoso.com","user2@contoso.com" | Add-EntraGroupUser -GroupName "My Entra Group"
+    .EXAMPLE
+        Add-EntraGroupUser -GroupId "00000000-0000-0000-0000-000000000000" -UserIdentifier "user1@contoso.com"
+    #>
+    [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Alias('Group', 'DisplayName')]
+        [string]$GroupName,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [string]$GroupId,
+
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('User', 'UPN', 'Mail', 'Id', 'UserId', 'DisplayName')]
+        [string[]]$UserIdentifier,
+
+        [switch]$TreatInputAsId,
+        [switch]$PassThru
+    )
+
+    begin {
+        $graphConnected = Test-MgGraphConnection -Scopes @('Group.ReadWrite.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        if (-not $graphConnected) {
+            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+        }
+
+        $users = [System.Collections.Generic.List[string]]::new()
+    }
+
+    process {
+        if (-not $graphConnected) { return }
+
+        foreach ($entry in $UserIdentifier) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                [void]$users.Add($entry.Trim())
+            }
+        }
+    }
+
+    end {
+        if (-not $graphConnected) { return }
+        if ($users.Count -eq 0) {
+            Write-NCMessage "No users specified" -Level WARNING
+            return
+        }
+
+        $resolvedGroup = $null
+        if ($PSCmdlet.ParameterSetName -eq 'ById') {
+            try {
+                $resolvedGroup = Get-MgGroup -GroupId $GroupId -ErrorAction Stop
+            }
+            catch {
+                Write-NCMessage "Entra group with ID '$GroupId' not found: $($_.Exception.Message)" -Level ERROR
+                return
+            }
+        }
+        else {
+            $escapedName = $GroupName.Replace("'", "''")
+            try {
+                $resolvedGroup = Get-MgGroup -Filter "displayName eq '$escapedName'" -All -ErrorAction Stop | Select-Object -First 1
+            }
+            catch {
+                Write-NCMessage "Unable to resolve group '$GroupName': $($_.Exception.Message)" -Level ERROR
+                return
+            }
+
+            if (-not $resolvedGroup) {
+                try {
+                    $resolvedGroup = Get-MgGroup -GroupId $GroupName -ErrorAction Stop
+                }
+                catch {
+                    Write-NCMessage "Entra group '$GroupName' not found by name or ID" -Level ERROR
+                    return
+                }
+            }
+        }
+
+        $results = [System.Collections.Generic.List[object]]::new()
+        $uniqueUsers = $users | Select-Object -Unique
+
+        foreach ($user in $uniqueUsers) {
+            $userId = $null
+            $userLabel = $user
+
+            if ($TreatInputAsId.IsPresent -or $user -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+                $userId = $user
+            }
+            else {
+                $resolvedUser = $null
+                try {
+                    $resolvedUser = Get-MgUser -UserId $user -ErrorAction Stop
+                }
+                catch {
+                    $escapedUser = $user.Replace("'", "''")
+                    try {
+                        $userMatches = Get-MgUser -Filter "displayName eq '$escapedUser'" -All -ErrorAction Stop
+                    }
+                    catch {
+                        Write-NCMessage "Unable to resolve user '$user': $($_.Exception.Message)" -Level ERROR
+                        continue
+                    }
+
+                    if ($userMatches -and $userMatches.Count -gt 0) {
+                        if ($userMatches.Count -gt 1) {
+                            Write-NCMessage "Multiple users matched '$user'. Using the first result ($($userMatches[0].UserPrincipalName))." -Level WARNING
+                        }
+                        $resolvedUser = $userMatches | Select-Object -First 1
+                    }
+                }
+
+                if (-not $resolvedUser) {
+                    Write-NCMessage "User '$user' not found." -Level WARNING
+                    continue
+                }
+
+                $userId = $resolvedUser.Id
+                $userLabel = if ($resolvedUser.UserPrincipalName) { $resolvedUser.UserPrincipalName } else { $resolvedUser.DisplayName }
+            }
+
+            if (-not $userId) {
+                Write-NCMessage "Unable to determine object ID for user '$user'." -Level ERROR
+                continue
+            }
+
+            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add user '$userLabel'")) {
+                $status = 'Added'
+                try {
+                    New-MgGroupMember -GroupId $resolvedGroup.Id -DirectoryObjectId $userId -ErrorAction Stop | Out-Null
+                    Write-NCMessage "Added user '$userLabel' to group '$($resolvedGroup.DisplayName)'." -Level SUCCESS
+                }
+                catch {
+                    if ($_.Exception.Message -match 'added object references already exist') {
+                        $status = 'Exists'
+                        Write-NCMessage "User '$userLabel' is already a member of '$($resolvedGroup.DisplayName)'." -Level WARNING
+                    }
+                    else {
+                        $status = 'Failed'
+                        Write-NCMessage "Failed to add user '$userLabel' to '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
+                    }
+                }
+
+                if ($PassThru.IsPresent) {
+                    $results.Add([pscustomobject][ordered]@{
+                            GroupName  = $resolvedGroup.DisplayName
+                            GroupId    = $resolvedGroup.Id
+                            MemberName = $userLabel
+                            MemberId   = $userId
+                            MemberType = 'User'
+                            Status     = $status
+                        }) | Out-Null
+                }
+            }
+        }
+
+        if ($PassThru.IsPresent -and $results.Count -gt 0) {
+            $results
+        }
+    }
+}
+
 function Export-DistributionGroups {
     <#
     .SYNOPSIS
@@ -182,6 +532,8 @@ function Export-DistributionGroups {
         }
     }
 }
+
+Set-Alias -Name Export-DG -Value Export-DistributionGroups
 
 function Export-DynamicDistributionGroups {
     <#
@@ -363,148 +715,7 @@ function Export-DynamicDistributionGroups {
     }
 }
 
-function Get-DynamicDistributionGroupFilter {
-    <#
-    .SYNOPSIS
-        Returns a simplified filter definition for a Dynamic Distribution Group.
-    .DESCRIPTION
-        Fetches the raw RecipientFilter, strips the boilerplate clauses automatically appended
-        by Exchange Online, normalizes whitespace/quoting, and outputs a copyable expression that
-        can be reused when editing the group filter.
-    .PARAMETER DynamicDistributionGroup
-        Dynamic distribution group identity (name, alias, or SMTP). Accepts pipeline input.
-    .PARAMETER IncludeDefaults
-        Include the default Exchange filter clauses (SystemMailbox, CAS_, Audit mailboxes, etc.).
-    .PARAMETER AsObject
-        Return metadata (name, container, clause list) instead of just the normalized filter string.
-    .EXAMPLE
-        Get-DynamicDistributionGroupFilter -DynamicDistributionGroup "Campus Assago"
-    .EXAMPLE
-        "campusassago@tenant.onmicrosoft.com" | Get-DynamicDistributionGroupFilter -AsObject
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Alias('DDG', 'Identity')]
-        [string[]]$DynamicDistributionGroup,
-        [switch]$IncludeDefaults,
-        [switch]$AsObject
-    )
-
-    begin {
-        Set-ProgressAndInfoPreferences
-        $requestedGroups = [System.Collections.Generic.List[string]]::new()
-    }
-
-    process {
-        foreach ($entry in $DynamicDistributionGroup) {
-            if (-not [string]::IsNullOrWhiteSpace($entry)) {
-                [void]$requestedGroups.Add($entry.Trim())
-            }
-        }
-    }
-
-    end {
-        try {
-            if (-not (Test-EOLConnection)) {
-                Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
-                return
-            }
-
-            $targets = $requestedGroups | Select-Object -Unique
-            if (-not $targets -or $targets.Count -eq 0) {
-                Write-NCMessage "Specify at least one dynamic distribution group." -Level WARNING
-                return
-            }
-
-            $defaultClauses = @(
-                '-not Name -like "SystemMailbox{*"',
-                '-not Name -like "CAS_{*"',
-                '-not RecipientTypeDetailsValue -eq "MailboxPlan"',
-                '-not RecipientTypeDetailsValue -eq "DiscoveryMailbox"',
-                '-not RecipientTypeDetailsValue -eq "PublicFolderMailbox"',
-                '-not RecipientTypeDetailsValue -eq "ArbitrationMailbox"',
-                '-not RecipientTypeDetailsValue -eq "AuditLogMailbox"',
-                '-not RecipientTypeDetailsValue -eq "AuxAuditLogMailbox"',
-                '-not RecipientTypeDetailsValue -eq "SupervisoryReviewPolicyMailbox"'
-            )
-
-            $normalizeFilter = {
-                param($filter)
-                if ([string]::IsNullOrWhiteSpace($filter)) {
-                    return $null
-                }
-
-                $value = $filter -replace "`r?`n", ' '
-                $value = $value -replace '[()]', ' '
-                $value = $value -replace '\s+-and\s+', ' -and '
-                $value = $value -replace '\s+-or\s+', ' -or '
-                $value = $value -replace '\s+-not\s+', ' -not '
-                $value = $value -replace '\s+', ' '
-                $value = $value.Replace("'", '"')
-                return $value.Trim()
-            }
-
-            $splitClauses = {
-                param($filter)
-                if ([string]::IsNullOrWhiteSpace($filter)) {
-                    return @()
-                }
-
-                return ($filter -split ' -and ' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-            }
-
-            foreach ($identity in $targets) {
-                try {
-                    $group = Get-DynamicDistributionGroup -Identity $identity -ErrorAction Stop
-                }
-                catch {
-                    Write-NCMessage "Dynamic distribution group '$identity' not found: $($_.Exception.Message)" -Level WARNING
-                    continue
-                }
-
-                $rawFilter = $group.RecipientFilter
-                if ([string]::IsNullOrWhiteSpace($rawFilter)) {
-                    Write-NCMessage "Recipient filter not available for '$($group.DisplayName)'." -Level WARNING
-                    continue
-                }
-
-                $normalizedFilter = & $normalizeFilter $rawFilter
-                $clauses = & $splitClauses $normalizedFilter
-
-                if (-not $IncludeDefaults.IsPresent -and $clauses.Count -gt 0) {
-                    $clauses = $clauses | Where-Object { $defaultClauses -notcontains $_ }
-                }
-
-                if (-not $clauses -or $clauses.Count -eq 0) {
-                    $clauses = & $splitClauses $normalizedFilter
-                }
-
-                $cleanedFilter = $clauses -join ' -and '
-
-                $result = [pscustomobject][ordered]@{
-                    Name               = $group.DisplayName
-                    Identity           = $group.Identity
-                    RecipientContainer = $group.RecipientContainer
-                    Filter             = $cleanedFilter
-                    RawFilter          = $rawFilter
-                    FilterClauses      = $clauses
-                    IncludeDefaults    = $IncludeDefaults.IsPresent
-                }
-
-                if ($AsObject.IsPresent) {
-                    $result
-                }
-                else {
-                    $cleanedFilter
-                }
-            }
-        }
-        finally {
-            Restore-ProgressAndInfoPreferences
-        }
-    }
-}
+Set-Alias -Name Export-DDG -Value Export-DynamicDistributionGroups
 
 function Export-M365Group {
     <#
@@ -685,6 +896,151 @@ function Export-M365Group {
         }
     }
 }
+
+function Get-DynamicDistributionGroupFilter {
+    <#
+    .SYNOPSIS
+        Returns a simplified filter definition for a Dynamic Distribution Group.
+    .DESCRIPTION
+        Fetches the raw RecipientFilter, strips the boilerplate clauses automatically appended
+        by Exchange Online, normalizes whitespace/quoting, and outputs a copyable expression that
+        can be reused when editing the group filter.
+    .PARAMETER DynamicDistributionGroup
+        Dynamic distribution group identity (name, alias, or SMTP). Accepts pipeline input.
+    .PARAMETER IncludeDefaults
+        Include the default Exchange filter clauses (SystemMailbox, CAS_, Audit mailboxes, etc.).
+    .PARAMETER AsObject
+        Return metadata (name, container, clause list) instead of just the normalized filter string.
+    .EXAMPLE
+        Get-DynamicDistributionGroupFilter -DynamicDistributionGroup "Campus Assago"
+    .EXAMPLE
+        "campusassago@tenant.onmicrosoft.com" | Get-DynamicDistributionGroupFilter -AsObject
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('DDG', 'Identity')]
+        [string[]]$DynamicDistributionGroup,
+        [switch]$IncludeDefaults,
+        [switch]$AsObject
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $requestedGroups = [System.Collections.Generic.List[string]]::new()
+    }
+
+    process {
+        foreach ($entry in $DynamicDistributionGroup) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                [void]$requestedGroups.Add($entry.Trim())
+            }
+        }
+    }
+
+    end {
+        try {
+            if (-not (Test-EOLConnection)) {
+                Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+                return
+            }
+
+            $targets = $requestedGroups | Select-Object -Unique
+            if (-not $targets -or $targets.Count -eq 0) {
+                Write-NCMessage "Specify at least one dynamic distribution group." -Level WARNING
+                return
+            }
+
+            $defaultClauses = @(
+                '-not Name -like "SystemMailbox{*"',
+                '-not Name -like "CAS_{*"',
+                '-not RecipientTypeDetailsValue -eq "MailboxPlan"',
+                '-not RecipientTypeDetailsValue -eq "DiscoveryMailbox"',
+                '-not RecipientTypeDetailsValue -eq "PublicFolderMailbox"',
+                '-not RecipientTypeDetailsValue -eq "ArbitrationMailbox"',
+                '-not RecipientTypeDetailsValue -eq "AuditLogMailbox"',
+                '-not RecipientTypeDetailsValue -eq "AuxAuditLogMailbox"',
+                '-not RecipientTypeDetailsValue -eq "SupervisoryReviewPolicyMailbox"'
+            )
+
+            $normalizeFilter = {
+                param($filter)
+                if ([string]::IsNullOrWhiteSpace($filter)) {
+                    return $null
+                }
+
+                $value = $filter -replace "`r?`n", ' '
+                $value = $value -replace '[()]', ' '
+                $value = $value -replace '\s+-and\s+', ' -and '
+                $value = $value -replace '\s+-or\s+', ' -or '
+                $value = $value -replace '\s+-not\s+', ' -not '
+                $value = $value -replace '\s+', ' '
+                $value = $value.Replace("'", '"')
+                return $value.Trim()
+            }
+
+            $splitClauses = {
+                param($filter)
+                if ([string]::IsNullOrWhiteSpace($filter)) {
+                    return @()
+                }
+
+                return ($filter -split ' -and ' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            }
+
+            foreach ($identity in $targets) {
+                try {
+                    $group = Get-DynamicDistributionGroup -Identity $identity -ErrorAction Stop
+                }
+                catch {
+                    Write-NCMessage "Dynamic distribution group '$identity' not found: $($_.Exception.Message)" -Level WARNING
+                    continue
+                }
+
+                $rawFilter = $group.RecipientFilter
+                if ([string]::IsNullOrWhiteSpace($rawFilter)) {
+                    Write-NCMessage "Recipient filter not available for '$($group.DisplayName)'." -Level WARNING
+                    continue
+                }
+
+                $normalizedFilter = & $normalizeFilter $rawFilter
+                $clauses = & $splitClauses $normalizedFilter
+
+                if (-not $IncludeDefaults.IsPresent -and $clauses.Count -gt 0) {
+                    $clauses = $clauses | Where-Object { $defaultClauses -notcontains $_ }
+                }
+
+                if (-not $clauses -or $clauses.Count -eq 0) {
+                    $clauses = & $splitClauses $normalizedFilter
+                }
+
+                $cleanedFilter = $clauses -join ' -and '
+
+                $result = [pscustomobject][ordered]@{
+                    Name               = $group.DisplayName
+                    Identity           = $group.Identity
+                    RecipientContainer = $group.RecipientContainer
+                    Filter             = $cleanedFilter
+                    RawFilter          = $rawFilter
+                    FilterClauses      = $clauses
+                    IncludeDefaults    = $IncludeDefaults.IsPresent
+                }
+
+                if ($AsObject.IsPresent) {
+                    $result
+                }
+                else {
+                    $cleanedFilter
+                }
+            }
+        }
+        finally {
+            Restore-ProgressAndInfoPreferences
+        }
+    }
+}
+
+Set-Alias -Name Get-DDGRecipientFilter -Value Get-DynamicDistributionGroupFilter
 
 function Get-RoleGroupsMembers {
     <#
@@ -920,177 +1276,6 @@ function Get-UserGroups {
     }
 }
 
-function Add-EntraGroupDevice {
-    <#
-    .SYNOPSIS
-        Adds one or more devices to an Entra group.
-    .DESCRIPTION
-        Connects to Microsoft Graph, resolves the target group by display name or ID, then adds
-        the provided devices by display name or object ID. Accepts pipeline input for devices.
-    .PARAMETER GroupName
-        Display name of the Entra group.
-    .PARAMETER GroupId
-        Object ID of the Entra group.
-    .PARAMETER DeviceIdentifier
-        Device display name or object ID. Accepts pipeline input and common Id/DisplayName property names.
-    .PARAMETER TreatInputAsId
-        Treat every DeviceIdentifier as an object ID without attempting name resolution.
-    .PARAMETER PassThru
-        Emit a summary object for each processed device.
-    .EXAMPLE
-        "PC1", "PC2" | Add-EntraGroupDevice -GroupName "My Entra Group"
-    .EXAMPLE
-        Add-EntraGroupDevice -GroupId "00000000-0000-0000-0000-000000000000" -DeviceIdentifier "PC1"
-    #>
-    [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
-    param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
-        [Alias('Group', 'DisplayName')]
-        [string]$GroupName,
-
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
-        [string]$GroupId,
-
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Alias('Device', 'DeviceName', 'Id', 'DeviceId', 'Name')]
-        [string[]]$DeviceIdentifier,
-
-        [switch]$TreatInputAsId,
-        [switch]$PassThru
-    )
-
-    begin {
-        $graphConnected = Test-MgGraphConnection -Scopes @('Group.ReadWrite.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
-        if (-not $graphConnected) {
-            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
-        }
-
-        $devices = [System.Collections.Generic.List[string]]::new()
-    }
-
-    process {
-        if (-not $graphConnected) { return }
-
-        foreach ($entry in $DeviceIdentifier) {
-            if (-not [string]::IsNullOrWhiteSpace($entry)) {
-                [void]$devices.Add($entry.Trim())
-            }
-        }
-    }
-
-    end {
-        if (-not $graphConnected) { return }
-        if ($devices.Count -eq 0) {
-            Write-NCMessage "No devices specified" -Level WARNING
-            return
-        }
-
-        $resolvedGroup = $null
-        if ($PSCmdlet.ParameterSetName -eq 'ById') {
-            try {
-                $resolvedGroup = Get-MgGroup -GroupId $GroupId -ErrorAction Stop
-            }
-            catch {
-                Write-NCMessage "Entra group with ID '$GroupId' not found: $($_.Exception.Message)" -Level ERROR
-                return
-            }
-        }
-        else {
-            $escapedName = $GroupName.Replace("'", "''")
-            try {
-                $resolvedGroup = Get-MgGroup -Filter "displayName eq '$escapedName'" -All -ErrorAction Stop | Select-Object -First 1
-            }
-            catch {
-                Write-NCMessage "Unable to resolve group '$GroupName': $($_.Exception.Message)" -Level ERROR
-                return
-            }
-
-            if (-not $resolvedGroup) {
-                try {
-                    $resolvedGroup = Get-MgGroup -GroupId $GroupName -ErrorAction Stop
-                }
-                catch {
-                    Write-NCMessage "Entra group '$GroupName' not found by name or ID" -Level ERROR
-                    return
-                }
-            }
-        }
-
-        $results = [System.Collections.Generic.List[object]]::new()
-        $uniqueDevices = $devices | Select-Object -Unique
-
-        foreach ($device in $uniqueDevices) {
-            $deviceId = $null
-            $deviceLabel = $device
-
-            if ($TreatInputAsId.IsPresent -or $device -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-                $deviceId = $device
-            }
-            else {
-                $escapedDevice = $device.Replace("'", "''")
-                try {
-                    $deviceMatches = Get-MgDevice -Filter "displayName eq '$escapedDevice'" -All -ErrorAction Stop
-                }
-                catch {
-                    Write-NCMessage "Unable to resolve device '$device': $($_.Exception.Message)" -Level ERROR
-                    continue
-                }
-
-                if (-not $deviceMatches -or $deviceMatches.Count -eq 0) {
-                    Write-NCMessage "Device '$device' not found" -Level WARNING
-                    continue
-                }
-
-                if ($deviceMatches.Count -gt 1) {
-                    Write-NCMessage "Multiple devices matched '$device'. Using the first result ($($deviceMatches[0].DisplayName))" -Level WARNING
-                }
-
-                $selected = $deviceMatches | Select-Object -First 1
-                $deviceId = $selected.Id
-                $deviceLabel = $selected.DisplayName
-            }
-
-            if (-not $deviceId) {
-                Write-NCMessage "Unable to determine object ID for device '$device'." -Level ERROR
-                continue
-            }
-
-            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add device '$deviceLabel'")) {
-                $status = 'Added'
-                try {
-                    New-MgGroupMember -GroupId $resolvedGroup.Id -DirectoryObjectId $deviceId -ErrorAction Stop | Out-Null
-                    Write-NCMessage "Added device '$deviceLabel' to group '$($resolvedGroup.DisplayName)'" -Level SUCCESS
-                }
-                catch {
-                    if ($_.Exception.Message -match 'added object references already exist') {
-                        $status = 'Exists'
-                        Write-NCMessage "Device '$deviceLabel' is already a member of '$($resolvedGroup.DisplayName)'" -Level WARNING
-                    }
-                    else {
-                        $status = 'Failed'
-                        Write-NCMessage "Failed to add device '$deviceLabel' to '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
-                    }
-                }
-
-                if ($PassThru.IsPresent) {
-                    $results.Add([pscustomobject][ordered]@{
-                            GroupName  = $resolvedGroup.DisplayName
-                            GroupId    = $resolvedGroup.Id
-                            MemberName = $deviceLabel
-                            MemberId   = $deviceId
-                            MemberType = 'Device'
-                            Status     = $status
-                        }) | Out-Null
-                }
-            }
-        }
-
-        if ($PassThru.IsPresent -and $results.Count -gt 0) {
-            $results
-        }
-    }
-}
-
 function Remove-EntraGroupDevice {
     <#
     .SYNOPSIS
@@ -1250,185 +1435,6 @@ function Remove-EntraGroupDevice {
                             MemberName = $deviceLabel
                             MemberId   = $deviceId
                             MemberType = 'Device'
-                            Status     = $status
-                        }) | Out-Null
-                }
-            }
-        }
-
-        if ($PassThru.IsPresent -and $results.Count -gt 0) {
-            $results
-        }
-    }
-}
-
-function Add-EntraGroupUser {
-    <#
-    .SYNOPSIS
-        Adds one or more users to an Entra group.
-    .DESCRIPTION
-        Connects to Microsoft Graph, resolves the target group by display name or ID, then adds
-        the provided users by UPN/display name or object ID. Accepts pipeline input for users.
-    .PARAMETER GroupName
-        Display name of the Entra group.
-    .PARAMETER GroupId
-        Object ID of the Entra group.
-    .PARAMETER UserIdentifier
-        User principal name, display name, or object ID. Accepts pipeline input and common Id/DisplayName property names.
-    .PARAMETER TreatInputAsId
-        Treat every UserIdentifier as an object ID without attempting name resolution.
-    .PARAMETER PassThru
-        Emit a summary object for each processed user.
-    .EXAMPLE
-        "user1@contoso.com","user2@contoso.com" | Add-EntraGroupUser -GroupName "My Entra Group"
-    .EXAMPLE
-        Add-EntraGroupUser -GroupId "00000000-0000-0000-0000-000000000000" -UserIdentifier "user1@contoso.com"
-    #>
-    [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
-    param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
-        [Alias('Group', 'DisplayName')]
-        [string]$GroupName,
-
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
-        [string]$GroupId,
-
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Alias('User', 'UPN', 'Mail', 'Id', 'UserId', 'DisplayName')]
-        [string[]]$UserIdentifier,
-
-        [switch]$TreatInputAsId,
-        [switch]$PassThru
-    )
-
-    begin {
-        $graphConnected = Test-MgGraphConnection -Scopes @('Group.ReadWrite.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
-        if (-not $graphConnected) {
-            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
-        }
-
-        $users = [System.Collections.Generic.List[string]]::new()
-    }
-
-    process {
-        if (-not $graphConnected) { return }
-
-        foreach ($entry in $UserIdentifier) {
-            if (-not [string]::IsNullOrWhiteSpace($entry)) {
-                [void]$users.Add($entry.Trim())
-            }
-        }
-    }
-
-    end {
-        if (-not $graphConnected) { return }
-        if ($users.Count -eq 0) {
-            Write-NCMessage "No users specified" -Level WARNING
-            return
-        }
-
-        $resolvedGroup = $null
-        if ($PSCmdlet.ParameterSetName -eq 'ById') {
-            try {
-                $resolvedGroup = Get-MgGroup -GroupId $GroupId -ErrorAction Stop
-            }
-            catch {
-                Write-NCMessage "Entra group with ID '$GroupId' not found: $($_.Exception.Message)" -Level ERROR
-                return
-            }
-        }
-        else {
-            $escapedName = $GroupName.Replace("'", "''")
-            try {
-                $resolvedGroup = Get-MgGroup -Filter "displayName eq '$escapedName'" -All -ErrorAction Stop | Select-Object -First 1
-            }
-            catch {
-                Write-NCMessage "Unable to resolve group '$GroupName': $($_.Exception.Message)" -Level ERROR
-                return
-            }
-
-            if (-not $resolvedGroup) {
-                try {
-                    $resolvedGroup = Get-MgGroup -GroupId $GroupName -ErrorAction Stop
-                }
-                catch {
-                    Write-NCMessage "Entra group '$GroupName' not found by name or ID" -Level ERROR
-                    return
-                }
-            }
-        }
-
-        $results = [System.Collections.Generic.List[object]]::new()
-        $uniqueUsers = $users | Select-Object -Unique
-
-        foreach ($user in $uniqueUsers) {
-            $userId = $null
-            $userLabel = $user
-
-            if ($TreatInputAsId.IsPresent -or $user -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-                $userId = $user
-            }
-            else {
-                $resolvedUser = $null
-                try {
-                    $resolvedUser = Get-MgUser -UserId $user -ErrorAction Stop
-                }
-                catch {
-                    $escapedUser = $user.Replace("'", "''")
-                    try {
-                        $userMatches = Get-MgUser -Filter "displayName eq '$escapedUser'" -All -ErrorAction Stop
-                    }
-                    catch {
-                        Write-NCMessage "Unable to resolve user '$user': $($_.Exception.Message)" -Level ERROR
-                        continue
-                    }
-
-                    if ($userMatches -and $userMatches.Count -gt 0) {
-                        if ($userMatches.Count -gt 1) {
-                            Write-NCMessage "Multiple users matched '$user'. Using the first result ($($userMatches[0].UserPrincipalName))." -Level WARNING
-                        }
-                        $resolvedUser = $userMatches | Select-Object -First 1
-                    }
-                }
-
-                if (-not $resolvedUser) {
-                    Write-NCMessage "User '$user' not found." -Level WARNING
-                    continue
-                }
-
-                $userId = $resolvedUser.Id
-                $userLabel = if ($resolvedUser.UserPrincipalName) { $resolvedUser.UserPrincipalName } else { $resolvedUser.DisplayName }
-            }
-
-            if (-not $userId) {
-                Write-NCMessage "Unable to determine object ID for user '$user'." -Level ERROR
-                continue
-            }
-
-            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add user '$userLabel'")) {
-                $status = 'Added'
-                try {
-                    New-MgGroupMember -GroupId $resolvedGroup.Id -DirectoryObjectId $userId -ErrorAction Stop | Out-Null
-                    Write-NCMessage "Added user '$userLabel' to group '$($resolvedGroup.DisplayName)'." -Level SUCCESS
-                }
-                catch {
-                    if ($_.Exception.Message -match 'added object references already exist') {
-                        $status = 'Exists'
-                        Write-NCMessage "User '$userLabel' is already a member of '$($resolvedGroup.DisplayName)'." -Level WARNING
-                    }
-                    else {
-                        $status = 'Failed'
-                        Write-NCMessage "Failed to add user '$userLabel' to '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
-                    }
-                }
-
-                if ($PassThru.IsPresent) {
-                    $results.Add([pscustomobject][ordered]@{
-                            GroupName  = $resolvedGroup.DisplayName
-                            GroupId    = $resolvedGroup.Id
-                            MemberName = $userLabel
-                            MemberId   = $userId
-                            MemberType = 'User'
                             Status     = $status
                         }) | Out-Null
                 }
@@ -1619,7 +1625,3 @@ function Remove-EntraGroupUser {
         }
     }
 }
-
-Set-Alias -Name Export-DG -Value Export-DistributionGroups
-Set-Alias -Name Export-DDG -Value Export-DynamicDistributionGroups
-Set-Alias -Name Get-DDGRecipientFilter -Value Get-DynamicDistributionGroupFilter

@@ -205,6 +205,166 @@ function Add-UserMsolAccountSku {
     }
 }
 
+function Copy-UserMsolAccountSku {
+    <#
+    .SYNOPSIS
+        Copies all licenses from one user to another without removing them from the source.
+    .DESCRIPTION
+        Reads source user licenses (including disabled service plans) and assigns them to the destination user
+        if they are not already present. Uses Microsoft Graph and the cached license catalog for friendly names.
+    .PARAMETER SourceUserPrincipalName
+        UserPrincipalName or object ID of the source user.
+    .PARAMETER DestinationUserPrincipalName
+        UserPrincipalName or object ID of the destination user.
+    .EXAMPLE
+        Copy-UserMsolAccountSku -SourceUserPrincipalName user1@contoso.com -DestinationUserPrincipalName user2@contoso.com
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Alias('Source', 'From')]
+        [string]$SourceUserPrincipalName,
+        [Parameter(Mandatory = $true)]
+        [Alias('Destination', 'To')]
+        [string]$DestinationUserPrincipalName
+    )
+
+    Set-ProgressAndInfoPreferences
+    try {
+        $GraphConnection = Test-MgGraphConnection
+        if (-not $GraphConnection) {
+            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+            return
+        }
+
+        $resolvedSource = Find-UserRecipient -UserPrincipalName $SourceUserPrincipalName
+        $resolvedDestination = Find-UserRecipient -UserPrincipalName $DestinationUserPrincipalName
+
+        if (-not $resolvedSource) {
+            Write-NCMessage "Unable to resolve source user recipient for $SourceUserPrincipalName" -Level ERROR
+            return
+        }
+        if (-not $resolvedDestination) {
+            Write-NCMessage "Unable to resolve destination user recipient for $DestinationUserPrincipalName" -Level ERROR
+            return
+        }
+        if ($resolvedSource -eq $resolvedDestination) {
+            Write-NCMessage "Source and destination users are the same. Aborting." -Level ERROR
+            return
+        }
+
+        try {
+            $sourceUser = Get-MgUser -UserId $resolvedSource -ErrorAction Stop
+            $destinationUser = Get-MgUser -UserId $resolvedDestination -ErrorAction Stop
+        }
+        catch {
+            Write-NCMessage "Unable to retrieve users: $($_.Exception.Message)" -Level ERROR
+            return
+        }
+
+        try {
+            $licenseCatalog = Get-LicenseCatalog
+        }
+        catch {
+            Write-NCMessage "License catalog unavailable: $($_.Exception.Message)" -Level WARNING
+            $licenseCatalog = $null
+        }
+
+        $licenseLookup = $null
+        $customLookup = $null
+        if ($licenseCatalog) {
+            if ($licenseCatalog.PSObject.Properties['Lookup']) {
+                $licenseLookup = $licenseCatalog.Lookup
+            }
+            if ($licenseCatalog.PSObject.Properties['CustomLookup']) {
+                $customLookup = $licenseCatalog.CustomLookup
+            }
+        }
+        $maxAttempts = 3
+
+        try {
+            $sourceLicenses = Invoke-NCRetry -Action {
+                Get-MgUserLicenseDetail -UserId $sourceUser.Id -ErrorAction Stop
+            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve licenses for $($sourceUser.UserPrincipalName)" -OnError {
+                param($attempt, $max, $err)
+                Write-NCMessage "Failed to retrieve licenses for $($sourceUser.UserPrincipalName), attempt $attempt of $max." -Level ERROR
+            }
+        }
+        catch {
+            Write-NCMessage "Failed to retrieve licenses for $($sourceUser.UserPrincipalName) after $maxAttempts attempts." -Level ERROR
+            return
+        }
+
+        if (-not $sourceLicenses -or $sourceLicenses.Count -eq 0) {
+            Write-NCMessage "Source user $($sourceUser.UserPrincipalName) has no licenses to copy." -Level WARNING
+            return
+        }
+
+        try {
+            $destinationLicenses = Get-MgUserLicenseDetail -UserId $destinationUser.Id -ErrorAction Stop
+        }
+        catch {
+            Write-NCMessage "Unable to read destination licenses for $($destinationUser.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
+            return
+        }
+
+        $destinationSkuIds = if ($destinationLicenses) { $destinationLicenses.SkuId } else { @() }
+        $addLicenses = @()
+        $licenseNames = @()
+
+        foreach ($lic in $sourceLicenses) {
+            if ($destinationSkuIds -contains $lic.SkuId) {
+                Write-NCMessage "Destination already has $($lic.SkuPartNumber); skipping add." -Level VERBOSE
+                continue
+            }
+
+            $addLicenses += @{
+                SkuId         = $lic.SkuId
+                DisabledPlans = if ($lic.DisabledPlans) { $lic.DisabledPlans } else { @() }
+            }
+
+            $matchSource = $null
+            $name = if ($licenseLookup) {
+                Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $lic.SkuPartNumber -FallbackLookup $customLookup -MatchSource ([ref]$matchSource)
+            }
+            if ($name) {
+                $licenseNames += $name
+            }
+            else {
+                $licenseNames += $lic.SkuPartNumber
+            }
+        }
+
+        if ($addLicenses.Count -eq 0) {
+            Write-NCMessage "Nothing to copy: destination already has all licenses from $($sourceUser.UserPrincipalName)." -Level WARNING
+            return
+        }
+
+        $uniqueNames = $licenseNames | Select-Object -Unique
+        $actionSummary = "Copy licenses ($($uniqueNames -join ', ')) from $($sourceUser.UserPrincipalName) to $($destinationUser.UserPrincipalName)"
+
+        if (-not $PSCmdlet.ShouldProcess($destinationUser.UserPrincipalName, $actionSummary)) {
+            return
+        }
+
+        try {
+            Invoke-NCRetry -Action {
+                Set-MgUserLicense -UserId $destinationUser.Id -AddLicenses $addLicenses -RemoveLicenses @() -ErrorAction Stop
+            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "assign licenses to $($destinationUser.UserPrincipalName)" -OnError {
+                param($attempt, $max, $err)
+                Write-NCMessage "Failed to assign licenses to $($destinationUser.UserPrincipalName), attempt $attempt of $max." -Level ERROR
+            } | Out-Null
+            Write-NCMessage "Copied licenses to $($destinationUser.UserPrincipalName): $($uniqueNames -join ', ')." -Level SUCCESS
+        }
+        catch {
+            Write-NCMessage "License copy to $($destinationUser.UserPrincipalName) failed: $($_.Exception.Message)" -Level ERROR
+        }
+    }
+    finally {
+        Restore-ProgressAndInfoPreferences
+    }
+}
+
 function Export-MsolAccountSku {
     <#
     .SYNOPSIS
@@ -359,116 +519,6 @@ function Export-MsolAccountSku {
     }
 }
 
-function Get-UserMsolAccountSku {
-    <#
-    .SYNOPSIS
-        Shows licenses assigned to a specific user.
-    .DESCRIPTION
-        Downloads the license catalog, fetches the target user via Microsoft Graph, and prints each
-        assigned SKU with the mapped product name (when available).
-    .PARAMETER UserPrincipalName
-        Target user UPN or object ID.
-    .PARAMETER ForceLicenseCatalogRefresh
-        Force a fresh download of the cached license catalog before processing.
-    .EXAMPLE
-        Get-UserMsolAccountSku -UserPrincipalName "user@contoso.com"
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true, HelpMessage = "User Principal Name (e.g. user@contoso.com)")]
-        [string] $UserPrincipalName,
-        [switch] $ForceLicenseCatalogRefresh
-    )
-
-    Set-ProgressAndInfoPreferences
-    try {
-        $GraphConnection = Test-MgGraphConnection
-        if (-not $GraphConnection) {
-            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
-            return
-        }
-
-        try {
-            $licenseCatalog = Get-LicenseCatalog -IncludeMetadata -ForceRefresh:$ForceLicenseCatalogRefresh.IsPresent
-        }
-        catch {
-            Write-NCMessage $_ -Level ERROR
-            return
-        }
-
-        $licenseLookup = $licenseCatalog.Lookup
-        $customLookup = $licenseCatalog.CustomLookup
-        $maxAttempts = 3
-
-        $resolvedRecipient = Find-UserRecipient -UserPrincipalName $UserPrincipalName
-        if (-not $resolvedRecipient) {
-            Write-NCMessage "Unable to resolve user recipient for $UserPrincipalName" -Level ERROR
-            return
-        } else {
-            $UserPrincipalName = $resolvedRecipient
-        }
-
-        try {
-            $User = Get-MgUser -UserId $UserPrincipalName -ErrorAction Stop
-        }
-        catch {
-            Write-NCMessage "User $UserPrincipalName not found or query failed: $_" -Level ERROR
-            return
-        }
-
-        $catalogSource = $licenseCatalog.Source
-        $catalogUpdated = if ($licenseCatalog.LastCommitUtc) {
-            $licenseCatalog.LastCommitUtc.ToLocalTime().ToString($NCVars.DateTimeString_Full)
-        } else { $null }
-        $catalogInfo = if ($catalogSource -or $catalogUpdated) {
-            $parts = @()
-            if ($catalogSource) { $parts += $catalogSource }
-            if ($catalogUpdated) { $parts += "last updated: $catalogUpdated" }
-            " (source: {0})" -f ($parts -join ', ')
-        }
-        else { '' }
-
-        Write-NCMessage ("`nProcessing user: {0} <{1}>{2}`n" -f $User.DisplayName, $User.UserPrincipalName, $catalogInfo) -Level SUCCESS
-
-        try {
-            $GraphLicense = Invoke-NCRetry -Action {
-                Get-MgUserLicenseDetail -UserId $User.Id -ErrorAction Stop
-            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve licenses for $($User.UserPrincipalName)" -OnError {
-                param($attempt, $max, $err)
-                Write-NCMessage "Failed to retrieve licenses for $($User.UserPrincipalName), attempt $attempt of $max" -Level ERROR
-            }
-        }
-        catch {
-            Write-NCMessage "Failed to retrieve licenses for $($User.UserPrincipalName) after $maxAttempts attempts." -Level ERROR
-            return
-        }
-
-        if ($GraphLicense -and $GraphLicense.Count -gt 0) {
-            foreach ($lic in $GraphLicense) {
-                $skuPart = $lic.SkuPartNumber
-                $skuId = $lic.SkuId
-                $matchSource = $null
-                $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $skuPart -FallbackLookup $customLookup -MatchSource ([ref]$matchSource)
-                if ($display) {
-                    $suffix = if ($matchSource -and $matchSource -ne 'Primary') { ' (custom)' } else { '' }
-                    Write-NCMessage ("  - {0}{2} ({1})" -f $display, $skuId, $suffix) -Level INFO
-                }
-                else {
-                    Write-Verbose ("  - Unknown license: {0} ({1})" -f $skuPart, $skuId)
-                    Write-NCMessage ("  - {0} ({1})" -f $skuPart, $skuId) -Level WARNING
-                }
-            }
-        }
-        else {
-            Write-NCMessage "No licenses assigned to this user." -Level VERBOSE
-        }
-    }
-    finally {
-        Add-EmptyLine
-        Restore-ProgressAndInfoPreferences
-    }
-}
-
 function Get-TenantMsolAccountSku {
     <#
     .SYNOPSIS
@@ -580,6 +630,118 @@ function Get-TenantMsolAccountSku {
         }
     }
     finally {
+        Restore-ProgressAndInfoPreferences
+    }
+}
+
+function Get-UserMsolAccountSku {
+    <#
+    .SYNOPSIS
+        Shows licenses assigned to a specific user.
+    .DESCRIPTION
+        Downloads the license catalog, fetches the target user via Microsoft Graph, and prints each
+        assigned SKU with the mapped product name (when available).
+    .PARAMETER UserPrincipalName
+        Target user UPN or object ID.
+    .PARAMETER ForceLicenseCatalogRefresh
+        Force a fresh download of the cached license catalog before processing.
+    .EXAMPLE
+        Get-UserMsolAccountSku -UserPrincipalName "user@contoso.com"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, HelpMessage = "User Principal Name (e.g. user@contoso.com)")]
+        [string] $UserPrincipalName,
+        [switch] $ForceLicenseCatalogRefresh
+    )
+
+    Set-ProgressAndInfoPreferences
+    try {
+        $GraphConnection = Test-MgGraphConnection
+        if (-not $GraphConnection) {
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+            return
+        }
+
+        try {
+            $licenseCatalog = Get-LicenseCatalog -IncludeMetadata -ForceRefresh:$ForceLicenseCatalogRefresh.IsPresent
+        }
+        catch {
+            Write-NCMessage $_ -Level ERROR
+            return
+        }
+
+        $licenseLookup = $licenseCatalog.Lookup
+        $customLookup = $licenseCatalog.CustomLookup
+        $maxAttempts = 3
+
+        $resolvedRecipient = Find-UserRecipient -UserPrincipalName $UserPrincipalName
+        if (-not $resolvedRecipient) {
+            Write-NCMessage "Unable to resolve user recipient for $UserPrincipalName" -Level ERROR
+            return
+        }
+        else {
+            $UserPrincipalName = $resolvedRecipient
+        }
+
+        try {
+            $User = Get-MgUser -UserId $UserPrincipalName -ErrorAction Stop
+        }
+        catch {
+            Write-NCMessage "User $UserPrincipalName not found or query failed: $_" -Level ERROR
+            return
+        }
+
+        $catalogSource = $licenseCatalog.Source
+        $catalogUpdated = if ($licenseCatalog.LastCommitUtc) {
+            $licenseCatalog.LastCommitUtc.ToLocalTime().ToString($NCVars.DateTimeString_Full)
+        }
+        else { $null }
+        $catalogInfo = if ($catalogSource -or $catalogUpdated) {
+            $parts = @()
+            if ($catalogSource) { $parts += $catalogSource }
+            if ($catalogUpdated) { $parts += "last updated: $catalogUpdated" }
+            " (source: {0})" -f ($parts -join ', ')
+        }
+        else { '' }
+
+        Write-NCMessage ("`nProcessing user: {0} <{1}>{2}`n" -f $User.DisplayName, $User.UserPrincipalName, $catalogInfo) -Level SUCCESS
+
+        try {
+            $GraphLicense = Invoke-NCRetry -Action {
+                Get-MgUserLicenseDetail -UserId $User.Id -ErrorAction Stop
+            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve licenses for $($User.UserPrincipalName)" -OnError {
+                param($attempt, $max, $err)
+                Write-NCMessage "Failed to retrieve licenses for $($User.UserPrincipalName), attempt $attempt of $max" -Level ERROR
+            }
+        }
+        catch {
+            Write-NCMessage "Failed to retrieve licenses for $($User.UserPrincipalName) after $maxAttempts attempts." -Level ERROR
+            return
+        }
+
+        if ($GraphLicense -and $GraphLicense.Count -gt 0) {
+            foreach ($lic in $GraphLicense) {
+                $skuPart = $lic.SkuPartNumber
+                $skuId = $lic.SkuId
+                $matchSource = $null
+                $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $skuPart -FallbackLookup $customLookup -MatchSource ([ref]$matchSource)
+                if ($display) {
+                    $suffix = if ($matchSource -and $matchSource -ne 'Primary') { ' (custom)' } else { '' }
+                    Write-NCMessage ("  - {0}{2} ({1})" -f $display, $skuId, $suffix) -Level INFO
+                }
+                else {
+                    Write-Verbose ("  - Unknown license: {0} ({1})" -f $skuPart, $skuId)
+                    Write-NCMessage ("  - {0} ({1})" -f $skuPart, $skuId) -Level WARNING
+                }
+            }
+        }
+        else {
+            Write-NCMessage "No licenses assigned to this user." -Level VERBOSE
+        }
+    }
+    finally {
+        Add-EmptyLine
         Restore-ProgressAndInfoPreferences
     }
 }

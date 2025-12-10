@@ -18,6 +18,7 @@
         'Connect-EOL',
         'Connect-Nebula',
         'Copy-OoOMessage',
+        'Copy-UserMsolAccountSku',
         'Disable-UserDevices',
         'Disable-UserSignIn',
         'Disconnect-Nebula',
@@ -87,6 +88,7 @@
 - Added Remove-EntraGroupDevice and Remove-EntraGroupUser cmdlets to manage removals from Entra groups.
 - Renamed Add-MsolAccountSku and Move-MsolAccountSku to Add-UserMsolAccountSku and Move-UserMsolAccountSku for clarity.
 - Added Remove-UserMsolAccountSku cmdlet to remove licenses from users.
+- Added Copy-UserMsolAccountSku cmdlet to copy licenses between users.
 - Added Copy-OoOMessage cmdlet to duplicate Out of Office messages between mailboxes, Export-CalendarPermission to export calendar permissions, and Set-OoO to set Out of Office messages.
 - Added Disable-UserDevices cmdlet to disable user devices, Disable-UserSignIn cmdlet to disable sign-in for users and Revoke-UserSessions cmdlet to revoke user sessions.
 - Added Get-RoomDetails cmdlet to retrieve detailed information about meeting rooms.
