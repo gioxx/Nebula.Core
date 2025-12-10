@@ -47,6 +47,8 @@
         'Get-UserMsolAccountSku',
         'Move-UserMsolAccountSku',
         'New-SharedMailbox',
+        'Remove-EntraGroupDevice',
+        'Remove-EntraGroupUser',
         'Remove-MboxAlias',
         'Remove-MboxPermission',
         'Remove-UserMsolAccountSku',
@@ -82,6 +84,7 @@
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/Assets/icon.png'
             ReleaseNotes = @'
 - Added Add-EntraGroupDevice and Add-EntraGroupUser cmdlets to manage Entra groups.
+- Added Remove-EntraGroupDevice and Remove-EntraGroupUser cmdlets to manage removals from Entra groups.
 - Renamed Add-MsolAccountSku and Move-MsolAccountSku to Add-UserMsolAccountSku and Move-UserMsolAccountSku for clarity.
 - Added Remove-UserMsolAccountSku cmdlet to remove licenses from users.
 - Added Copy-OoOMessage cmdlet to duplicate Out of Office messages between mailboxes, Export-CalendarPermission to export calendar permissions, and Set-OoO to set Out of Office messages.
