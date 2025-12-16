@@ -61,18 +61,7 @@ function Add-UserMsolAccountSku {
         }
         else { 'US' }
 
-        if ([string]::IsNullOrWhiteSpace($user.UsageLocation)) {
-            $targetUsage = $defaultUsageLocation
-            try {
-                Update-MgUser -UserId $user.Id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
-                $user.UsageLocation = $targetUsage
-                Write-NCMessage "Usage location set to $targetUsage for $($user.UserPrincipalName)." -Level VERBOSE
-            }
-            catch {
-                Write-NCMessage "Unable to set usage location ($targetUsage) for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
-                return
-            }
-        }
+        $targetUsage = if ([string]::IsNullOrWhiteSpace($user.UsageLocation)) { $defaultUsageLocation } else { $null }
 
         try {
             $licenseCatalog = Get-LicenseCatalog -IncludeMetadata -ForceRefresh:$ForceLicenseCatalogRefresh.IsPresent
@@ -182,9 +171,27 @@ function Add-UserMsolAccountSku {
             return
         }
 
-        $summary = "Assign license(s): {0} to {1}" -f (($resolved | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', '), $user.UserPrincipalName
+        $summary = if ($targetUsage) {
+            "Set usage location to {0} and assign license(s): {1} to {2}" -f $targetUsage, (($resolved | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', '), $user.UserPrincipalName
+        }
+        else {
+            "Assign license(s): {0} to {1}" -f (($resolved | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', '), $user.UserPrincipalName
+        }
+
         if (-not $PSCmdlet.ShouldProcess($user.UserPrincipalName, $summary)) {
             return
+        }
+
+        if ($targetUsage) {
+            try {
+                Update-MgUser -UserId $user.Id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
+                $user.UsageLocation = $targetUsage
+                Write-NCMessage "Usage location set to $targetUsage for $($user.UserPrincipalName)." -Level VERBOSE
+            }
+            catch {
+                Write-NCMessage "Unable to set usage location ($targetUsage) for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
+                return
+            }
         }
 
         try {
