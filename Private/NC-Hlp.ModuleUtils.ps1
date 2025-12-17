@@ -71,7 +71,9 @@ function Invoke-NCRetry {
         }
         catch {
             if ($OnError) {
-                & $OnError -ArgumentList $attempt, $MaxAttempts, $_
+                $safeAttempt = if ($attempt -gt 0) { $attempt } else { 1 }
+                $safeMax = if ($MaxAttempts -gt 0) { $MaxAttempts } else { 1 }
+                & $OnError -ArgumentList $safeAttempt, $safeMax, $_
             }
             else {
                 Write-NCMessage "Operation '$OperationDescription' failed (attempt $attempt of $MaxAttempts). $($_.Exception.Message)" -Level ERROR
