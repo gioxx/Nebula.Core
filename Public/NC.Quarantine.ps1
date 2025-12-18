@@ -37,7 +37,8 @@ function Export-QuarantineEml {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -155,7 +156,8 @@ function Get-QuarantineFrom {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -232,7 +234,8 @@ function Get-QuarantineFromDomain {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -335,7 +338,8 @@ function Get-QuarantineToRelease {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -553,7 +557,8 @@ function Unlock-QuarantineFrom {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -639,7 +644,8 @@ function Unlock-QuarantineMessageId {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 

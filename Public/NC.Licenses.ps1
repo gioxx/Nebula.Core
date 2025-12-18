@@ -38,7 +38,8 @@ function Add-UserMsolAccountSku {
     try {
         $GraphConnection = Test-MgGraphConnection
         if (-not $GraphConnection) {
-            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
             return
         }
 
@@ -252,7 +253,8 @@ function Copy-UserMsolAccountSku {
     try {
         $GraphConnection = Test-MgGraphConnection
         if (-not $GraphConnection) {
-            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
             return
         }
 
@@ -484,7 +486,8 @@ function Export-MsolAccountSku {
     try {
         $GraphConnection = Test-MgGraphConnection
         if (-not $GraphConnection) {
-            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
             return
         }
 
@@ -643,7 +646,8 @@ function Get-TenantMsolAccountSku {
     try {
         $GraphConnection = Test-MgGraphConnection
         if (-not $GraphConnection) {
-            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
             return
         }
 
@@ -737,24 +741,31 @@ function Get-UserMsolAccountSku {
     .DESCRIPTION
         Downloads the license catalog, fetches the target user via Microsoft Graph, and prints each
         assigned SKU with the mapped product name (when available).
+        When -Clipboard is specified, copies a quoted, comma-separated list of the licenses to the clipboard.
     .PARAMETER UserPrincipalName
         Target user UPN or object ID.
+    .PARAMETER Clipboard
+        Copies the resolved license names (fallback: SkuPartNumber) to the clipboard as: "License1","License2"
     .PARAMETER ForceLicenseCatalogRefresh
         Force a fresh download of the cached license catalog before processing.
     .EXAMPLE
         Get-UserMsolAccountSku -UserPrincipalName "user@contoso.com"
+    .EXAMPLE
+        Get-UserMsolAccountSku -UserPrincipalName "user@contoso.com" -Clipboard
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, HelpMessage = "User Principal Name (e.g. user@contoso.com)")]
         [Alias('User', 'UPN')]
         [string] $UserPrincipalName,
+        [switch] $Clipboard,
         [switch] $ForceLicenseCatalogRefresh
     )
 
     begin {
         Set-ProgressAndInfoPreferences
         $initSucceeded = $true
+        $clipboardLines = @()
 
         try {
             $GraphConnection = Test-MgGraphConnection
@@ -827,11 +838,14 @@ function Get-UserMsolAccountSku {
         }
 
         if ($GraphLicense -and $GraphLicense.Count -gt 0) {
+            $licensesForClipboard = @()
+
             foreach ($lic in $GraphLicense) {
                 $skuPart = $lic.SkuPartNumber
                 $skuId = $lic.SkuId
                 $matchSource = $null
                 $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $skuPart -FallbackLookup $customLookup -MatchSource ([ref]$matchSource)
+                $licensesForClipboard += if ($display) { $display } else { $skuPart }
                 if ($display) {
                     $suffix = if ($matchSource -and $matchSource -ne 'Primary') { ' (custom)' } else { '' }
                     Write-NCMessage ("  - {0}{2} ({1})" -f $display, $skuId, $suffix) -Level INFO
@@ -841,12 +855,33 @@ function Get-UserMsolAccountSku {
                     Write-NCMessage ("  - {0} ({1})" -f $skuPart, $skuId) -Level WARNING
                 }
             }
+
+            if ($Clipboard.IsPresent) {
+                $normalized = $licensesForClipboard | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+                $quoted = $normalized | ForEach-Object { "`"$($_.Replace('"', '\"'))`"" }
+                $clipboardLines += ($quoted -join ",")
+            }
         }
         else {
             Write-NCMessage "No licenses assigned to this user." -Level VERBOSE
+            if ($Clipboard.IsPresent) {
+                $clipboardLines += ''
+            }
         }
     }
     end {
+        if ($Clipboard.IsPresent) {
+            $clipboardText = ($clipboardLines -join [Environment]::NewLine)
+            try {
+                $clipboardText | Set-Clipboard
+                Add-EmptyLine
+                Write-NCMessage "Copied license list to clipboard." -Level INFO
+            }
+            catch {
+                Write-NCMessage "Unable to copy license list to clipboard: $($_.Exception.Message)" -Level WARNING
+            }
+        }
+
         Add-EmptyLine
         Restore-ProgressAndInfoPreferences
     }
@@ -880,7 +915,8 @@ function Move-UserMsolAccountSku {
     try {
         $GraphConnection = Test-MgGraphConnection
         if (-not $GraphConnection) {
-            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
             return
         }
 
@@ -1141,7 +1177,8 @@ function Remove-UserMsolAccountSku {
     try {
         $GraphConnection = Test-MgGraphConnection
         if (-not $GraphConnection) {
-            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
             return
         }
 

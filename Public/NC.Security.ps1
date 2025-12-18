@@ -47,7 +47,8 @@ function Disable-UserDevices {
 
             $scopes = @('Directory.ReadWrite.All', 'Device.ReadWrite.All')
             if (-not (Test-MgGraphConnection -Scopes $scopes -EnsureExchangeOnline:$false)) {
-                Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
                 return
             }
 
@@ -168,7 +169,8 @@ function Disable-UserSignIn {
 
             $scopes = @('Directory.ReadWrite.All')
             if (-not (Test-MgGraphConnection -Scopes $scopes -EnsureExchangeOnline:$false)) {
-                Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
                 return
             }
 
@@ -284,7 +286,8 @@ function Revoke-UserSessions {
 
             $scopes = @('Directory.ReadWrite.All')
             if (-not (Test-MgGraphConnection -Scopes $scopes -EnsureExchangeOnline:$false)) {
-                Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
                 return
             }
 

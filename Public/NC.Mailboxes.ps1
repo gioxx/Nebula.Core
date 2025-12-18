@@ -29,7 +29,8 @@ function Add-MboxAlias {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -105,7 +106,8 @@ function Add-MboxPermission {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -122,7 +124,8 @@ function Add-MboxPermission {
                 $userObject = Get-User -Identity $user -ErrorAction Stop
             }
             catch {
-                Write-NCMessage "`nThe mailbox '$user' does not exist. Please check the provided e-mail address." -Level ERROR
+                Add-EmptyLine
+                Write-NCMessage "The mailbox '$user' does not exist. Please check the provided e-mail address." -Level ERROR
                 continue
             }
 
@@ -264,7 +267,8 @@ function Export-MboxAlias {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -367,7 +371,8 @@ function Export-MboxPermission {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -439,7 +444,8 @@ function Get-MboxAlias {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -505,7 +511,8 @@ function Get-MboxPermission {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -587,11 +594,13 @@ function Get-MboxPermission {
         }
         Write-Progress -Activity "Gathered SendOnBehalfTo permissions for $($mailbox.PrimarySmtpAddress) ..." -Status "90% Complete" -PercentComplete 90
 
-        Write-NCMessage ("`nAccess Rights on {0} ({1})" -f $mailbox.DisplayName, $mailbox.PrimarySmtpAddress) -Level WARNING
+        Add-EmptyLine
+        Write-NCMessage ("Access Rights on {0} ({1})" -f $mailbox.DisplayName, $mailbox.PrimarySmtpAddress) -Level WARNING
         $results
 
         if ($IncludeSummary) {
-            Write-NCMessage "`nSummary of Permissions Found:" -Level INFO
+            Add-EmptyLine
+            Write-NCMessage "Summary of Permissions Found:" -Level INFO
             Write-NCMessage ("FullAccess: {0}" -f $fullAccessCount) -Level SUCCESS
             Write-NCMessage ("SendAs: {0}" -f $sendAsCount) -Level SUCCESS
             Write-NCMessage ("SendOnBehalfTo: {0}" -f $sendOnBehalfToCount) -Level SUCCESS
@@ -624,7 +633,8 @@ function Get-UserLastSeen {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -712,7 +722,8 @@ function New-SharedMailbox {
     )
 
     if (-not (Test-EOLConnection)) {
-        Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+        Add-EmptyLine
+        Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
         return
     }
 
@@ -755,7 +766,8 @@ function Remove-MboxAlias {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -821,7 +833,8 @@ function Remove-MboxPermission {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -838,7 +851,8 @@ function Remove-MboxPermission {
                 $userObject = Get-User -Identity $user -ErrorAction Stop
             }
             catch {
-                Write-NCMessage "`nThe mailbox '$user' does not exist. Please check the provided e-mail address." -Level ERROR
+                Add-EmptyLine
+                Write-NCMessage "The mailbox '$user' does not exist. Please check the provided e-mail address." -Level ERROR
                 continue
             }
 
@@ -903,7 +917,8 @@ function Set-MboxLanguage {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -983,7 +998,8 @@ function Set-MboxRulesQuota {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -1048,7 +1064,8 @@ function Set-SharedMboxCopyForSent {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -1111,17 +1128,20 @@ function Test-SharedMailboxCompliance {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
         $graphConnected = Test-MgGraphConnection -Scopes @('AuditLog.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
         if (-not $graphConnected) {
-            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
             return
         }
 
-        Write-NCMessage "`nFinding shared mailboxes..." -NoNewline
+        Add-EmptyLine
+        Write-NCMessage "Finding shared mailboxes..." -NoNewline
         $mailboxes = Get-ExoMailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | Sort-Object DisplayName
         if (-not $mailboxes) {
             Write-NCMessage "No shared mailboxes found." -Level WARNING

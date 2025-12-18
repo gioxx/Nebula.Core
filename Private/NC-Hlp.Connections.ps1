@@ -35,7 +35,8 @@ function Test-EOLConnection {
         }
 
         if (-not $installModule) {
-            Write-NCMessage "`nMicrosoft Exchange Online Management module is required. Install it with Install-Module ExchangeOnlineManagement." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Microsoft Exchange Online Management module is required. Install it with Install-Module ExchangeOnlineManagement." -Level ERROR
             return $false
         }
 
@@ -44,7 +45,8 @@ function Test-EOLConnection {
             Install-Module ExchangeOnlineManagement -Scope CurrentUser -AllowClobber -Force -ErrorAction Stop
         }
         catch {
-            Write-NCMessage "`nCan't install Exchange Online Management module. $($_.Exception.Message)" -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't install Exchange Online Management module. $($_.Exception.Message)" -Level ERROR
             return $false
         }
     }
@@ -88,7 +90,8 @@ function Test-EOLConnection {
         return $true
     }
     catch {
-        Write-NCMessage "`nUnable to establish Exchange Online session. $($_.Exception.Message)" -Level ERROR
+        Add-EmptyLine
+        Write-NCMessage "Unable to establish Exchange Online session. $($_.Exception.Message)" -Level ERROR
         return $false
     }
 }
@@ -145,7 +148,8 @@ function Test-MgGraphConnection {
         }
 
         if (-not $installModule) {
-            Write-NCMessage "`nMicrosoft Graph PowerShell module is required. Install it with Install-Module Microsoft.Graph." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Microsoft Graph PowerShell module is required. Install it with Install-Module Microsoft.Graph." -Level ERROR
             return $false
         }
 
@@ -154,7 +158,8 @@ function Test-MgGraphConnection {
             Install-Module Microsoft.Graph -Scope CurrentUser -AllowClobber -Force -ErrorAction Stop
         }
         catch {
-            Write-NCMessage "`nCan't install Microsoft Graph module. $($_.Exception.Message)" -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't install Microsoft Graph module. $($_.Exception.Message)" -Level ERROR
             return $false
         }
     }
@@ -163,7 +168,8 @@ function Test-MgGraphConnection {
         Import-Module Microsoft.Graph.Authentication -ErrorAction Stop | Out-Null
     }
     catch {
-        Write-NCMessage "`nUnable to import Microsoft.Graph.Authentication. $($_.Exception.Message)" -Level ERROR
+        Add-EmptyLine
+        Write-NCMessage "Unable to import Microsoft.Graph.Authentication. $($_.Exception.Message)" -Level ERROR
         return $false
     }
 
@@ -226,7 +232,8 @@ function Test-MgGraphConnection {
         return $true
     }
     catch {
-        Write-NCMessage "`nUnable to establish Microsoft Graph session. $($_.Exception.Message)" -Level ERROR
+        Add-EmptyLine
+        Write-NCMessage "Unable to establish Microsoft Graph session. $($_.Exception.Message)" -Level ERROR
         return $false
     }
 }
