@@ -59,6 +59,16 @@ function Export-QuarantineEml {
             return
         }
 
+        if (-not (Test-Path -LiteralPath $folder)) {
+            try {
+                New-Item -ItemType Directory -Path $folder -Force | Out-Null
+            }
+            catch {
+                Write-NCMessage "Destination folder could not be created. $($_.Exception.Message)" -Level ERROR
+                return
+            }
+        }
+
         $inputIds = switch ($PSCmdlet.ParameterSetName) {
             'Identity' { $Identity }
             default { $MessageId }
