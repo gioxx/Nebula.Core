@@ -99,8 +99,9 @@
             ReleaseNotes = @'
 - Fix: Set-UsageLocation now correctly updates the usage location for users without one set (licenses functions).
 - Fix: Added fallback on attempts/max also in other functions that used Invoke-NCRetry logic.
-- Improve: Get-UserMsolAccountSku now accepts also pipeline input.
-- Improve: Get-UserMsolAccountSku now supports -Clipboard to copy a quoted list of licenses.
+- Improve: Export-QuarantineEml now accepts Identity values (GUID\GUID) in addition to MessageId, supports multiple inputs, and returns all exported items.
+- Improve: Format-MessageIDsFromClipboard now outputs the copied quarantine identity values (one per line).
+- Improve: Get-UserMsolAccountSku now accepts also pipeline input. Also, it now supports -Clipboard to copy a quoted list of licenses.
 - Improve: Remove-UserMsolAccountSku now uses two parameter sets. With -All, it removes all licenses assigned to the user, displaying the names (resolved via catalog if available). The -License parameter remains for selective removal.
 '@
         }
