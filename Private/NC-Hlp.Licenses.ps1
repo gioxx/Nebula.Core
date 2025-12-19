@@ -173,7 +173,9 @@ function Get-LicenseSourceData {
                 Invoke-RestMethod -Uri $ApiUrl -Headers @{ 'User-Agent' = 'Nebula.Core' } -ErrorAction Stop
             } -MaxAttempts $MaxAttempts -DelaySeconds $DelaySeconds -OperationDescription "retrieve license metadata" -OnError {
                 param($attempt, $max, $err)
-                Write-NCMessage "Failed to retrieve license metadata, attempt $attempt of $max." -Level WARNING
+                $currentAttempt = if ($attempt) { $attempt } else { '?' }
+                $currentMax = if ($max) { $max } else { $MaxAttempts }
+                Write-NCMessage "Failed to retrieve license metadata, attempt $currentAttempt of $currentMax." -Level WARNING
             }
 
             if ($response -and $response[0]) {
@@ -218,7 +220,9 @@ function Get-LicenseSourceData {
                 Invoke-RestMethod -Method Get -Uri $FileUrl -ErrorAction Stop
             } -MaxAttempts $MaxAttempts -DelaySeconds $DelaySeconds -OperationDescription "download license file" -OnError {
                 param($attempt, $max, $err)
-                Write-NCMessage "Failed downloading license file ($CacheFileName), attempt $attempt of $max." -Level ERROR
+                $currentAttempt = if ($attempt) { $attempt } else { '?' }
+                $currentMax = if ($max) { $max } else { $MaxAttempts }
+                Write-NCMessage "Failed downloading license file ($CacheFileName), attempt $currentAttempt of $currentMax." -Level ERROR
             }
 
             $licenseItems | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $cacheFile -Encoding UTF8

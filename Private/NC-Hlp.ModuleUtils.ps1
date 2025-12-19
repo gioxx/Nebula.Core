@@ -71,7 +71,9 @@ function Invoke-NCRetry {
         }
         catch {
             if ($OnError) {
-                & $OnError -ArgumentList $attempt, $MaxAttempts, $_
+                $safeAttempt = if ($attempt -gt 0) { $attempt } else { 1 }
+                $safeMax = if ($MaxAttempts -gt 0) { $MaxAttempts } else { 1 }
+                & $OnError -ArgumentList $safeAttempt, $safeMax, $_
             }
             else {
                 Write-NCMessage "Operation '$OperationDescription' failed (attempt $attempt of $MaxAttempts). $($_.Exception.Message)" -Level ERROR
@@ -206,7 +208,7 @@ function Test-Folder {
         Normalizes and validates a folder path.
     .DESCRIPTION
         Returns the current directory when input is blank, trims trailing separators,
-        and throws if the path is invalid.
+        resolves relative paths against the current location, and throws if the path is invalid.
     .PARAMETER Path
         Folder path to validate (optional).
     #>
@@ -220,8 +222,23 @@ function Test-Folder {
     }
 
     $normalized = $Path.TrimEnd('\')
+
+    # Resolve existing paths directly
+    if (Test-Path -LiteralPath $normalized) {
+        return (Resolve-Path -LiteralPath $normalized).ProviderPath
+    }
+
+    # Build full path for non-existing targets (supports relative paths)
+    $basePath = if ([IO.Path]::IsPathRooted($normalized)) {
+        ''
+    }
+    else {
+        (Get-Location).ProviderPath
+    }
+
+    $candidate = if ($basePath) { Join-Path -Path $basePath -ChildPath $normalized } else { $normalized }
     try {
-        return [System.IO.Path]::GetFullPath($normalized)
+        return [System.IO.Path]::GetFullPath($candidate)
     }
     catch {
         throw "Invalid folder path '$Path'. $($_.Exception.Message)"

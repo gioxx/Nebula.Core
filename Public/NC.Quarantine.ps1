@@ -8,10 +8,12 @@ function Export-QuarantineEml {
     .SYNOPSIS
         Exports a quarantined message as an EML file.
     .DESCRIPTION
-        Retrieves the quarantined message by MessageId, writes the decoded EML to the specified folder,
+        Retrieves the quarantined message by MessageId or Identity, writes the decoded EML to the specified folder,
         optionally opens it, and can release the message to all recipients.
     .PARAMETER MessageId
         MessageId of the quarantined e-mail (with or without angle brackets).
+    .PARAMETER Identity
+        Quarantine Identity value (e.g., GUID\GUID).
     .PARAMETER DestinationFolder
         Folder where the EML file will be written. Defaults to the current directory.
     .PARAMETER OpenFile
@@ -22,22 +24,30 @@ function Export-QuarantineEml {
         Also report the message as a false positive when releasing.
     .EXAMPLE
         Export-QuarantineEml -MessageId 20230617142935.F5B74194B266E458@contoso.com -DestinationFolder C:\Temp -OpenFile -ReleaseToAll
+    .EXAMPLE
+        Export-QuarantineEml -Identity 'f3a3dda8-3f78-46c9-332b-08de38f41262\a94e1c02-1d07-7d44-fd2b-482688059fbb' -DestinationFolder C:\Temp
     #>
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
-        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [string]$MessageId,
+        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'MessageId')]
+        [string[]]$MessageId,
+        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'Identity')]
+        [string[]]$Identity,
         [string]$DestinationFolder,
         [switch]$OpenFile,
         [switch]$ReleaseToAll,
         [switch]$ReportFalsePositive
     )
 
-    begin { Set-ProgressAndInfoPreferences }
+    begin {
+        Set-ProgressAndInfoPreferences
+        $results = [System.Collections.Generic.List[object]]::new()
+    }
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -49,81 +59,117 @@ function Export-QuarantineEml {
             return
         }
 
-        $normalizedId = ConvertTo-QuarantineMessageId -MessageId $MessageId
-
-        try {
-            $message = Get-QuarantineMessage -MessageId $normalizedId -ErrorAction Stop
-        }
-        catch {
-            Write-NCMessage "Unable to find quarantined message '$normalizedId'. $($_.Exception.Message)" -Level ERROR
-            return
-        }
-
-        try {
-            $exported = $message | Export-QuarantineMessage
-            $bytes = [Convert]::FromBase64String($exported.eml)
-        }
-        catch {
-            Write-NCMessage "Unable to export quarantined message '$normalizedId'. $($_.Exception.Message)" -Level ERROR
-            return
-        }
-
-        $invalidChars = [Regex]::Escape(([IO.Path]::GetInvalidFileNameChars() -join ''))
-        $safeNameSource = if ($message.Subject) { $message.Subject } else { $message.MessageId }
-        $safeBaseName = [Regex]::Replace((Format-OutputString -Value $safeNameSource -MaxLength 60), "[$invalidChars]", '_')
-        if ([string]::IsNullOrWhiteSpace($safeBaseName)) {
-            $safeBaseName = 'QuarantineMessage'
-        }
-        $emlPath = New-File (Join-Path -Path $folder -ChildPath "$safeBaseName.eml")
-
-        try {
-            [IO.File]::WriteAllBytes($emlPath, $bytes)
-            Write-NCMessage ("Saved quarantined message to {0}" -f $emlPath) -Level SUCCESS
-        }
-        catch {
-            Write-NCMessage "Unable to write EML file. $($_.Exception.Message)" -Level ERROR
-            return
-        }
-
-        if ($OpenFile.IsPresent) {
+        if (-not (Test-Path -LiteralPath $folder)) {
             try {
-                Invoke-Item -LiteralPath $emlPath
+                New-Item -ItemType Directory -Path $folder -Force | Out-Null
             }
             catch {
-                Write-NCMessage "File exported but could not be opened automatically. $($_.Exception.Message)" -Level WARNING
+                Write-NCMessage "Destination folder could not be created. $($_.Exception.Message)" -Level ERROR
+                return
             }
         }
 
-        if ($ReleaseToAll.IsPresent) {
-            $action = "Release quarantined message '$($message.Subject)'"
-            if ($PSCmdlet.ShouldProcess($message.MessageId, $action)) {
+        $inputIds = switch ($PSCmdlet.ParameterSetName) {
+            'Identity' { $Identity }
+            default { $MessageId }
+        }
+
+        foreach ($rawId in $inputIds) {
+            if ([string]::IsNullOrWhiteSpace($rawId)) { continue }
+
+            $message = $null
+            $lookupDisplay = $rawId
+
+            if ($PSCmdlet.ParameterSetName -eq 'Identity') {
                 try {
-                    $releaseParams = @{
-                        Identity            = $message.Identity
-                        ReleaseToAll        = $true
-                        Confirm             = $false
-                        ReportFalsePositive = $ReportFalsePositive.IsPresent
-                    }
-        Release-QuarantineMessage @releaseParams | Out-Null
-                    Write-NCMessage "Released quarantined message $($message.MessageId) to all recipients." -Level SUCCESS
+                    $message = Get-QuarantineMessage -Identity $rawId -ErrorAction Stop
                 }
                 catch {
-                    Write-NCMessage "Unable to release quarantined message. $($_.Exception.Message)" -Level ERROR
+                    Write-NCMessage "Unable to find quarantined message by Identity '$rawId'. $($_.Exception.Message)" -Level ERROR
+                    continue
                 }
             }
-        }
+            else {
+                $normalizedId = ConvertTo-QuarantineMessageId -MessageId $rawId
+                $lookupDisplay = $normalizedId
+                try {
+                    $message = Get-QuarantineMessage -MessageId $normalizedId -ErrorAction Stop
+                }
+                catch {
+                    Write-NCMessage "Unable to find quarantined message '$normalizedId'. $($_.Exception.Message)" -Level ERROR
+                    continue
+                }
+            }
 
-        [pscustomobject]@{
-            MessageId           = $message.MessageId
-            Subject             = $message.Subject
-            QuarantineTypes     = $message.QuarantineTypes
-            EmlPath             = $emlPath
-            ReleasedToAll       = $ReleaseToAll.IsPresent
-            ReportFalsePositive = $ReportFalsePositive.IsPresent -and $ReleaseToAll.IsPresent
+            try {
+                $exported = $message | Export-QuarantineMessage
+                $bytes = [Convert]::FromBase64String($exported.eml)
+            }
+            catch {
+                Write-NCMessage "Unable to export quarantined message '$lookupDisplay'. $($_.Exception.Message)" -Level ERROR
+                continue
+            }
+
+            $invalidChars = [Regex]::Escape(([IO.Path]::GetInvalidFileNameChars() -join ''))
+            $safeNameSource = if ($message.Subject) { $message.Subject } else { $message.MessageId }
+            $safeBaseName = [Regex]::Replace((Format-OutputString -Value $safeNameSource -MaxLength 60), "[$invalidChars]", '_')
+            if ([string]::IsNullOrWhiteSpace($safeBaseName)) {
+                $safeBaseName = 'QuarantineMessage'
+            }
+            $emlPath = New-File (Join-Path -Path $folder -ChildPath "$safeBaseName.eml")
+
+            try {
+                [IO.File]::WriteAllBytes($emlPath, $bytes)
+                Write-NCMessage ("Saved quarantined message to {0}" -f $emlPath) -Level SUCCESS
+            }
+            catch {
+                Write-NCMessage "Unable to write EML file. $($_.Exception.Message)" -Level ERROR
+                continue
+            }
+
+            if ($OpenFile.IsPresent) {
+                try {
+                    Invoke-Item -LiteralPath $emlPath
+                }
+                catch {
+                    Write-NCMessage "File exported but could not be opened automatically. $($_.Exception.Message)" -Level WARNING
+                }
+            }
+
+            if ($ReleaseToAll.IsPresent) {
+                $action = "Release quarantined message '$($message.Subject)'"
+                if ($PSCmdlet.ShouldProcess($message.Identity, $action)) {
+                    try {
+                        $releaseParams = @{
+                            Identity            = $message.Identity
+                            ReleaseToAll        = $true
+                            Confirm             = $false
+                            ReportFalsePositive = $ReportFalsePositive.IsPresent
+                        }
+                        Release-QuarantineMessage @releaseParams | Out-Null
+                        Write-NCMessage "Released quarantined message $($message.MessageId) to all recipients." -Level SUCCESS
+                    }
+                    catch {
+                        Write-NCMessage "Unable to release quarantined message. $($_.Exception.Message)" -Level ERROR
+                    }
+                }
+            }
+
+            $results.Add([pscustomobject]@{
+                    MessageId           = $message.MessageId
+                    Subject             = $message.Subject
+                    QuarantineTypes     = $message.QuarantineTypes
+                    EmlPath             = $emlPath
+                    ReleasedToAll       = $ReleaseToAll.IsPresent
+                    ReportFalsePositive = $ReportFalsePositive.IsPresent -and $ReleaseToAll.IsPresent
+                }) | Out-Null
         }
     }
 
-    end { Restore-ProgressAndInfoPreferences }
+    end {
+        Restore-ProgressAndInfoPreferences
+        $results
+    }
 }
 
 function Get-QuarantineFrom {
@@ -155,7 +201,8 @@ function Get-QuarantineFrom {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -232,7 +279,8 @@ function Get-QuarantineFromDomain {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -335,7 +383,8 @@ function Get-QuarantineToRelease {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -553,7 +602,8 @@ function Unlock-QuarantineFrom {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -639,7 +689,8 @@ function Unlock-QuarantineMessageId {
 
     process {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -671,9 +722,20 @@ function Unlock-QuarantineMessageId {
             }
         }
 
-        foreach ($msg in $targets) {
+        $targetList = @($targets | Where-Object { $_ })
+        $targetCount = $targetList.Count
+        $processed = 0
+
+        foreach ($msg in $targetList) {
             if (-not $msg) { continue }
             if ($msg.ReleaseStatus -eq "Released") { continue }
+
+            $processed++
+            if ($targetCount -gt 1) {
+                $percentComplete = (($processed / $targetCount) * 100)
+                $statusMessage = "$processed of $targetCount ($($msg.Identity))"
+                Write-Progress -Activity "Releasing quarantined messages" -Status $statusMessage -PercentComplete $percentComplete
+            }
 
             if ($PSCmdlet.ShouldProcess($msg.Identity, "Release quarantined message")) {
                 try {
@@ -698,11 +760,15 @@ function Unlock-QuarantineMessageId {
                 }
             }
         }
+
+        if ($targetCount -gt 1) {
+            Write-Progress -Activity "Releasing quarantined messages" -Completed
+        }
     }
 
     end {
         Restore-ProgressAndInfoPreferences
-        $results
+        $results | Select-Object Subject, SenderAddress, ReceivedTime, ReleasedUser | Format-Table -AutoSize
     }
 }
 

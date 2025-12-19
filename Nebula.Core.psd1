@@ -1,6 +1,6 @@
 @{
     RootModule           = 'Nebula.Core.psm1'
-    ModuleVersion        = '1.1.1'
+    ModuleVersion        = '1.1.2'
     GUID                 = '07acc3c0-14dc-4c1d-a1d0-6140e83c2a41'
     Author               = 'Giovanni Solone'
     Description          = 'A PowerShell module that go beyond your workstations. It will make your Microsoft 365 life easier!'
@@ -79,19 +79,31 @@
 
     PrivateData          = @{
         PSData = @{
-            Tags         = @('Microsoft', 'PowerShell', 'Microsoft365', 'Office365', 'Exchange', 'Entra')
+            Tags         = @(
+                'Entra', 
+                'Exchange', 
+                'Groups', 
+                'Licenses', 
+                'M365', 
+                'Mailboxes', 
+                'Microsoft', 
+                'Microsoft-365', 
+                'Office-365', 
+                'PowerShell', 
+                'Quarantine', 
+                'Rooms'
+            )
             ProjectUri   = 'https://github.com/gioxx/Nebula.Core'
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/Assets/icon.png'
             ReleaseNotes = @'
-- Added Add-EntraGroupDevice and Add-EntraGroupUser cmdlets to manage Entra groups.
-- Added Remove-EntraGroupDevice and Remove-EntraGroupUser cmdlets to manage removals from Entra groups.
-- Renamed Add-MsolAccountSku and Move-MsolAccountSku to Add-UserMsolAccountSku and Move-UserMsolAccountSku for clarity.
-- Added Remove-UserMsolAccountSku cmdlet to remove licenses from users.
-- Added Copy-UserMsolAccountSku cmdlet to copy licenses between users.
-- Added Copy-OoOMessage cmdlet to duplicate Out of Office messages between mailboxes, Export-CalendarPermission to export calendar permissions, and Set-OoO to set Out of Office messages.
-- Added Disable-UserDevices cmdlet to disable user devices, Disable-UserSignIn cmdlet to disable sign-in for users and Revoke-UserSessions cmdlet to revoke user sessions.
-- Added Get-RoomDetails cmdlet to retrieve detailed information about meeting rooms.
+- Fix: Set-UsageLocation now correctly updates the usage location for users without one set (licenses functions).
+- Fix: Added fallback on attempts/max also in other functions that used Invoke-NCRetry logic.
+- Fix: Export-QuarantineEml now creates the destination folder when missing and resolves relative paths correctly.
+- Improve: Export-QuarantineEml now accepts Identity values (GUID\GUID) in addition to MessageId, supports multiple inputs, and returns all exported items.
+- Improve: Format-MessageIDsFromClipboard now outputs the copied quarantine identity values (one per line).
+- Improve: Get-UserMsolAccountSku now accepts also pipeline input. Also, it now supports -Clipboard to copy a quoted list of licenses.
+- Improve: Remove-UserMsolAccountSku now uses two parameter sets. With -All, it removes all licenses assigned to the user, displaying the names (resolved via catalog if available). The -License parameter remains for selective removal.
 '@
         }
     }

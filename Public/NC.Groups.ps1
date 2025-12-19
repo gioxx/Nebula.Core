@@ -45,7 +45,8 @@ function Add-EntraGroupDevice {
     begin {
         $graphConnected = Test-MgGraphConnection -Scopes @('Group.ReadWrite.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
         if (-not $graphConnected) {
-            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
         }
 
         $devices = [System.Collections.Generic.List[string]]::new()
@@ -216,7 +217,8 @@ function Add-EntraGroupUser {
     begin {
         $graphConnected = Test-MgGraphConnection -Scopes @('Group.ReadWrite.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
         if (-not $graphConnected) {
-            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
         }
 
         $users = [System.Collections.Generic.List[string]]::new()
@@ -404,7 +406,8 @@ function Export-DistributionGroups {
     end {
         try {
             if (-not (Test-EOLConnection)) {
-                Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
                 return
             }
 
@@ -586,7 +589,8 @@ function Export-DynamicDistributionGroups {
     end {
         try {
             if (-not (Test-EOLConnection)) {
-                Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
                 return
             }
 
@@ -768,7 +772,8 @@ function Export-M365Group {
     end {
         try {
             if (-not (Test-EOLConnection)) {
-                Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
                 return
             }
 
@@ -941,7 +946,8 @@ function Get-DynamicDistributionGroupFilter {
     end {
         try {
             if (-not (Test-EOLConnection)) {
-                Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
                 return
             }
 
@@ -1067,7 +1073,8 @@ function Get-RoleGroupsMembers {
     Set-ProgressAndInfoPreferences
     try {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 
@@ -1160,7 +1167,8 @@ function Get-UserGroups {
         if ($null -eq $graphConnected) {
             $graphConnected = Test-MgGraphConnection
             if (-not $graphConnected) {
-                Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
                 return
             }
         }
@@ -1241,7 +1249,8 @@ function Get-UserGroups {
             }
         }
 
-        Write-NCMessage "`n$recipientType ($resolvedPrincipal) - Groups found: $($memberships.Count)" -Level VERBOSE
+        Add-EmptyLine
+        Write-NCMessage "$recipientType ($resolvedPrincipal) - Groups found: $($memberships.Count)" -Level VERBOSE
 
         if (-not $memberships -or $memberships.Count -eq 0) {
             Write-NCMessage "No groups found for $resolvedPrincipal." -Level WARNING
@@ -1318,7 +1327,8 @@ function Remove-EntraGroupDevice {
     begin {
         $graphConnected = Test-MgGraphConnection -Scopes @('Group.ReadWrite.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
         if (-not $graphConnected) {
-            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
         }
 
         $devices = [System.Collections.Generic.List[string]]::new()
@@ -1489,7 +1499,8 @@ function Remove-EntraGroupUser {
     begin {
         $graphConnected = Test-MgGraphConnection -Scopes @('Group.ReadWrite.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
         if (-not $graphConnected) {
-            Write-NCMessage "`nCan't connect or use Microsoft Graph modules. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
         }
 
         $users = [System.Collections.Generic.List[string]]::new()

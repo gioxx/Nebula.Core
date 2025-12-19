@@ -41,7 +41,9 @@ function Format-MessageIDsFromClipboard {
     $output = $quoted -join ", "
 
     $output | Set-Clipboard
-    Write-NCMessage ("Copied {0} quarantine identity value(s) to clipboard." -f $normalized.Count) -Level INFO
+    Write-NCMessage ("Copied {0} quarantine identity value(s) to clipboard:`n{1}" -f $normalized.Count, ($normalized -join "`n")) -Level INFO
+    Add-EmptyLine
+    Write-NCMessage "Please wait for messages to be released." -Level INFO
 
     if (-not $NoRelease.IsPresent -and $PSCmdlet.ShouldProcess("quarantine", "Release messages by Identity")) {
         Unlock-QuarantineMessageId -Identity $normalized
@@ -50,7 +52,7 @@ function Format-MessageIDsFromClipboard {
     if ($PassThru.IsPresent) { $output }
 }
 
-Set-Alias -Name fse -Value Format-SortedEmailsFromClipboard -Description "Format sorted e-mails from clipboard"
+Set-Alias -Name mids -Value Format-MessageIDsFromClipboard -Description "Format MessageId values from clipboard"
 
 function Format-SortedEmailsFromClipboard {
     <#
@@ -93,4 +95,4 @@ function Format-SortedEmailsFromClipboard {
     if ($PassThru.IsPresent) { $output }
 }
 
-Set-Alias -Name mids -Value Format-MessageIDsFromClipboard -Description "Format MessageId values from clipboard"
+Set-Alias -Name fse -Value Format-SortedEmailsFromClipboard -Description "Format sorted e-mails from clipboard"

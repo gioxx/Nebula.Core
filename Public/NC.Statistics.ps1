@@ -34,7 +34,8 @@ function Export-MboxStatistics {
     Set-ProgressAndInfoPreferences
     try {
         if (-not (Test-EOLConnection)) {
-            Write-NCMessage "`nCan't connect or use Microsoft Exchange Online Management module. `nPlease check logs." -Level ERROR
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
             return
         }
 

@@ -107,7 +107,9 @@ function Get-MailboxStatisticsSafe {
             }
         } -MaxAttempts 3 -DelaySeconds 5 -OperationDescription $operation -OnError {
             param($attempt, $max, $err)
-            Write-NCMessage "Unable to $operation (attempt $attempt of $max)." -Level ERROR
+            $currentAttempt = if ($attempt) { $attempt } else { '?' }
+            $currentMax = if ($max) { $max } else { 3 }
+            Write-NCMessage "Unable to $operation (attempt $currentAttempt of $currentMax)." -Level ERROR
         }
     }
     catch {
