@@ -104,6 +104,7 @@
 - Improve: Format-MessageIDsFromClipboard now outputs the copied quarantine identity values (one per line).
 - Improve: Get-UserMsolAccountSku now accepts also pipeline input. Also, it now supports -Clipboard to copy a quoted list of licenses.
 - Improve: Remove-UserMsolAccountSku now uses two parameter sets. With -All, it removes all licenses assigned to the user, displaying the names (resolved via catalog if available). The -License parameter remains for selective removal.
+- Improve: Get-TenantMsolAccountSku now supports -Filter to show only licenses matching the provided text (name or SkuPartNumber).
 '@
         }
     }
