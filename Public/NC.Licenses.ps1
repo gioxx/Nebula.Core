@@ -50,7 +50,7 @@ function Add-UserMsolAccountSku {
         }
 
         try {
-            $user = Get-MgUser -UserId $resolvedPrincipal -ErrorAction Stop
+            $user = Get-MgUser -UserId $resolvedPrincipal -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
         }
         catch {
             Write-NCMessage "User $UserPrincipalName not found or query failed: $($_.Exception.Message)" -Level ERROR
@@ -263,10 +263,10 @@ function Copy-UserMsolAccountSku {
 
         try {
             if ($resolvedSource) {
-                $sourceUser = Get-MgUser -UserId $resolvedSource -ErrorAction Stop
+                $sourceUser = Get-MgUser -UserId $resolvedSource -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
             }
             else {
-                $sourceUser = Get-MgUser -UserId $SourceUserPrincipalName -ErrorAction Stop
+                $sourceUser = Get-MgUser -UserId $SourceUserPrincipalName -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
                 $resolvedSource = $sourceUser.Id
             }
         }
@@ -277,10 +277,10 @@ function Copy-UserMsolAccountSku {
 
         try {
             if ($resolvedDestination) {
-                $destinationUser = Get-MgUser -UserId $resolvedDestination -ErrorAction Stop
+                $destinationUser = Get-MgUser -UserId $resolvedDestination -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
             }
             else {
-                $destinationUser = Get-MgUser -UserId $DestinationUserPrincipalName -ErrorAction Stop
+                $destinationUser = Get-MgUser -UserId $DestinationUserPrincipalName -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
                 $resolvedDestination = $destinationUser.Id
             }
         }
@@ -937,8 +937,8 @@ function Move-UserMsolAccountSku {
         }
 
         try {
-            $sourceUser = Get-MgUser -UserId $resolvedSource -ErrorAction Stop
-            $destinationUser = Get-MgUser -UserId $resolvedDestination -ErrorAction Stop
+            $sourceUser = Get-MgUser -UserId $resolvedSource -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
+            $destinationUser = Get-MgUser -UserId $resolvedDestination -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
         }
         catch {
             Write-NCMessage "Unable to retrieve users: $($_.Exception.Message)" -Level ERROR
