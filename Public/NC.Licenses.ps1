@@ -626,6 +626,8 @@ function Get-TenantMsolAccountSku {
         returns counts for total, consumed, available, suspended, and warning seats.
     .PARAMETER ForceLicenseCatalogRefresh
         Force a fresh download of the cached license catalog before processing.
+    .PARAMETER Filter
+        Filters the output to licenses whose name or SkuPartNumber contains the provided text.
     .PARAMETER AsTable
         Display the result as a formatted table instead of returning objects.
     .PARAMETER GridView
@@ -634,10 +636,13 @@ function Get-TenantMsolAccountSku {
         Get-TenantMsolAccountSku
     .EXAMPLE
         Get-TenantMsolAccountSku -AsTable
+    .EXAMPLE
+        Get-TenantMsolAccountSku -Filter "E3"
     #>
     [CmdletBinding()]
     param(
         [switch]$ForceLicenseCatalogRefresh,
+        [string]$Filter,
         [switch]$AsTable,
         [switch]$GridView
     )
@@ -714,6 +719,18 @@ function Get-TenantMsolAccountSku {
         }
 
         $sorted = $results | Sort-Object Name
+
+        if ($Filter) {
+            $filterPattern = [regex]::Escape($Filter)
+            $sorted = $sorted | Where-Object {
+                $_.Name -match $filterPattern -or $_.SkuPartNumber -match $filterPattern
+            }
+
+            if (-not $sorted -or $sorted.Count -eq 0) {
+                Write-NCMessage "No licenses match filter '$Filter'." -Level WARNING
+                return
+            }
+        }
 
         if ($GridView.IsPresent) {
             $sorted | Out-GridView -Title "M365 Tenant Licenses"
