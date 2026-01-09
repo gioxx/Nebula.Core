@@ -1331,8 +1331,8 @@ function Remove-UserMsolAccountSku {
                 return
             }
 
-            $removeLicenseIds = $removeLicenses.SkuId
             $licenseNames = $removeLicenses | ForEach-Object { $_.Name } | Select-Object -Unique
+            $removeLicenseIds = $removeLicenses.SkuId
         }
 
         $summary = if ($PSCmdlet.ParameterSetName -eq 'All') {
