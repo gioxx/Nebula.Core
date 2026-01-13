@@ -628,6 +628,8 @@ function Get-TenantMsolAccountSku {
         Force a fresh download of the cached license catalog before processing.
     .PARAMETER Filter
         Filters the output to licenses whose name or SkuPartNumber contains the provided text.
+    .PARAMETER SampleUsers
+        Returns up to N sample users for each matching SKU (requires -Filter).
     .PARAMETER AsTable
         Display the result as a formatted table instead of returning objects.
     .PARAMETER GridView
@@ -638,11 +640,14 @@ function Get-TenantMsolAccountSku {
         Get-TenantMsolAccountSku -AsTable
     .EXAMPLE
         Get-TenantMsolAccountSku -Filter "E3"
+    .EXAMPLE
+        Get-TenantMsolAccountSku -Filter "E3" -SampleUsers 5
     #>
     [CmdletBinding()]
     param(
         [switch]$ForceLicenseCatalogRefresh,
         [string]$Filter,
+        [int]$SampleUsers,
         [switch]$AsTable,
         [switch]$GridView
     )
@@ -685,6 +690,11 @@ function Get-TenantMsolAccountSku {
 
         if (-not $skus -or $skus.Count -eq 0) {
             Write-NCMessage "No licenses found for this tenant." -Level WARNING
+            return
+        }
+
+        if ($SampleUsers -gt 0 -and -not $Filter) {
+            Write-NCMessage "SampleUsers requires -Filter to limit the query scope. Example: Get-TenantMsolAccountSku -Filter \"E3\" -SampleUsers 5" -Level ERROR
             return
         }
 
@@ -732,6 +742,57 @@ function Get-TenantMsolAccountSku {
             }
         }
 
+        if ($SampleUsers -gt 0) {
+            $sorted = foreach ($sku in $sorted) {
+                $sampleUserList = @()
+                try {
+                    $examples = Invoke-NCRetry -Action {
+                        Get-MgUser -Filter "assignedLicenses/any(x:x/skuId eq $($sku.SkuId))" `
+                            -Top $SampleUsers `
+                            -ConsistencyLevel eventual `
+                            -Property Id,UserPrincipalName,DisplayName `
+                            -ErrorAction Stop
+                    } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve sample users for $($sku.SkuPartNumber)" -OnError {
+                        param($attempt, $max, $err)
+                        $currentAttempt = if ($attempt) { $attempt } else { '?' }
+                        $currentMax = if ($max) { $max } else { $maxAttempts }
+                        Write-NCMessage "Failed to retrieve sample users for $($sku.SkuPartNumber), attempt $currentAttempt of $currentMax." -Level ERROR
+                    }
+                }
+                catch {
+                    $examples = @()
+                }
+
+                if ($examples) {
+                    foreach ($entry in ($examples | Select-Object -First $SampleUsers)) {
+                        if ($entry.UserPrincipalName) {
+                            if ($entry.DisplayName) {
+                                # $sampleUserList += ("{0} <{1}>" -f $entry.DisplayName, $entry.UserPrincipalName)
+                                $sampleUserList += ("{0}" -f $entry.UserPrincipalName)
+                            }
+                            else {
+                                $sampleUserList += $entry.UserPrincipalName
+                            }
+                        }
+                    }
+                }
+
+                [pscustomobject][ordered]@{
+                    Name          = $sku.Name
+                    SkuPartNumber = $sku.SkuPartNumber
+                    SkuId         = $sku.SkuId
+                    Total         = $sku.Total
+                    Consumed      = $sku.Consumed
+                    Available     = $sku.Available
+                    Enabled       = $sku.Enabled
+                    Suspended     = $sku.Suspended
+                    Warning       = $sku.Warning
+                    Source        = $sku.Source
+                    SampleUsers   = $sampleUserList
+                }
+            }
+        }
+
         if ($GridView.IsPresent) {
             $sorted | Out-GridView -Title "M365 Tenant Licenses"
         }
@@ -739,7 +800,20 @@ function Get-TenantMsolAccountSku {
             $limited = $sorted | Select-Object @{
                     Name       = 'Name'
                     Expression = { Format-OutputString -Value $_.Name -MaxLength $NCVars.MaxFieldLength }
-                }, SkuPartNumber, Total, Consumed, Available
+                }, SkuPartNumber, Total, Consumed, Available, @{
+                    Name       = 'SampleUsers'
+                    Expression = {
+                        if ($_.PSObject.Properties['SampleUsers'] -and $_.SampleUsers) {
+                            ($_.SampleUsers -join '; ')
+                        }
+                        else {
+                            $null
+                        }
+                    }
+                }
+            if ($SampleUsers -le 0) {
+                $limited = $limited | Select-Object Name, SkuPartNumber, Total, Consumed, Available
+            }
             Show-Table -Rows $limited -AsTable
         }
         else {
