@@ -815,18 +815,26 @@ function Remove-MboxPermission {
         One or more users to remove permissions from. Accepts pipeline input.
     .PARAMETER AccessRights
         Permission type to remove: All, FullAccess, SendAs, SendOnBehalfTo. Defaults to All.
+    .PARAMETER RemoveAllAdditionalPermissions
+        Removes any non-inherited FullAccess, SendAs, and SendOnBehalfTo permissions for the source mailbox.
     .EXAMPLE
         Remove-MboxPermission -SourceMailbox info@contoso.com -UserMailbox mario.rossi@contoso.com -AccessRights SendAs
+    .EXAMPLE
+        Remove-MboxPermission -SourceMailbox info@contoso.com -RemoveAllAdditionalPermissions
     #>
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName = 'User')]
     param(
-        [Parameter(Mandatory, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'User')]
+        [Parameter(Mandatory, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'All')]
         [Alias('Identity')]
         [string]$SourceMailbox,
-        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'User')]
         [string[]]$UserMailbox,
+        [Parameter(ParameterSetName = 'User')]
         [ValidateSet('All', 'FullAccess', 'SendAs', 'SendOnBehalfTo')]
-        [string]$AccessRights = 'All'
+        [string]$AccessRights = 'All',
+        [Parameter(Mandatory, ParameterSetName = 'All')]
+        [switch]$RemoveAllAdditionalPermissions
     )
 
     begin { Set-ProgressAndInfoPreferences }
@@ -846,37 +854,66 @@ function Remove-MboxPermission {
             return
         }
 
-        foreach ($user in $UserMailbox) {
-            try {
-                $userObject = Get-User -Identity $user -ErrorAction Stop
-            }
-            catch {
-                Add-EmptyLine
-                Write-NCMessage "The mailbox '$user' does not exist. Please check the provided e-mail address." -Level ERROR
-                continue
+        if ($PSCmdlet.ParameterSetName -eq 'All') {
+            $targetAddress = $targetMailbox.PrimarySmtpAddress
+
+            $fullAccessUsers = Get-MailboxPermission -Identity $targetAddress -ErrorAction SilentlyContinue |
+                Where-Object { $_.AccessRights -eq 'FullAccess' -and -not $_.IsInherited -and $_.User.ToString() -ne 'NT AUTHORITY\SELF' -and $_.User.ToString() -notlike 'S-1-5*' } |
+                ForEach-Object { $_.User.ToString() } | Sort-Object -Unique
+
+            foreach ($userIdentity in $fullAccessUsers) {
+                Write-NCMessage ("Removing FullAccess for {0} from {1} ..." -f $userIdentity, $targetAddress) -Level INFO
+                Remove-MailboxPermission -Identity $targetAddress -User $userIdentity -AccessRights FullAccess -Confirm:$false
             }
 
-            $userIdentity = $userObject.UserPrincipalName
-            switch ($AccessRights) {
-                'FullAccess' {
-                    Write-NCMessage ("Removing FullAccess for {0} from {1} ..." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level INFO
-                    Remove-MailboxPermission -Identity $targetMailbox.PrimarySmtpAddress -User $userIdentity -AccessRights FullAccess -Confirm:$false
+            $sendAsUsers = Get-RecipientPermission -Identity $targetAddress -AccessRights SendAs -ErrorAction SilentlyContinue |
+                Where-Object { $_.Trustee.ToString() -ne 'NT AUTHORITY\SELF' -and $_.Trustee.ToString() -notlike 'S-1-5*' } |
+                ForEach-Object { $_.Trustee.ToString() } | Sort-Object -Unique
+
+            foreach ($userIdentity in $sendAsUsers) {
+                Write-NCMessage ("Removing SendAs for {0} from {1} ..." -f $userIdentity, $targetAddress) -Level INFO
+                Remove-RecipientPermission -Identity $targetAddress -Trustee $userIdentity -AccessRights SendAs -Confirm:$false
+            }
+
+            $sendOnBehalfUsers = @($targetMailbox.GrantSendOnBehalfTo) | ForEach-Object { $_.ToString() } | Sort-Object -Unique
+            foreach ($userIdentity in $sendOnBehalfUsers) {
+                Write-NCMessage ("Removing SendOnBehalfTo for {0} from {1} ..." -f $userIdentity, $targetAddress) -Level INFO
+                Set-Mailbox -Identity $targetAddress -GrantSendOnBehalfTo @{ remove = $userIdentity } -Confirm:$false | Out-Null
+            }
+        }
+        else {
+            foreach ($user in $UserMailbox) {
+                try {
+                    $userObject = Get-User -Identity $user -ErrorAction Stop
                 }
-                'SendAs' {
-                    Write-NCMessage ("Removing SendAs for {0} from {1} ..." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level INFO
-                    Remove-RecipientPermission -Identity $targetMailbox.PrimarySmtpAddress -Trustee $userIdentity -AccessRights SendAs -Confirm:$false
+                catch {
+                    Add-EmptyLine
+                    Write-NCMessage "The mailbox '$user' does not exist. Please check the provided e-mail address." -Level ERROR
+                    continue
                 }
-                'SendOnBehalfTo' {
-                    Write-NCMessage ("Removing SendOnBehalfTo for {0} from {1} ..." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level INFO
-                    Set-Mailbox -Identity $targetMailbox.PrimarySmtpAddress -GrantSendOnBehalfTo @{ remove = $userIdentity } -Confirm:$false | Out-Null
-                }
-                'All' {
-                    Write-NCMessage ("Removing FullAccess for {0} from {1} ..." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level INFO
-                    Remove-MailboxPermission -Identity $targetMailbox.PrimarySmtpAddress -User $userIdentity -AccessRights FullAccess -Confirm:$false
-                    Write-NCMessage ("Removing SendAs for {0} from {1} ..." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level INFO
-                    Remove-RecipientPermission -Identity $targetMailbox.PrimarySmtpAddress -Trustee $userIdentity -AccessRights SendAs -Confirm:$false
-                    Write-NCMessage ("Removing SendOnBehalfTo for {0} from {1} ..." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level INFO
-                    Set-Mailbox -Identity $targetMailbox.PrimarySmtpAddress -GrantSendOnBehalfTo @{ remove = $userIdentity } -Confirm:$false | Out-Null
+
+                $userIdentity = $userObject.UserPrincipalName
+                switch ($AccessRights) {
+                    'FullAccess' {
+                        Write-NCMessage ("Removing FullAccess for {0} from {1} ..." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level INFO
+                        Remove-MailboxPermission -Identity $targetMailbox.PrimarySmtpAddress -User $userIdentity -AccessRights FullAccess -Confirm:$false
+                    }
+                    'SendAs' {
+                        Write-NCMessage ("Removing SendAs for {0} from {1} ..." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level INFO
+                        Remove-RecipientPermission -Identity $targetMailbox.PrimarySmtpAddress -Trustee $userIdentity -AccessRights SendAs -Confirm:$false
+                    }
+                    'SendOnBehalfTo' {
+                        Write-NCMessage ("Removing SendOnBehalfTo for {0} from {1} ..." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level INFO
+                        Set-Mailbox -Identity $targetMailbox.PrimarySmtpAddress -GrantSendOnBehalfTo @{ remove = $userIdentity } -Confirm:$false | Out-Null
+                    }
+                    'All' {
+                        Write-NCMessage ("Removing FullAccess for {0} from {1} ..." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level INFO
+                        Remove-MailboxPermission -Identity $targetMailbox.PrimarySmtpAddress -User $userIdentity -AccessRights FullAccess -Confirm:$false
+                        Write-NCMessage ("Removing SendAs for {0} from {1} ..." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level INFO
+                        Remove-RecipientPermission -Identity $targetMailbox.PrimarySmtpAddress -Trustee $userIdentity -AccessRights SendAs -Confirm:$false
+                        Write-NCMessage ("Removing SendOnBehalfTo for {0} from {1} ..." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level INFO
+                        Set-Mailbox -Identity $targetMailbox.PrimarySmtpAddress -GrantSendOnBehalfTo @{ remove = $userIdentity } -Confirm:$false | Out-Null
+                    }
                 }
             }
         }
