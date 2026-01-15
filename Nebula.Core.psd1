@@ -35,6 +35,7 @@
         'Format-SortedEmailsFromClipboard',
         'Get-DynamicDistributionGroupFilter',
         'Get-MboxAlias',
+        'Get-MboxPrimarySmtpAddress',
         'Get-MboxPermission',
         'Get-NebulaConfig',
         'Get-QuarantineFrom',
@@ -73,6 +74,7 @@
         'Get-DDGRecipientFilter',
         'Leave-Nebula',
         'mids',
+        'gpa',
         'qrel',
         'rqf'
     )
@@ -105,6 +107,9 @@
 - Improve: Get-UserMsolAccountSku now accepts also pipeline input. Also, it now supports -Clipboard to copy a quoted list of licenses.
 - Improve: Remove-UserMsolAccountSku now uses two parameter sets. With -All, it removes all licenses assigned to the user, displaying the names (resolved via catalog if available). The -License parameter remains for selective removal.
 - Improve: Get-TenantMsolAccountSku now supports -Filter to show only licenses matching the provided text (name or SkuPartNumber).
+- Improve: Remove-MboxPermission now supports -RemoveAllAdditionalPermissions to remove non-inherited FullAccess, SendAs, and SendOnBehalfTo from a mailbox.
+- New: Get-MboxPrimarySmtpAddress resolves the PrimarySmtpAddress for any mailbox/recipient, with -Raw for string-only output.
+- New: Added alias gpa for Get-MboxPrimarySmtpAddress.
 '@
         }
     }

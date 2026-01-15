@@ -486,6 +486,64 @@ function Get-MboxAlias {
     end { Restore-ProgressAndInfoPreferences }
 }
 
+function Get-MboxPrimarySmtpAddress {
+    <#
+    .SYNOPSIS
+        Returns the PrimarySmtpAddress for a mailbox or recipient.
+    .DESCRIPTION
+        Ensures Exchange Online connectivity and resolves the recipient to its PrimarySmtpAddress.
+    .PARAMETER SourceMailbox
+        Mailbox or recipient identity. Accepts pipeline input.
+    .PARAMETER Raw
+        Return only the PrimarySmtpAddress values.
+    .EXAMPLE
+        Get-MboxPrimarySmtpAddress -SourceMailbox info@contoso.com
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('Identity')]
+        [string[]]$SourceMailbox,
+        [switch]$Raw
+    )
+
+    begin { Set-ProgressAndInfoPreferences }
+
+    process {
+        if (-not (Test-EOLConnection)) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
+            return
+        }
+
+        foreach ($entry in $SourceMailbox) {
+            try {
+                $recipient = Get-Recipient -Identity $entry -ErrorAction Stop
+            }
+            catch {
+                Write-NCMessage "Recipient '$entry' not available or not found. $($_.Exception.Message)" -Level ERROR
+                continue
+            }
+
+            if ($Raw) {
+                $recipient.PrimarySmtpAddress
+            }
+            else {
+                [pscustomobject]@{
+                    Identity             = $recipient.Identity
+                    DisplayName          = $recipient.DisplayName
+                    PrimarySmtpAddress   = $recipient.PrimarySmtpAddress
+                    RecipientTypeDetails = $recipient.RecipientTypeDetails
+                }
+            }
+        }
+    }
+
+    end { Restore-ProgressAndInfoPreferences }
+}
+
+Set-Alias -Name gpa -Value Get-MboxPrimarySmtpAddress -Description "Get Primary Address (function)"
+
 function Get-MboxPermission {
     <#
     .SYNOPSIS
