@@ -35,8 +35,8 @@
         'Format-SortedEmailsFromClipboard',
         'Get-DynamicDistributionGroupFilter',
         'Get-MboxAlias',
-        'Get-MboxPrimarySmtpAddress',
         'Get-MboxPermission',
+        'Get-MboxPrimarySmtpAddress',
         'Get-NebulaConfig',
         'Get-QuarantineFrom',
         'Get-QuarantineFromDomain',
@@ -72,9 +72,9 @@
         'Export-DG',
         'fse',
         'Get-DDGRecipientFilter',
+        'gpa',
         'Leave-Nebula',
         'mids',
-        'gpa',
         'qrel',
         'rqf'
     )
