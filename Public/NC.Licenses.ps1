@@ -629,7 +629,7 @@ function Get-TenantMsolAccountSku {
     .PARAMETER Filter
         Filters the output to licenses whose name or SkuPartNumber contains the provided text.
     .PARAMETER SampleUsers
-        Returns up to N sample users for each matching SKU (requires -Filter).
+        Returns up to N sample users for each matching SKU (requires -Filter). Defaults to 5 when specified.
     .PARAMETER AsTable
         Display the result as a formatted table instead of returning objects.
     .PARAMETER GridView
@@ -647,7 +647,7 @@ function Get-TenantMsolAccountSku {
     param(
         [switch]$ForceLicenseCatalogRefresh,
         [string]$Filter,
-        [int]$SampleUsers,
+        [int]$SampleUsers = 5,
         [switch]$AsTable,
         [switch]$GridView
     )
@@ -693,7 +693,9 @@ function Get-TenantMsolAccountSku {
             return
         }
 
-        if ($SampleUsers -gt 0 -and -not $Filter) {
+        $useSampleUsers = $PSBoundParameters.ContainsKey('SampleUsers')
+
+        if ($useSampleUsers -and -not $Filter) {
             Write-NCMessage "SampleUsers requires -Filter to limit the query scope. Example: Get-TenantMsolAccountSku -Filter \"E3\" -SampleUsers 5" -Level ERROR
             return
         }
@@ -742,7 +744,12 @@ function Get-TenantMsolAccountSku {
             }
         }
 
-        if ($SampleUsers -gt 0) {
+        if ($useSampleUsers) {
+            if ($SampleUsers -le 0) {
+                Write-NCMessage "SampleUsers must be greater than 0." -Level ERROR
+                return
+            }
+
             $sorted = foreach ($sku in $sorted) {
                 $sampleUserList = @()
                 try {
@@ -811,7 +818,7 @@ function Get-TenantMsolAccountSku {
                         }
                     }
                 }
-            if ($SampleUsers -le 0) {
+            if (-not $useSampleUsers) {
                 $limited = $limited | Select-Object Name, SkuPartNumber, Total, Consumed, Available
             }
             Show-Table -Rows $limited -AsTable
