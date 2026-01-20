@@ -754,6 +754,93 @@ function Get-UserLastSeen {
     end { Restore-ProgressAndInfoPreferences }
 }
 
+function Get-MboxLastMessageTrace {
+    <#
+    .SYNOPSIS
+        Returns the most recent received and sent message traces for a mailbox.
+    .DESCRIPTION
+        Resolves the mailbox to its PrimarySmtpAddress and queries Get-MessageTraceV2 for the latest
+        received and sent messages, returning the trace objects and their timestamps.
+    .PARAMETER SourceMailbox
+        Mailbox or recipient identity (UPN, SMTP address, alias). Accepts pipeline input.
+    .PARAMETER IncludeTrace
+        Include raw message trace objects in the output.
+    .EXAMPLE
+        Get-MboxLastMessageTrace -SourceMailbox info@contoso.com
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('Identity', 'UserPrincipalName', 'Mailbox', 'UPN')]
+        [string]$SourceMailbox,
+        [switch]$IncludeTrace
+    )
+
+    begin { Set-ProgressAndInfoPreferences }
+
+    process {
+        if (-not (Test-EOLConnection)) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
+            return
+        }
+
+        try {
+            $recipient = Get-Recipient -Identity $SourceMailbox -ErrorAction Stop
+        }
+        catch {
+            Write-NCMessage "Mailbox or recipient '$SourceMailbox' not found. $($_.Exception.Message)" -Level ERROR
+            return
+        }
+
+        $primaryAddress = $recipient.PrimarySmtpAddress
+        $receivedTrace = $null
+        $sentTrace = $null
+
+        try {
+            $receivedTrace = Get-MessageTraceV2 -RecipientAddress $primaryAddress -ErrorAction Stop |
+                Sort-Object Received -Descending |
+                Select-Object -First 1
+        }
+        catch {
+            Write-NCMessage ("Unable to retrieve received message trace for '{0}'. {1}" -f $primaryAddress, $_.Exception.Message) -Level WARNING
+        }
+
+        try {
+            $sentTrace = Get-MessageTraceV2 -SenderAddress $primaryAddress -ErrorAction Stop |
+                Sort-Object Received -Descending |
+                Select-Object -First 1
+        }
+        catch {
+            Write-NCMessage ("Unable to retrieve sent message trace for '{0}'. {1}" -f $primaryAddress, $_.Exception.Message) -Level WARNING
+        }
+
+        $result = [ordered]@{
+            DisplayName            = $recipient.DisplayName
+            PrimarySmtpAddress     = $primaryAddress
+            LastReceived           = if ($receivedTrace) { $receivedTrace.Received } else { $null }
+            LastReceivedSubject    = if ($receivedTrace) { $receivedTrace.Subject } else { $null }
+            LastReceivedSender     = if ($receivedTrace) { $receivedTrace.SenderAddress } else { $null }
+            LastReceivedRecipient  = if ($receivedTrace) { $receivedTrace.RecipientAddress } else { $null }
+            LastReceivedStatus     = if ($receivedTrace) { $receivedTrace.Status } else { $null }
+            LastSent               = if ($sentTrace) { $sentTrace.Received } else { $null }
+            LastSentSubject        = if ($sentTrace) { $sentTrace.Subject } else { $null }
+            LastSentSender         = if ($sentTrace) { $sentTrace.SenderAddress } else { $null }
+            LastSentRecipient      = if ($sentTrace) { $sentTrace.RecipientAddress } else { $null }
+            LastSentStatus         = if ($sentTrace) { $sentTrace.Status } else { $null }
+        }
+
+        if ($IncludeTrace.IsPresent) {
+            $result.LastReceivedTrace = $receivedTrace
+            $result.LastSentTrace = $sentTrace
+        }
+
+        [pscustomobject]$result
+    }
+
+    end { Restore-ProgressAndInfoPreferences }
+}
+
 function New-SharedMailbox {
     <#
     .SYNOPSIS

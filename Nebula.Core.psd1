@@ -35,6 +35,7 @@
         'Format-SortedEmailsFromClipboard',
         'Get-DynamicDistributionGroupFilter',
         'Get-MboxAlias',
+        'Get-MboxLastMessageTrace',
         'Get-MboxPermission',
         'Get-MboxPrimarySmtpAddress',
         'Get-NebulaConfig',
@@ -109,6 +110,7 @@
 - Improve: Get-TenantMsolAccountSku now supports -Filter to show only licenses matching the provided text (name or SkuPartNumber).
 - Improve: Remove-MboxPermission now supports -RemoveAllAdditionalPermissions to remove non-inherited FullAccess, SendAs, and SendOnBehalfTo from a mailbox.
 - New: Get-MboxPrimarySmtpAddress resolves the PrimarySmtpAddress for any mailbox/recipient, with -Raw for string-only output.
+- New: Get-MboxLastMessageTrace returns latest received/sent message info with optional raw trace output.
 - New: Added alias gpa for Get-MboxPrimarySmtpAddress.
 '@
         }
