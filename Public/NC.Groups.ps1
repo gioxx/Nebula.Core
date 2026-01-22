@@ -1285,6 +1285,260 @@ function Get-UserGroups {
     }
 }
 
+function Get-EntraGroupDevice {
+    <#
+    .SYNOPSIS
+        Shows the Entra groups that a device belongs to.
+    .DESCRIPTION
+        Connects to Microsoft Graph, resolves the target device by display name or ID, then
+        lists every directory object membership for that device.
+    .PARAMETER DeviceIdentifier
+        Device display name or object ID. Accepts pipeline input and common Id/DisplayName property names.
+    .PARAMETER TreatInputAsId
+        Treat the provided DeviceIdentifier as an object ID without attempting name resolution.
+    .PARAMETER GridView
+        Show additional details in Out-GridView instead of returning objects.
+    .EXAMPLE
+        Get-EntraGroupDevice -DeviceIdentifier "PC123"
+    .EXAMPLE
+        "00000000-0000-0000-0000-000000000000" | Get-EntraGroupDevice -TreatInputAsId -GridView
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('Device', 'DeviceName', 'Id', 'DeviceId', 'Name', 'Identity', 'DisplayName')]
+        [string]$DeviceIdentifier,
+        [switch]$TreatInputAsId,
+        [switch]$GridView
+    )
+
+    begin {
+        $graphConnected = $null
+    }
+
+    process {
+        if ($null -eq $graphConnected) {
+            $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+            if (-not $graphConnected) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+                return
+            }
+        }
+
+        $device = $null
+        $deviceLabel = $DeviceIdentifier
+
+        if ($TreatInputAsId.IsPresent -or $DeviceIdentifier -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+            try {
+                $device = Get-MgDevice -DeviceId $DeviceIdentifier -ErrorAction Stop
+            }
+            catch {
+                Write-NCMessage "Entra device with ID '$DeviceIdentifier' not found: $($_.Exception.Message)" -Level ERROR
+                return
+            }
+        }
+        else {
+            $escapedDevice = $DeviceIdentifier.Replace("'", "''")
+            try {
+                $deviceMatches = Get-MgDevice -Filter "displayName eq '$escapedDevice'" -All -ErrorAction Stop
+            }
+            catch {
+                Write-NCMessage "Unable to resolve device '$DeviceIdentifier': $($_.Exception.Message)" -Level ERROR
+                return
+            }
+
+            if (-not $deviceMatches -or $deviceMatches.Count -eq 0) {
+                Write-NCMessage "Device '$DeviceIdentifier' not found" -Level WARNING
+                return
+            }
+
+            if ($deviceMatches.Count -gt 1) {
+                Write-NCMessage "Multiple devices matched '$DeviceIdentifier'. Using the first result ($($deviceMatches[0].DisplayName))" -Level WARNING
+            }
+
+            $device = $deviceMatches | Select-Object -First 1
+            $deviceLabel = $device.DisplayName
+        }
+
+        if (-not $device) {
+            return
+        }
+
+        try {
+            $memberships = @(Get-MgDeviceMemberOf -DeviceId $device.Id -All -ErrorAction Stop)
+        }
+        catch {
+            Write-NCMessage "Unable to read group memberships for device ${deviceLabel}: $($_.Exception.Message)" -Level ERROR
+            return
+        }
+
+        Add-EmptyLine
+        Write-NCMessage "Device ($deviceLabel) - Groups found: $($memberships.Count)" -Level VERBOSE
+
+        if (-not $memberships -or $memberships.Count -eq 0) {
+            Write-NCMessage "No groups found for $deviceLabel." -Level WARNING
+            return
+        }
+
+        $results = [System.Collections.Generic.List[object]]::new()
+        foreach ($membership in $memberships) {
+            $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
+            $row = [ordered]@{
+                'Group Name' = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
+                'Group Mail' = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
+            }
+
+            if ($GridView.IsPresent) {
+                $row['Group Description'] = if ($props.ContainsKey('description')) { $props.description } else { $null }
+                $row['Group Mail Nickname'] = if ($props.ContainsKey('mailNickname')) { $props.mailNickname } else { $null }
+                $row['Group Mail Enabled'] = if ($props.ContainsKey('mailEnabled')) { $props.mailEnabled } else { $null }
+                $row['Group Type'] = if ($props.ContainsKey('groupTypes')) { ($props.groupTypes -join ', ') } else { $null }
+                $row['Group ID'] = $membership.Id
+            }
+
+            $results.Add([pscustomobject]$row) | Out-Null
+        }
+
+        if ($GridView.IsPresent) {
+            $results | Out-GridView -Title "Entra Device Groups - $deviceLabel"
+        }
+        else {
+            $results | Sort-Object 'Group Name'
+        }
+    }
+}
+
+function Get-EntraGroupUser {
+    <#
+    .SYNOPSIS
+        Shows the Entra groups that a user belongs to.
+    .DESCRIPTION
+        Connects to Microsoft Graph, resolves the target user by UPN/display name or ID, then
+        lists every directory object membership for that user.
+    .PARAMETER UserIdentifier
+        User principal name, display name, or object ID. Accepts pipeline input and common Id/DisplayName property names.
+    .PARAMETER TreatInputAsId
+        Treat the provided UserIdentifier as an object ID without attempting name resolution.
+    .PARAMETER GridView
+        Show additional details in Out-GridView instead of returning objects.
+    .EXAMPLE
+        Get-EntraGroupUser -UserIdentifier "user@contoso.com"
+    .EXAMPLE
+        "00000000-0000-0000-0000-000000000000" | Get-EntraGroupUser -TreatInputAsId -GridView
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('User', 'UPN', 'Mail', 'Id', 'UserId', 'DisplayName', 'Identity')]
+        [string]$UserIdentifier,
+        [switch]$TreatInputAsId,
+        [switch]$GridView
+    )
+
+    begin {
+        $graphConnected = $null
+    }
+
+    process {
+        if ($null -eq $graphConnected) {
+            $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+            if (-not $graphConnected) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+                return
+            }
+        }
+
+        $user = $null
+        $userLabel = $UserIdentifier
+
+        if ($TreatInputAsId.IsPresent -or $UserIdentifier -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+            try {
+                $user = Get-MgUser -UserId $UserIdentifier -ErrorAction Stop
+            }
+            catch {
+                Write-NCMessage "Entra user with ID '$UserIdentifier' not found: $($_.Exception.Message)" -Level ERROR
+                return
+            }
+        }
+        else {
+            try {
+                $user = Get-MgUser -UserId $UserIdentifier -ErrorAction Stop
+            }
+            catch {
+                $escapedUser = $UserIdentifier.Replace("'", "''")
+                try {
+                    $userMatches = Get-MgUser -Filter "displayName eq '$escapedUser'" -All -ErrorAction Stop
+                }
+                catch {
+                    Write-NCMessage "Unable to resolve user '$UserIdentifier': $($_.Exception.Message)" -Level ERROR
+                    return
+                }
+
+                if (-not $userMatches -or $userMatches.Count -eq 0) {
+                    Write-NCMessage "User '$UserIdentifier' not found" -Level WARNING
+                    return
+                }
+
+                if ($userMatches.Count -gt 1) {
+                    Write-NCMessage "Multiple users matched '$UserIdentifier'. Using the first result ($($userMatches[0].UserPrincipalName))." -Level WARNING
+                }
+
+                $user = $userMatches | Select-Object -First 1
+            }
+        }
+
+        if (-not $user) {
+            return
+        }
+
+        $userLabel = if ($user.UserPrincipalName) { $user.UserPrincipalName } else { $user.DisplayName }
+
+        try {
+            $memberships = @(Get-MgUserMemberOf -UserId $user.Id -All -ErrorAction Stop)
+        }
+        catch {
+            Write-NCMessage "Unable to read group memberships for user ${userLabel}: $($_.Exception.Message)" -Level ERROR
+            return
+        }
+
+        Add-EmptyLine
+        Write-NCMessage "User ($userLabel) - Groups found: $($memberships.Count)" -Level VERBOSE
+
+        if (-not $memberships -or $memberships.Count -eq 0) {
+            Write-NCMessage "No groups found for $userLabel." -Level WARNING
+            return
+        }
+
+        $results = [System.Collections.Generic.List[object]]::new()
+        foreach ($membership in $memberships) {
+            $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
+            $row = [ordered]@{
+                'Group Name' = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
+                'Group Mail' = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
+            }
+
+            if ($GridView.IsPresent) {
+                $row['Group Description'] = if ($props.ContainsKey('description')) { $props.description } else { $null }
+                $row['Group Mail Nickname'] = if ($props.ContainsKey('mailNickname')) { $props.mailNickname } else { $null }
+                $row['Group Mail Enabled'] = if ($props.ContainsKey('mailEnabled')) { $props.mailEnabled } else { $null }
+                $row['Group Type'] = if ($props.ContainsKey('groupTypes')) { ($props.groupTypes -join ', ') } else { $null }
+                $row['Group ID'] = $membership.Id
+            }
+
+            $results.Add([pscustomobject]$row) | Out-Null
+        }
+
+        if ($GridView.IsPresent) {
+            $results | Out-GridView -Title "Entra User Groups - $userLabel"
+        }
+        else {
+            $results | Sort-Object 'Group Name'
+        }
+    }
+}
+
 function Remove-EntraGroupDevice {
     <#
     .SYNOPSIS

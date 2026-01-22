@@ -34,6 +34,8 @@
         'Format-MessageIDsFromClipboard',
         'Format-SortedEmailsFromClipboard',
         'Get-DynamicDistributionGroupFilter',
+        'Get-EntraGroupDevice',
+        'Get-EntraGroupUser',
         'Get-MboxAlias',
         'Get-MboxLastMessageTrace',
         'Get-MboxPermission',
@@ -111,6 +113,8 @@
 - Improve: Remove-MboxPermission now supports -RemoveAllAdditionalPermissions to remove non-inherited FullAccess, SendAs, and SendOnBehalfTo from a mailbox.
 - New: Get-MboxPrimarySmtpAddress resolves the PrimarySmtpAddress for any mailbox/recipient, with -Raw for string-only output.
 - New: Get-MboxLastMessageTrace returns latest received/sent message info with optional raw trace output.
+- New: Get-EntraGroupDevice lists Entra group memberships for a device via Microsoft Graph.
+- New: Get-EntraGroupUser lists Entra group memberships for a user via Microsoft Graph.
 - New: Added alias gpa for Get-MboxPrimarySmtpAddress.
 '@
         }
