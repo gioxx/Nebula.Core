@@ -623,7 +623,7 @@ function Get-TenantMsolAccountSku {
     .DESCRIPTION
         Connects to Microsoft Graph, loads the license catalog, retrieves all tenant SKUs, resolves
         part numbers to friendly names (using the same lookup logic as other license functions), and
-        returns counts for total, consumed, available, suspended, and warning seats.
+        returns counts for total, consumed, available (net of suspended), suspended, and warning seats.
     .PARAMETER ForceLicenseCatalogRefresh
         Force a fresh download of the cached license catalog before processing.
     .PARAMETER Filter
@@ -711,9 +711,11 @@ function Get-TenantMsolAccountSku {
             $enabled = if ($prepaid) { [int]$prepaid.Enabled } else { 0 }
             $suspended = if ($prepaid) { [int]$prepaid.Suspended } else { 0 }
             $warning = if ($prepaid) { [int]$prepaid.Warning } else { 0 }
-            $total = $enabled + $suspended + $warning
+            $totalCount = $enabled + $suspended + $warning
+            $total = "{0} (Enabled: {1}, Suspended: {2})" -f $totalCount, $enabled, $suspended
             $consumed = if ($sku.ConsumedUnits -is [int]) { [int]$sku.ConsumedUnits } else { [int]0 }
-            $available = if ($total -gt 0) { [Math]::Max($total - $consumed, 0) } else { $null }
+            $activeTotal = $totalCount - $suspended
+            $available = if ($activeTotal -gt 0) { [Math]::Max($activeTotal - $consumed, 0) } else { $null }
             $nameSource = if ($matchSource) { $matchSource } elseif ($display) { 'Primary' } else { 'Unknown' }
 
             [pscustomobject][ordered]@{
@@ -721,6 +723,7 @@ function Get-TenantMsolAccountSku {
                 SkuPartNumber = $sku.SkuPartNumber
                 SkuId         = $sku.SkuId
                 Total         = $total
+                TotalCount    = $totalCount
                 Consumed      = $consumed
                 Available     = $available
                 Enabled       = $enabled
@@ -789,6 +792,7 @@ function Get-TenantMsolAccountSku {
                     SkuPartNumber = $sku.SkuPartNumber
                     SkuId         = $sku.SkuId
                     Total         = $sku.Total
+                    TotalCount    = $sku.TotalCount
                     Consumed      = $sku.Consumed
                     Available     = $sku.Available
                     Enabled       = $sku.Enabled
@@ -819,9 +823,9 @@ function Get-TenantMsolAccountSku {
                     }
                 }
             if (-not $useSampleUsers) {
-                $limited = $limited | Select-Object Name, SkuPartNumber, Total, Consumed, Available
-            }
-            Show-Table -Rows $limited -AsTable
+            $limited = $limited | Select-Object Name, SkuPartNumber, Total, Consumed, Available
+        }
+        Show-Table -Rows $limited -AsTable
         }
         else {
             $sorted
