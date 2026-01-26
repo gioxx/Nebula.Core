@@ -134,15 +134,19 @@ function Add-UserMsolAccountSku {
                 $displayNormalized = if ($display) { & $normalizeString $display } else { $null }
 
                 if ($target -eq $skuPart -or $target -eq ($skuIdString.ToUpperInvariant()) -or ($displayNormalized -and $target -eq $displayNormalized)) {
-                    $match = @{
-                        SkuId         = $sku.SkuId
-                        SkuPartNumber = $sku.SkuPartNumber
-                        Name          = if ($display) { $display } else { $sku.SkuPartNumber }
-                        Available     = ($sku.PrepaidUnits.Enabled + $sku.PrepaidUnits.Warning + $sku.PrepaidUnits.Suspended) - $sku.ConsumedUnits
-                    }
-                    break
+                $prepaidUnits = $sku.PrepaidUnits
+                $enabledUnits = if ($prepaidUnits) { [int]$prepaidUnits.Enabled } else { 0 }
+                $consumedUnits = if ($sku.ConsumedUnits -is [int]) { [int]$sku.ConsumedUnits } else { [int]0 }
+                $availableUnits = [Math]::Max($enabledUnits - $consumedUnits, 0)
+                $match = @{
+                    SkuId         = $sku.SkuId
+                    SkuPartNumber = $sku.SkuPartNumber
+                    Name          = if ($display) { $display } else { $sku.SkuPartNumber }
+                    Available     = $availableUnits
                 }
+                break
             }
+        }
 
             if ($match) {
                 $resolved += $match
@@ -714,8 +718,7 @@ function Get-TenantMsolAccountSku {
             $totalCount = $enabled + $suspended + $warning
             $total = "{0} (Enabled: {1}, Suspended: {2})" -f $totalCount, $enabled, $suspended
             $consumed = if ($sku.ConsumedUnits -is [int]) { [int]$sku.ConsumedUnits } else { [int]0 }
-            $activeTotal = $totalCount - $suspended
-            $available = if ($activeTotal -gt 0) { [Math]::Max($activeTotal - $consumed, 0) } else { $null }
+            $available = [Math]::Max($enabled - $consumed, 0)
             $nameSource = if ($matchSource) { $matchSource } elseif ($display) { 'Primary' } else { 'Unknown' }
 
             [pscustomobject][ordered]@{
