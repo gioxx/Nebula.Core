@@ -103,8 +103,10 @@
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/Assets/icon.png'
 ReleaseNotes = @'
-- New: Update checks during Connect-Nebula can be throttled via CheckUpdatesIntervalHours.
+- Improve: Get-TenantMsolAccountSku now reports Available net of suspended seats and shows Total with enabled/suspended breakdown.
+- New: Get-TenantMsolAccountSku adds TotalCount with the numeric total for scripting.
 - New: Get-NebulaModuleUpdates runs an on-demand update check for Nebula.* modules.
+- New: Update checks during Connect-Nebula can be throttled via CheckUpdatesIntervalHours.
 '@
         }
     }
