@@ -105,7 +105,24 @@ function Connect-Nebula {
         [switch]$SkipGraph
     )
 
-    Write-NCMessage "Welcome to Nebula." -Level INFO
+    Write-NCMessage "Welcome to Nebula. Connecting, please wait ..." -Level INFO
+
+    try {
+        $checkUpdates = $NCVars.CheckUpdatesOnConnect
+        if ($checkUpdates -is [string]) {
+            $checkUpdates = $checkUpdates -match '^(1|true|yes|y)$'
+        }
+        else {
+            $checkUpdates = [bool]$checkUpdates
+        }
+
+        if ($checkUpdates) {
+            Test-NebulaModuleUpdates | Out-Null
+        }
+    }
+    catch {
+        Write-NCMessage "Update check failed. $($_.Exception.Message)" -Level WARNING
+    }
 
     $exoConnected = Test-EOLConnection -UserPrincipalName $UserPrincipalName `
         -AutoInstall:$AutoInstall.IsPresent `
