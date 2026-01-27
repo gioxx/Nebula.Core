@@ -19,7 +19,7 @@ Install-Module -Name Nebula.Core -Scope CurrentUser
 
 ## 🚀 Usage
 
-All documentation for using the module is available at **[kb.gioxx.org/docs/Nebula/Core](https://kb.gioxx.org/docs/Nebula/Core/intro)**.
+All documentation for using the module is available at **[kb.gioxx.org/Nebula/Core](https://kb.gioxx.org/Nebula/Core/intro)**.
 
 ---
 
