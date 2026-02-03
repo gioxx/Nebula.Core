@@ -1539,6 +1539,189 @@ function Get-EntraGroupUser {
     }
 }
 
+function Get-EntraGroupMembers {
+    <#
+    .SYNOPSIS
+        Shows the members of an Entra group (users, devices, and other directory objects).
+    .DESCRIPTION
+        Connects to Microsoft Graph, resolves the target group by display name or ID, then
+        lists every member of that group regardless of type.
+    .PARAMETER GroupName
+        Display name of the Entra group.
+    .PARAMETER GroupId
+        Object ID of the Entra group.
+    .PARAMETER IncludeDeviceUsers
+        When members are devices, resolve registered owners and users (may require additional Graph calls).
+    .PARAMETER GridView
+        Show additional details in Out-GridView instead of returning objects.
+    .EXAMPLE
+        Get-EntraGroupMembers -GroupName "My Entra Group"
+    .EXAMPLE
+        Get-EntraGroupMembers -GroupId "00000000-0000-0000-0000-000000000000" -GridView
+    .EXAMPLE
+        "My Entra Group" | Get-EntraGroupMembers
+    #>
+    [CmdletBinding(DefaultParameterSetName = 'ByName')]
+    param(
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('Group', 'DisplayName', 'Name', 'Identity')]
+        [string]$GroupName,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [string]$GroupId,
+
+        [switch]$IncludeDeviceUsers,
+        [switch]$GridView
+    )
+
+    $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+    if (-not $graphConnected) {
+        Add-EmptyLine
+        Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+        return
+    }
+
+    $resolvedGroup = $null
+    if ($PSCmdlet.ParameterSetName -eq 'ById') {
+        try {
+            $resolvedGroup = Get-MgGroup -GroupId $GroupId -ErrorAction Stop
+        }
+        catch {
+            Write-NCMessage "Entra group with ID '$GroupId' not found: $($_.Exception.Message)" -Level ERROR
+            return
+        }
+    }
+    else {
+        $escapedName = $GroupName.Replace("'", "''")
+        try {
+            $resolvedGroup = Get-MgGroup -Filter "displayName eq '$escapedName'" -All -ErrorAction Stop | Select-Object -First 1
+        }
+        catch {
+            Write-NCMessage "Unable to resolve group '$GroupName': $($_.Exception.Message)" -Level ERROR
+            return
+        }
+
+        if (-not $resolvedGroup) {
+            try {
+                $resolvedGroup = Get-MgGroup -GroupId $GroupName -ErrorAction Stop
+            }
+            catch {
+                Write-NCMessage "Entra group '$GroupName' not found by name or ID" -Level ERROR
+                return
+            }
+        }
+    }
+
+    try {
+        $members = @(Get-MgGroupMember -GroupId $resolvedGroup.Id -All -ErrorAction Stop)
+    }
+    catch {
+        Write-NCMessage "Unable to read members for group $($resolvedGroup.DisplayName): $($_.Exception.Message)" -Level ERROR
+        return
+    }
+
+    Add-EmptyLine
+    Write-NCMessage "Group ($($resolvedGroup.DisplayName)) - Members found: $($members.Count)" -Level VERBOSE
+
+    if (-not $members -or $members.Count -eq 0) {
+        Write-NCMessage "No members found for $($resolvedGroup.DisplayName)." -Level WARNING
+        return
+    }
+
+    $resolveType = {
+        param($odataType)
+        if ([string]::IsNullOrWhiteSpace($odataType)) {
+            return 'DirectoryObject'
+        }
+
+        $value = $odataType.ToLowerInvariant()
+        if ($value -match 'user') { return 'User' }
+        if ($value -match 'device') { return 'Device' }
+        if ($value -match 'group') { return 'Group' }
+        if ($value -match 'serviceprincipal') { return 'ServicePrincipal' }
+        if ($value -match 'orgcontact') { return 'Contact' }
+        return 'DirectoryObject'
+    }
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    foreach ($member in $members) {
+        $props = if ($member.AdditionalProperties) { $member.AdditionalProperties } else { @{} }
+        $odataType = if ($props.ContainsKey('@odata.type')) { $props['@odata.type'] } else { $null }
+        $memberType = & $resolveType $odataType
+        $displayName = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
+        $upn = if ($props.ContainsKey('userPrincipalName')) { $props.userPrincipalName } else { $null }
+        $mail = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
+
+        $row = [ordered]@{
+            'Member Name' = if ($displayName) { $displayName } elseif ($upn) { $upn } else { $null }
+            'Member Type' = $memberType
+            'Member Id'   = $member.Id
+        }
+
+        if ($IncludeDeviceUsers.IsPresent -and $memberType -eq 'Device') {
+            $owners = @()
+            $users = @()
+            try {
+                $owners = @(Get-MgDeviceRegisteredOwner -DeviceId $member.Id -All -ErrorAction Stop)
+            }
+            catch {
+                Write-NCMessage "Unable to read registered owners for device $($displayName): $($_.Exception.Message)" -Level WARNING
+            }
+
+            try {
+                $users = @(Get-MgDeviceRegisteredUser -DeviceId $member.Id -All -ErrorAction Stop)
+            }
+            catch {
+                Write-NCMessage "Unable to read registered users for device $($displayName): $($_.Exception.Message)" -Level WARNING
+            }
+
+            $ownerLabels = $owners | ForEach-Object {
+                $ownerProps = if ($_.AdditionalProperties) { $_.AdditionalProperties } else { @{} }
+                if ($ownerProps.ContainsKey('userPrincipalName')) { $ownerProps.userPrincipalName } elseif ($ownerProps.ContainsKey('displayName')) { $ownerProps.displayName } else { $_.Id }
+            }
+            $userLabels = $users | ForEach-Object {
+                $userProps = if ($_.AdditionalProperties) { $_.AdditionalProperties } else { @{} }
+                if ($userProps.ContainsKey('userPrincipalName')) { $userProps.userPrincipalName } elseif ($userProps.ContainsKey('displayName')) { $userProps.displayName } else { $_.Id }
+            }
+
+            $ownerValue = if ($ownerLabels) { ($ownerLabels -join '; ') } else { $null }
+            $userValue = if ($userLabels) { ($userLabels -join '; ') } else { $null }
+            $combinedValue = $null
+
+            if ($ownerValue -and $userValue -and ($ownerValue -eq $userValue)) {
+                $combinedValue = $ownerValue
+            }
+            elseif ($ownerValue -and $userValue) {
+                $combinedValue = "Owners: $ownerValue | Users: $userValue"
+            }
+            elseif ($ownerValue) {
+                $combinedValue = "Owners: $ownerValue"
+            }
+            elseif ($userValue) {
+                $combinedValue = "Users: $userValue"
+            }
+
+            $row['Device Owners/Users'] = $combinedValue
+        }
+
+        if ($GridView.IsPresent) {
+            $row['Member UPN'] = $upn
+            $row['Member Mail'] = $mail
+            $row['Member OData Type'] = $odataType
+        }
+
+        $results.Add([pscustomobject]$row) | Out-Null
+    }
+
+    $sorted = $results | Sort-Object 'Member Type', 'Member Name'
+    if ($GridView.IsPresent) {
+        $sorted | Out-GridView -Title "Entra Group Members - $($resolvedGroup.DisplayName)"
+    }
+    else {
+        $sorted
+    }
+}
+
 function Remove-EntraGroupDevice {
     <#
     .SYNOPSIS
