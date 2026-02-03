@@ -851,12 +851,16 @@ function Get-UserMsolAccountSku {
         Target user UPN or object ID.
     .PARAMETER Clipboard
         Copies the resolved license names (fallback: SkuPartNumber) to the clipboard as: "License1","License2"
+    .PARAMETER CheckAvailability
+        Show available seat counts for the user's assigned SKUs (uses tenant license data).
     .PARAMETER ForceLicenseCatalogRefresh
         Force a fresh download of the cached license catalog before processing.
     .EXAMPLE
         Get-UserMsolAccountSku -UserPrincipalName "user@contoso.com"
     .EXAMPLE
         Get-UserMsolAccountSku -UserPrincipalName "user@contoso.com" -Clipboard
+    .EXAMPLE
+        Get-UserMsolAccountSku -UserPrincipalName "user@contoso.com" -CheckAvailability
     #>
     [CmdletBinding()]
     param(
@@ -864,6 +868,7 @@ function Get-UserMsolAccountSku {
         [Alias('User', 'UPN')]
         [string] $UserPrincipalName,
         [switch] $Clipboard,
+        [switch] $CheckAvailability,
         [switch] $ForceLicenseCatalogRefresh
     )
 
@@ -871,6 +876,7 @@ function Get-UserMsolAccountSku {
         Set-ProgressAndInfoPreferences
         $initSucceeded = $true
         $clipboardLines = @()
+        $availabilityBySkuId = @{}
 
         try {
             $GraphConnection = Test-MgGraphConnection
@@ -904,6 +910,49 @@ function Get-UserMsolAccountSku {
                 " (source: {0})" -f ($parts -join ', ')
             }
             else { '' }
+
+            if ($CheckAvailability.IsPresent) {
+                try {
+                    $tenantSkus = Invoke-NCRetry -Action {
+                        Get-MgSubscribedSku -All -ErrorAction Stop
+                    } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve tenant licenses" -OnError {
+                        param($attempt, $max, $err)
+                        $currentAttempt = if ($attempt) { $attempt } else { '?' }
+                        $currentMax = if ($max) { $max } else { $maxAttempts }
+                        Write-NCMessage "Failed to retrieve tenant licenses, attempt $currentAttempt of $currentMax." -Level ERROR
+                    }
+                }
+                catch {
+                    $tenantSkus = @()
+                }
+
+                if ($tenantSkus -and $tenantSkus.Count -gt 0) {
+                    foreach ($sku in $tenantSkus) {
+                        $matchSource = $null
+                        $display = Get-LicenseDisplayName -Lookup $licenseLookup `
+                            -SkuPartNumber $sku.SkuPartNumber `
+                            -FallbackLookup $customLookup `
+                            -MatchSource ([ref]$matchSource)
+
+                        $prepaid = $sku.PrepaidUnits
+                        $enabled = if ($prepaid) { [int]$prepaid.Enabled } else { 0 }
+                        $consumed = if ($sku.ConsumedUnits -is [int]) { [int]$sku.ConsumedUnits } else { [int]0 }
+                        $available = [Math]::Max($enabled - $consumed, 0)
+                        $skuKey = [string]$sku.SkuId
+
+                        $availabilityBySkuId[$skuKey] = [pscustomobject]@{
+                            Name          = if ($display) { $display } else { $sku.SkuPartNumber }
+                            SkuPartNumber = $sku.SkuPartNumber
+                            SkuId         = $sku.SkuId
+                            Available     = $available
+                            Source        = if ($matchSource) { $matchSource } elseif ($display) { 'Primary' } else { 'Unknown' }
+                        }
+                    }
+                }
+                else {
+                    Write-NCMessage "Tenant license availability data not available." -Level WARNING
+                }
+            }
         }
     }
 
@@ -944,6 +993,7 @@ function Get-UserMsolAccountSku {
 
         if ($GraphLicense -and $GraphLicense.Count -gt 0) {
             $licensesForClipboard = @()
+            $availabilityLines = [System.Collections.Generic.List[string]]::new()
 
             foreach ($lic in $GraphLicense) {
                 $skuPart = $lic.SkuPartNumber
@@ -958,6 +1008,22 @@ function Get-UserMsolAccountSku {
                 else {
                     Write-Verbose ("  - Unknown license: {0} ({1})" -f $skuPart, $skuId)
                     Write-NCMessage ("  - {0} ({1})" -f $skuPart, $skuId) -Level WARNING
+                }
+
+                if ($CheckAvailability.IsPresent) {
+                    $skuKey = [string]$skuId
+                    $availability = if ($availabilityBySkuId.ContainsKey($skuKey)) { $availabilityBySkuId[$skuKey].Available } else { $null }
+                    $availabilityDisplay = if ($null -ne $availability) { $availability } else { 'N/A' }
+                    $availabilityLabel = if ($display) { $display } else { $skuPart }
+                    $availabilityLines.Add(("  - {0}: {1}" -f $availabilityLabel, $availabilityDisplay)) | Out-Null
+                }
+            }
+
+            if ($CheckAvailability.IsPresent -and $availabilityLines.Count -gt 0) {
+                Add-EmptyLine
+                Write-NCMessage "Tenant License Availability:" -Level INFO
+                foreach ($line in $availabilityLines) {
+                    Write-NCMessage $line -Level INFO
                 }
             }
 

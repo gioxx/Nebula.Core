@@ -35,6 +35,7 @@
         'Format-SortedEmailsFromClipboard',
         'Get-DynamicDistributionGroupFilter',
         'Get-EntraGroupDevice',
+        'Get-EntraGroupMembers',
         'Get-EntraGroupUser',
         'Get-MboxAlias',
         'Get-MboxLastMessageTrace',
@@ -103,9 +104,14 @@
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/Assets/icon.png'
 ReleaseNotes = @'
+- Improve: Get-EntraGroupMembers can resolve registered owners/users for device members via -IncludeDeviceUsers.
+- Improve: Get-EntraGroupMembers reports device owners/users in a single column when resolved.
 - Improve: Get-TenantMsolAccountSku now reports Available net of suspended seats and shows Total with enabled/suspended breakdown.
-- New: Get-TenantMsolAccountSku adds TotalCount with the numeric total for scripting.
+- Improve: Get-UserMsolAccountSku can show tenant availability for assigned SKUs via -CheckAvailability.
+- Improve: Remove-EntraGroupDevice/Remove-EntraGroupUser can clear all group members via -ClearAll (with stronger confirmation).
+- New: Get-EntraGroupMembers lists all members of an Entra group (users, devices, ...).
 - New: Get-NebulaModuleUpdates runs an on-demand update check for Nebula.* modules.
+- New: Get-TenantMsolAccountSku adds TotalCount with the numeric total for scripting.
 - New: Update checks during Connect-Nebula can be throttled via CheckUpdatesIntervalHours.
 '@
         }

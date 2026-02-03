@@ -207,7 +207,7 @@ function Add-EntraGroupUser {
         [string]$GroupId,
 
         [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Alias('User', 'UPN', 'Mail', 'Id', 'UserId', 'DisplayName')]
+        [Alias('User', 'UPN', 'Mail', 'Id', 'UserId')]
         [string[]]$UserIdentifier,
 
         [switch]$TreatInputAsId,
@@ -1735,6 +1735,8 @@ function Remove-EntraGroupDevice {
         Object ID of the Entra group.
     .PARAMETER DeviceIdentifier
         Device display name or object ID. Accepts pipeline input and common Id/DisplayName property names.
+    .PARAMETER ClearAll
+        Remove all device members from the Entra group (users and other objects are left untouched).
     .PARAMETER TreatInputAsId
         Treat every DeviceIdentifier as an object ID without attempting name resolution.
     .PARAMETER PassThru
@@ -1743,19 +1745,30 @@ function Remove-EntraGroupDevice {
         "PC1", "PC2" | Remove-EntraGroupDevice -GroupName "My Entra Group"
     .EXAMPLE
         Remove-EntraGroupDevice -GroupId "00000000-0000-0000-0000-000000000000" -DeviceIdentifier "PC1"
+    .EXAMPLE
+        Remove-EntraGroupDevice -GroupName "My Entra Group" -ClearAll
+    .EXAMPLE
+        Remove-EntraGroupDevice -GroupName "My Entra Group" -ClearAll -WhatIf
     #>
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllByName')]
         [Alias('Group', 'DisplayName')]
         [string]$GroupName,
 
         [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Device', 'DeviceName', 'Id', 'DeviceId', 'Name')]
         [string[]]$DeviceIdentifier,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllById')]
+        [switch]$ClearAll,
 
         [switch]$TreatInputAsId,
         [switch]$PassThru
@@ -1773,6 +1786,7 @@ function Remove-EntraGroupDevice {
 
     process {
         if (-not $graphConnected) { return }
+        if ($ClearAll.IsPresent) { return }
 
         foreach ($entry in $DeviceIdentifier) {
             if (-not [string]::IsNullOrWhiteSpace($entry)) {
@@ -1783,7 +1797,7 @@ function Remove-EntraGroupDevice {
 
     end {
         if (-not $graphConnected) { return }
-        if ($devices.Count -eq 0) {
+        if (-not $ClearAll.IsPresent -and $devices.Count -eq 0) {
             Write-NCMessage "No devices specified" -Level WARNING
             return
         }
@@ -1820,43 +1834,113 @@ function Remove-EntraGroupDevice {
         }
 
         $results = [System.Collections.Generic.List[object]]::new()
-        $uniqueDevices = $devices | Select-Object -Unique
+        $devicesToRemove = [System.Collections.Generic.List[object]]::new()
 
-        foreach ($device in $uniqueDevices) {
-            $deviceId = $null
-            $deviceLabel = $device
-
-            if ($TreatInputAsId.IsPresent -or $device -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-                $deviceId = $device
+        if ($ClearAll.IsPresent) {
+            $confirmMessage = "You are about to remove ALL device members from '$($resolvedGroup.DisplayName)'. This is a high-risk operation."
+            if (-not $PSCmdlet.ShouldContinue($confirmMessage, "Confirm ClearAll")) {
+                Write-NCMessage "ClearAll operation cancelled." -Level WARNING
+                return
             }
-            else {
-                $escapedDevice = $device.Replace("'", "''")
-                try {
-                    $deviceMatches = Get-MgDevice -Filter "displayName eq '$escapedDevice'" -All -ErrorAction Stop
+
+            try {
+                $members = @(Get-MgGroupMember -GroupId $resolvedGroup.Id -All -ErrorAction Stop)
+            }
+            catch {
+                Write-NCMessage "Unable to read members for group $($resolvedGroup.DisplayName): $($_.Exception.Message)" -Level ERROR
+                return
+            }
+
+            $resolveType = {
+                param($odataType)
+                if ([string]::IsNullOrWhiteSpace($odataType)) {
+                    return 'DirectoryObject'
                 }
-                catch {
-                    Write-NCMessage "Unable to resolve device '$device': $($_.Exception.Message)" -Level ERROR
+
+                $value = $odataType.ToLowerInvariant()
+                if ($value -match 'user') { return 'User' }
+                if ($value -match 'device') { return 'Device' }
+                if ($value -match 'group') { return 'Group' }
+                if ($value -match 'serviceprincipal') { return 'ServicePrincipal' }
+                if ($value -match 'orgcontact') { return 'Contact' }
+                return 'DirectoryObject'
+            }
+
+            foreach ($member in $members) {
+                $props = if ($member.AdditionalProperties) { $member.AdditionalProperties } else { @{} }
+                $odataType = if ($props.ContainsKey('@odata.type')) { $props['@odata.type'] } else { $null }
+                $memberType = & $resolveType $odataType
+                if ($memberType -ne 'Device') {
                     continue
                 }
 
-                if (-not $deviceMatches -or $deviceMatches.Count -eq 0) {
-                    Write-NCMessage "Device '$device' not found" -Level WARNING
+                $label = if ($props.ContainsKey('displayName')) {
+                    $props.displayName
+                }
+                else {
+                    $member.Id
+                }
+
+                $devicesToRemove.Add([pscustomobject]@{
+                        Id    = $member.Id
+                        Label = $label
+                    }) | Out-Null
+            }
+
+            if ($devicesToRemove.Count -eq 0) {
+                Write-NCMessage "No device members found for $($resolvedGroup.DisplayName)." -Level WARNING
+                return
+            }
+        }
+        else {
+            $uniqueDevices = $devices | Select-Object -Unique
+
+            foreach ($device in $uniqueDevices) {
+                $deviceId = $null
+                $deviceLabel = $device
+
+                if ($TreatInputAsId.IsPresent -or $device -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+                    $deviceId = $device
+                }
+                else {
+                    $escapedDevice = $device.Replace("'", "''")
+                    try {
+                        $deviceMatches = Get-MgDevice -Filter "displayName eq '$escapedDevice'" -All -ErrorAction Stop
+                    }
+                    catch {
+                        Write-NCMessage "Unable to resolve device '$device': $($_.Exception.Message)" -Level ERROR
+                        continue
+                    }
+
+                    if (-not $deviceMatches -or $deviceMatches.Count -eq 0) {
+                        Write-NCMessage "Device '$device' not found" -Level WARNING
+                        continue
+                    }
+
+                    if ($deviceMatches.Count -gt 1) {
+                        Write-NCMessage "Multiple devices matched '$device'. Using the first result ($($deviceMatches[0].DisplayName))" -Level WARNING
+                    }
+
+                    $selected = $deviceMatches | Select-Object -First 1
+                    $deviceId = $selected.Id
+                    $deviceLabel = $selected.DisplayName
+                }
+
+                if (-not $deviceId) {
+                    Write-NCMessage "Unable to determine object ID for device '$device'." -Level ERROR
                     continue
                 }
 
-                if ($deviceMatches.Count -gt 1) {
-                    Write-NCMessage "Multiple devices matched '$device'. Using the first result ($($deviceMatches[0].DisplayName))" -Level WARNING
-                }
-
-                $selected = $deviceMatches | Select-Object -First 1
-                $deviceId = $selected.Id
-                $deviceLabel = $selected.DisplayName
+                $devicesToRemove.Add([pscustomobject]@{
+                        Id    = $deviceId
+                        Label = $deviceLabel
+                    }) | Out-Null
             }
+        }
 
-            if (-not $deviceId) {
-                Write-NCMessage "Unable to determine object ID for device '$device'." -Level ERROR
-                continue
-            }
+        foreach ($entry in $devicesToRemove) {
+            $deviceId = $entry.Id
+            $deviceLabel = $entry.Label
 
             if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Remove device '$deviceLabel'")) {
                 $status = 'Removed'
@@ -1907,6 +1991,8 @@ function Remove-EntraGroupUser {
         Object ID of the Entra group.
     .PARAMETER UserIdentifier
         User principal name, display name, or object ID. Accepts pipeline input and common Id/DisplayName property names.
+    .PARAMETER ClearAll
+        Remove all user members from the Entra group (devices and other objects are left untouched).
     .PARAMETER TreatInputAsId
         Treat every UserIdentifier as an object ID without attempting name resolution.
     .PARAMETER PassThru
@@ -1915,19 +2001,30 @@ function Remove-EntraGroupUser {
         "user1@contoso.com","user2@contoso.com" | Remove-EntraGroupUser -GroupName "My Entra Group"
     .EXAMPLE
         Remove-EntraGroupUser -GroupId "00000000-0000-0000-0000-000000000000" -UserIdentifier "user1@contoso.com"
+    .EXAMPLE
+        Remove-EntraGroupUser -GroupName "My Entra Group" -ClearAll
+    .EXAMPLE
+        Remove-EntraGroupUser -GroupName "My Entra Group" -ClearAll -WhatIf
     #>
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllByName')]
         [Alias('Group', 'DisplayName')]
         [string]$GroupName,
 
         [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Alias('User', 'UPN', 'Mail', 'Id', 'UserId', 'DisplayName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('User', 'UPN', 'Mail', 'Id', 'UserId')]
         [string[]]$UserIdentifier,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllById')]
+        [switch]$ClearAll,
 
         [switch]$TreatInputAsId,
         [switch]$PassThru
@@ -1945,6 +2042,7 @@ function Remove-EntraGroupUser {
 
     process {
         if (-not $graphConnected) { return }
+        if ($ClearAll.IsPresent) { return }
 
         foreach ($entry in $UserIdentifier) {
             if (-not [string]::IsNullOrWhiteSpace($entry)) {
@@ -1955,7 +2053,7 @@ function Remove-EntraGroupUser {
 
     end {
         if (-not $graphConnected) { return }
-        if ($users.Count -eq 0) {
+        if (-not $ClearAll.IsPresent -and $users.Count -eq 0) {
             Write-NCMessage "No users specified" -Level WARNING
             return
         }
@@ -1992,51 +2090,124 @@ function Remove-EntraGroupUser {
         }
 
         $results = [System.Collections.Generic.List[object]]::new()
-        $uniqueUsers = $users | Select-Object -Unique
+        $usersToRemove = [System.Collections.Generic.List[object]]::new()
 
-        foreach ($user in $uniqueUsers) {
-            $userId = $null
-            $userLabel = $user
-
-            if ($TreatInputAsId.IsPresent -or $user -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-                $userId = $user
+        if ($ClearAll.IsPresent) {
+            $confirmMessage = "You are about to remove ALL user members from '$($resolvedGroup.DisplayName)'. This is a high-risk operation."
+            if (-not $PSCmdlet.ShouldContinue($confirmMessage, "Confirm ClearAll")) {
+                Write-NCMessage "ClearAll operation cancelled." -Level WARNING
+                return
             }
-            else {
-                $resolvedUser = $null
-                try {
-                    $resolvedUser = Get-MgUser -UserId $user -ErrorAction Stop
-                }
-                catch {
-                    $escapedUser = $user.Replace("'", "''")
-                    try {
-                        $userMatches = Get-MgUser -Filter "displayName eq '$escapedUser'" -All -ErrorAction Stop
-                    }
-                    catch {
-                        Write-NCMessage "Unable to resolve user '$user': $($_.Exception.Message)" -Level ERROR
-                        continue
-                    }
 
-                    if ($userMatches -and $userMatches.Count -gt 0) {
-                        if ($userMatches.Count -gt 1) {
-                            Write-NCMessage "Multiple users matched '$user'. Using the first result ($($userMatches[0].UserPrincipalName))." -Level WARNING
-                        }
-                        $resolvedUser = $userMatches | Select-Object -First 1
-                    }
+            try {
+                $members = @(Get-MgGroupMember -GroupId $resolvedGroup.Id -All -ErrorAction Stop)
+            }
+            catch {
+                Write-NCMessage "Unable to read members for group $($resolvedGroup.DisplayName): $($_.Exception.Message)" -Level ERROR
+                return
+            }
+
+            $resolveType = {
+                param($odataType)
+                if ([string]::IsNullOrWhiteSpace($odataType)) {
+                    return 'DirectoryObject'
                 }
 
-                if (-not $resolvedUser) {
-                    Write-NCMessage "User '$user' not found." -Level WARNING
+                $value = $odataType.ToLowerInvariant()
+                if ($value -match 'user') { return 'User' }
+                if ($value -match 'device') { return 'Device' }
+                if ($value -match 'group') { return 'Group' }
+                if ($value -match 'serviceprincipal') { return 'ServicePrincipal' }
+                if ($value -match 'orgcontact') { return 'Contact' }
+                return 'DirectoryObject'
+            }
+
+            foreach ($member in $members) {
+                $props = if ($member.AdditionalProperties) { $member.AdditionalProperties } else { @{} }
+                $odataType = if ($props.ContainsKey('@odata.type')) { $props['@odata.type'] } else { $null }
+                $memberType = & $resolveType $odataType
+                if ($memberType -ne 'User') {
                     continue
                 }
 
-                $userId = $resolvedUser.Id
-                $userLabel = if ($resolvedUser.UserPrincipalName) { $resolvedUser.UserPrincipalName } else { $resolvedUser.DisplayName }
+                $label = if ($props.ContainsKey('userPrincipalName')) {
+                    $props.userPrincipalName
+                }
+                elseif ($props.ContainsKey('displayName')) {
+                    $props.displayName
+                }
+                else {
+                    $member.Id
+                }
+
+                $usersToRemove.Add([pscustomobject]@{
+                        Id    = $member.Id
+                        Label = $label
+                    }) | Out-Null
             }
 
-            if (-not $userId) {
-                Write-NCMessage "Unable to determine object ID for user '$user'." -Level ERROR
-                continue
+            if ($usersToRemove.Count -eq 0) {
+                Write-NCMessage "No user members found for $($resolvedGroup.DisplayName)." -Level WARNING
+                return
             }
+        }
+        else {
+            $uniqueUsers = $users | Select-Object -Unique
+
+            foreach ($user in $uniqueUsers) {
+                $userId = $null
+                $userLabel = $user
+
+                if ($TreatInputAsId.IsPresent -or $user -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+                    $userId = $user
+                }
+                else {
+                    $resolvedUser = $null
+                    try {
+                        $resolvedUser = Get-MgUser -UserId $user -ErrorAction Stop
+                    }
+                    catch {
+                        $escapedUser = $user.Replace("'", "''")
+                        try {
+                            $userMatches = Get-MgUser -Filter "displayName eq '$escapedUser'" -All -ErrorAction Stop
+                        }
+                        catch {
+                            Write-NCMessage "Unable to resolve user '$user': $($_.Exception.Message)" -Level ERROR
+                            continue
+                        }
+
+                        if ($userMatches -and $userMatches.Count -gt 0) {
+                            if ($userMatches.Count -gt 1) {
+                                Write-NCMessage "Multiple users matched '$user'. Using the first result ($($userMatches[0].UserPrincipalName))." -Level WARNING
+                            }
+                            $resolvedUser = $userMatches | Select-Object -First 1
+                        }
+                    }
+
+                    if (-not $resolvedUser) {
+                        Write-NCMessage "User '$user' not found." -Level WARNING
+                        continue
+                    }
+
+                    $userId = $resolvedUser.Id
+                    $userLabel = if ($resolvedUser.UserPrincipalName) { $resolvedUser.UserPrincipalName } else { $resolvedUser.DisplayName }
+                }
+
+                if (-not $userId) {
+                    Write-NCMessage "Unable to determine object ID for user '$user'." -Level ERROR
+                    continue
+                }
+
+                $usersToRemove.Add([pscustomobject]@{
+                        Id    = $userId
+                        Label = $userLabel
+                    }) | Out-Null
+            }
+        }
+
+        foreach ($entry in $usersToRemove) {
+            $userId = $entry.Id
+            $userLabel = $entry.Label
 
             if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Remove user '$userLabel'")) {
                 $status = 'Removed'
