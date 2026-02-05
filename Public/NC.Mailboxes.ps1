@@ -960,12 +960,12 @@ function Remove-MboxPermission {
         One or more users to remove permissions from. Accepts pipeline input.
     .PARAMETER AccessRights
         Permission type to remove: All, FullAccess, SendAs, SendOnBehalfTo. Defaults to All.
-    .PARAMETER RemoveAllAdditionalPermissions
+    .PARAMETER ClearAll
         Removes any non-inherited FullAccess, SendAs, and SendOnBehalfTo permissions for the source mailbox.
     .EXAMPLE
         Remove-MboxPermission -SourceMailbox info@contoso.com -UserMailbox mario.rossi@contoso.com -AccessRights SendAs
     .EXAMPLE
-        Remove-MboxPermission -SourceMailbox info@contoso.com -RemoveAllAdditionalPermissions
+        Remove-MboxPermission -SourceMailbox info@contoso.com -ClearAll
     #>
     [CmdletBinding(DefaultParameterSetName = 'User')]
     param(
@@ -979,7 +979,7 @@ function Remove-MboxPermission {
         [ValidateSet('All', 'FullAccess', 'SendAs', 'SendOnBehalfTo')]
         [string]$AccessRights = 'All',
         [Parameter(Mandatory, ParameterSetName = 'All')]
-        [switch]$RemoveAllAdditionalPermissions
+        [switch]$ClearAll
     )
 
     begin { Set-ProgressAndInfoPreferences }
