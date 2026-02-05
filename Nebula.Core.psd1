@@ -60,6 +60,7 @@
         'Remove-MboxPermission',
         'Remove-UserMsolAccountSku',
         'Revoke-UserSessions',
+        'Search-EntraGroup',
         'Set-MboxLanguage',
         'Set-MboxRulesQuota',
         'Set-OoO',
@@ -104,6 +105,7 @@
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/Assets/icon.png'
 ReleaseNotes = @'
+- Change: Remove-MboxPermission now uses -ClearAll (renamed from -RemoveAllAdditionalPermissions).
 - Improve: Get-EntraGroupMembers can resolve registered owners/users for device members via -IncludeDeviceUsers.
 - Improve: Get-EntraGroupMembers reports device owners/users in a single column when resolved.
 - Improve: Get-TenantMsolAccountSku now reports Available net of suspended seats and shows Total with enabled/suspended breakdown.
@@ -112,6 +114,7 @@ ReleaseNotes = @'
 - New: Get-EntraGroupMembers lists all members of an Entra group (users, devices, ...).
 - New: Get-NebulaModuleUpdates runs an on-demand update check for Nebula.* modules.
 - New: Get-TenantMsolAccountSku adds TotalCount with the numeric total for scripting.
+- New: Search-EntraGroup searches Entra groups by display name or description.
 - New: Update checks during Connect-Nebula can be throttled via CheckUpdatesIntervalHours.
 '@
         }

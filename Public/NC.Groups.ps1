@@ -1409,6 +1409,124 @@ function Get-EntraGroupDevice {
     }
 }
 
+function Search-EntraGroup {
+    <#
+    .SYNOPSIS
+        Finds Entra groups by display name or description.
+    .DESCRIPTION
+        Uses Microsoft Graph search to find groups by display name or description and returns
+        key properties for easy identification.
+    .PARAMETER SearchText
+        Text to search for in display name and/or description. Accepts pipeline input.
+    .PARAMETER SearchIn
+        Where to search: DisplayName, Description, or Any (both).
+    .PARAMETER GridView
+        Show additional details in Out-GridView instead of returning objects.
+    .EXAMPLE
+        Search-EntraGroup -SearchText "java"
+    .EXAMPLE
+        Search-EntraGroup -SearchText "legacy apps" -SearchIn Description
+    .EXAMPLE
+        "marketing" | Search-EntraGroup -SearchIn Any -GridView
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, Position = 0)]
+        [Alias('Search', 'Query', 'Text', 'Name', 'DisplayName', 'Description')]
+        [string]$SearchText,
+
+        [ValidateSet('DisplayName', 'Description', 'Any')]
+        [string]$SearchIn = 'DisplayName',
+
+        [switch]$GridView
+    )
+
+    begin {
+        $graphConnected = $null
+    }
+
+    process {
+        if ($null -eq $graphConnected) {
+            $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+            if (-not $graphConnected) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+                return
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($SearchText)) {
+            Write-NCMessage "SearchText cannot be empty." -Level WARNING
+            return
+        }
+
+        $escapedText = $SearchText.Replace('"', '""').Trim()
+        if ([string]::IsNullOrWhiteSpace($escapedText)) {
+            Write-NCMessage "SearchText cannot be empty." -Level WARNING
+            return
+        }
+
+        $groups = @()
+
+        try {
+            switch ($SearchIn) {
+                'DisplayName' {
+                    $searchClause = "`"displayName:$escapedText`""
+                    $groups = @(Get-MgGroup -Search $searchClause -ConsistencyLevel eventual -CountVariable count -All -ErrorAction Stop)
+                }
+                'Description' {
+                    $searchClause = "`"description:$escapedText`""
+                    $groups = @(Get-MgGroup -Search $searchClause -ConsistencyLevel eventual -CountVariable count -All -ErrorAction Stop)
+                }
+                'Any' {
+                    $searchDisplay = "`"displayName:$escapedText`""
+                    $searchDescription = "`"description:$escapedText`""
+                    $byName = @(Get-MgGroup -Search $searchDisplay -ConsistencyLevel eventual -CountVariable countName -All -ErrorAction Stop)
+                    $byDescription = @(Get-MgGroup -Search $searchDescription -ConsistencyLevel eventual -CountVariable countDesc -All -ErrorAction Stop)
+                    $groups = @($byName + $byDescription | Sort-Object Id -Unique)
+                }
+            }
+        }
+        catch {
+            Write-NCMessage "Unable to search groups with '$SearchText': $($_.Exception.Message)" -Level ERROR
+            return
+        }
+
+        Add-EmptyLine
+        Write-NCMessage "Groups found: $($groups.Count) for '$SearchText'." -Level VERBOSE
+
+        if (-not $groups -or $groups.Count -eq 0) {
+            Write-NCMessage "No groups found for '$SearchText'." -Level WARNING
+            return
+        }
+
+        $results = [System.Collections.Generic.List[object]]::new()
+        foreach ($group in $groups) {
+            $row = [ordered]@{
+                'Group Name'        = $group.DisplayName
+                'Group Id'          = $group.Id
+                'Group Description' = $group.Description
+            }
+
+            if ($GridView.IsPresent) {
+                $row['Group Mail Nickname'] = $group.MailNickname
+                $row['Group Mail Enabled'] = $group.MailEnabled
+                $row['Group Security Enabled'] = $group.SecurityEnabled
+                $row['Group Types'] = if ($group.GroupTypes) { ($group.GroupTypes -join ', ') } else { $null }
+            }
+
+            $results.Add([pscustomobject]$row) | Out-Null
+        }
+
+        if ($GridView.IsPresent) {
+            $results | Out-GridView -Title "Entra Groups - Search: $SearchText"
+        }
+        else {
+            $results | Sort-Object 'Group Name'
+        }
+    }
+}
+
 function Get-EntraGroupUser {
     <#
     .SYNOPSIS
