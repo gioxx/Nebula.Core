@@ -39,6 +39,7 @@
         'Get-EntraGroupUser',
         'Get-MboxAlias',
         'Get-MboxLastMessageTrace',
+        'Get-MboxStatistics',
         'Get-MboxPermission',
         'Get-MboxPrimarySmtpAddress',
         'Get-NebulaConfig',
@@ -108,10 +109,12 @@ ReleaseNotes = @'
 - Change: Remove-MboxPermission now uses -ClearAll (renamed from -RemoveAllAdditionalPermissions).
 - Improve: Get-EntraGroupMembers can resolve registered owners/users for device members via -IncludeDeviceUsers.
 - Improve: Get-EntraGroupMembers reports device owners/users in a single column when resolved.
+- Improve: Get-NebulaModuleUpdates now also checks ExchangeOnlineManagement and Microsoft.Graph meta modules.
 - Improve: Get-TenantMsolAccountSku now reports Available net of suspended seats and shows Total with enabled/suspended breakdown.
 - Improve: Get-UserMsolAccountSku can show tenant availability for assigned SKUs via -CheckAvailability.
 - Improve: Remove-EntraGroupDevice/Remove-EntraGroupUser can clear all group members via -ClearAll (with stronger confirmation).
 - New: Get-EntraGroupMembers lists all members of an Entra group (users, devices, ...).
+- New: Get-MboxStatistics returns a simplified mailbox statistics view.
 - New: Get-NebulaModuleUpdates runs an on-demand update check for Nebula.* modules.
 - New: Get-TenantMsolAccountSku adds TotalCount with the numeric total for scripting.
 - New: Search-EntraGroup searches Entra groups by display name or description.
