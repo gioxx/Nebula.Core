@@ -18,6 +18,8 @@ function Test-NebulaModuleUpdates {
         [switch]$Force
     )
 
+    Write-NCMessage "Checking PowerShell Gallery for module updates, please wait ..." -Level INFO
+
     if (-not $Force.IsPresent -and $script:NC_ModuleUpdateChecked) {
         return $false
     }
@@ -57,9 +59,23 @@ function Test-NebulaModuleUpdates {
         return $false
     }
 
+    $extraModules = @()
+    try {
+        $extraModules = Get-InstalledModule -Name @('ExchangeOnlineManagement', 'Microsoft.Graph') -ErrorAction SilentlyContinue
+    }
+    catch {
+        $extraModules = @()
+    }
+
+    if ($extraModules) {
+        $installedModules = @($installedModules + $extraModules | Where-Object { $_ }) |
+            Group-Object Name | ForEach-Object { $_.Group | Select-Object -First 1 }
+    }
+
     if (-not $installedModules -or $installedModules.Count -eq 0) {
         return $false
     }
+
 
     $updates = @()
     foreach ($module in $installedModules) {
