@@ -654,7 +654,12 @@ function Get-MboxPermission {
 
         Add-EmptyLine
         Write-NCMessage ("Access Rights on {0} ({1})" -f $mailbox.DisplayName, $mailbox.PrimarySmtpAddress) -Level WARNING
-        $results
+        if ($PSCmdlet.MyInvocation.PipelineLength -gt 1) {
+            $results
+        }
+        else {
+            $results | Format-Table -AutoSize -Wrap
+        }
 
         if ($IncludeSummary) {
             Add-EmptyLine
