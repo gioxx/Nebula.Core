@@ -17,6 +17,8 @@ function Add-UserMsolAccountSku {
         One or more license identifiers: friendly name (as resolved by the catalog), SKU part number, or SKU ID (GUID).
     .PARAMETER ForceLicenseCatalogRefresh
         Force a refresh of the cached license catalog before resolving friendly names.
+    .PARAMETER ShowErrorDetails
+        Include exception details in error messages.
     .EXAMPLE
         Add-MsolAccountSku -UserPrincipalName user@contoso.com -License "Microsoft 365 E3"
     .EXAMPLE
@@ -31,7 +33,8 @@ function Add-UserMsolAccountSku {
         [string]$UserPrincipalName,
         [Parameter(Mandatory = $true)]
         [string[]]$License,
-        [switch]$ForceLicenseCatalogRefresh
+        [switch]$ForceLicenseCatalogRefresh,
+        [switch]$ShowErrorDetails
     )
 
     Set-ProgressAndInfoPreferences
@@ -53,7 +56,8 @@ function Add-UserMsolAccountSku {
             $user = Get-MgUser -UserId $resolvedPrincipal -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
         }
         catch {
-            Write-NCMessage "User $UserPrincipalName not found or query failed: $($_.Exception.Message)" -Level ERROR
+            $detail = if ($ShowErrorDetails.IsPresent) { ": $($_.Exception.Message)" } else { "." }
+            Write-NCMessage ("User {0} not found or query failed{1}" -f $UserPrincipalName, $detail) -Level ERROR
             return
         }
 
@@ -474,6 +478,8 @@ function Export-MsolAccountSku {
         Output folder (defaults to the current directory if omitted).
     .PARAMETER ForceLicenseCatalogRefresh
         Force a fresh download of the cached license catalog before processing.
+    .PARAMETER ShowErrorDetails
+        Include exception details in error messages.
     .EXAMPLE
         Export-MsolAccountSku
     .EXAMPLE
@@ -869,7 +875,8 @@ function Get-UserMsolAccountSku {
         [string] $UserPrincipalName,
         [switch] $Clipboard,
         [switch] $CheckAvailability,
-        [switch] $ForceLicenseCatalogRefresh
+        [switch] $ForceLicenseCatalogRefresh,
+        [switch] $ShowErrorDetails
     )
 
     begin {
@@ -970,7 +977,8 @@ function Get-UserMsolAccountSku {
             $User = Get-MgUser -UserId $resolvedRecipient -ErrorAction Stop
         }
         catch {
-            Write-NCMessage "User $inputUserPrincipalName not found or query failed: $_" -Level ERROR
+            $detail = if ($ShowErrorDetails.IsPresent) { ": $($_.Exception.Message)" } else { "." }
+            Write-NCMessage ("User {0} not found or query failed{1}" -f $inputUserPrincipalName, $detail) -Level ERROR
             return
         }
 
@@ -1341,7 +1349,8 @@ function Remove-UserMsolAccountSku {
         [switch]$All,
         [Parameter(ParameterSetName = 'ByLicense')]
         [Parameter(ParameterSetName = 'All')]
-        [switch]$ForceLicenseCatalogRefresh
+        [switch]$ForceLicenseCatalogRefresh,
+        [switch]$ShowErrorDetails
     )
 
     Set-ProgressAndInfoPreferences
@@ -1363,7 +1372,8 @@ function Remove-UserMsolAccountSku {
             $user = Get-MgUser -UserId $resolvedPrincipal -ErrorAction Stop
         }
         catch {
-            Write-NCMessage "User $UserPrincipalName not found or query failed: $($_.Exception.Message)" -Level ERROR
+            $detail = if ($ShowErrorDetails.IsPresent) { ": $($_.Exception.Message)" } else { "." }
+            Write-NCMessage ("User {0} not found or query failed{1}" -f $UserPrincipalName, $detail) -Level ERROR
             return
         }
 
