@@ -39,11 +39,11 @@
         'Get-EntraGroupUser',
         'Get-MboxAlias',
         'Get-MboxLastMessageTrace',
-        'Get-MboxStatistics',
         'Get-MboxPermission',
         'Get-MboxPrimarySmtpAddress',
-        'Get-NebulaConnections',
+        'Get-MboxStatistics',
         'Get-NebulaConfig',
+        'Get-NebulaConnections',
         'Get-NebulaModuleUpdates',
         'Get-QuarantineFrom',
         'Get-QuarantineFromDomain',
@@ -71,8 +71,8 @@
         'Test-SharedMailboxCompliance',
         'Unlock-QuarantineFrom',
         'Unlock-QuarantineMessageId',
-        'Update-NebulaConnections',
-        'Update-LicenseCatalog'
+        'Update-LicenseCatalog',
+        'Update-NebulaConnections'
     )
     CmdletsToExport      = @()
     VariablesToExport    = @()
@@ -91,18 +91,26 @@
     PrivateData          = @{
         PSData = @{
             Tags         = @(
+                'Administration',
+                'Automation',
+                'Calendar',
+                'Configuration',
                 'Entra', 
                 'Exchange', 
+                'Exchange-Online',
                 'Groups', 
                 'Licenses', 
                 'M365', 
                 'Mailboxes', 
                 'Microsoft', 
                 'Microsoft-365', 
+                'Microsoft-Graph',
                 'Office-365', 
                 'PowerShell', 
                 'Quarantine', 
-                'Rooms'
+                'Reporting',
+                'Rooms',
+                'Security'
             )
             ProjectUri   = 'https://github.com/gioxx/Nebula.Core'
             LicenseUri   = 'https://opensource.org/licenses/MIT'
@@ -118,10 +126,10 @@ ReleaseNotes = @'
 - New: Get-EntraGroupMembers lists all members of an Entra group (users, devices, ...).
 - New: Get-MboxStatistics returns a simplified mailbox statistics view.
 - New: Get-NebulaModuleUpdates runs an on-demand update check for Nebula.* modules.
-- New: Update-NebulaConnections adds an explicit refresh entry point for connection status checks.
 - New: Get-TenantMsolAccountSku adds TotalCount with the numeric total for scripting.
 - New: Search-EntraGroup searches Entra groups by display name or description.
 - New: Update checks during Connect-Nebula can be throttled via CheckUpdatesIntervalHours.
+- New: Update-NebulaConnections adds an explicit refresh entry point for connection status checks.
 '@
         }
     }
