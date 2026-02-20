@@ -587,15 +587,31 @@ function Get-MboxPermission {
         $sendAsCount = 0
         $sendOnBehalfToCount = 0
 
+        $addAccessRight = {
+            param(
+                [psobject]$Entry,
+                [string]$Right
+            )
+
+            if (-not $Entry -or [string]::IsNullOrWhiteSpace($Right)) {
+                return
+            }
+
+            $existingRights = @($Entry.AccessRights -split '\s*,\s*' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            if ($existingRights -notcontains $Right) {
+                $Entry.AccessRights = (@($existingRights + $Right) | Select-Object -Unique) -join ', '
+            }
+        }
+
         Get-MailboxPermission -Identity $mailbox.PrimarySmtpAddress -ErrorAction SilentlyContinue | Where-Object { $_.AccessRights -eq 'FullAccess' -and -not $_.IsInherited } | ForEach-Object {
             $userMailbox = $_.User.ToString()
             $primary = (Get-Mailbox -Identity $userMailbox -ErrorAction SilentlyContinue).PrimarySmtpAddress
             $display = (Get-User -Identity $userMailbox -ErrorAction SilentlyContinue).DisplayName
 
             if ($primary) {
-                $existing = $results | Where-Object { $_.UserMailbox -eq $primary }
+                $existing = $results | Where-Object { $_.UserMailbox -eq $primary } | Select-Object -First 1
                 if ($existing) {
-                    $existing.AccessRights += ', FullAccess'
+                    & $addAccessRight $existing 'FullAccess'
                 }
                 else {
                     $results.Add([pscustomobject]@{
@@ -615,9 +631,9 @@ function Get-MboxPermission {
             $display = (Get-User -Identity $userMailbox -ErrorAction SilentlyContinue).DisplayName
 
             if ($primary) {
-                $existing = $results | Where-Object { $_.UserMailbox -eq $primary }
+                $existing = $results | Where-Object { $_.UserMailbox -eq $primary } | Select-Object -First 1
                 if ($existing) {
-                    $existing.AccessRights += ', SendAs'
+                    & $addAccessRight $existing 'SendAs'
                 }
                 else {
                     $results.Add([pscustomobject]@{
@@ -636,9 +652,9 @@ function Get-MboxPermission {
             $display = (Get-User -Identity $userMailbox -ErrorAction SilentlyContinue).DisplayName
 
             if ($primary) {
-                $existing = $results | Where-Object { $_.UserMailbox -eq $primary }
+                $existing = $results | Where-Object { $_.UserMailbox -eq $primary } | Select-Object -First 1
                 if ($existing) {
-                    $existing.AccessRights += ', SendOnBehalfTo'
+                    & $addAccessRight $existing 'SendOnBehalfTo'
                 }
                 else {
                     $results.Add([pscustomobject]@{
