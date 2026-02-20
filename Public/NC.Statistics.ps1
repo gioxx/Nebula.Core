@@ -156,11 +156,15 @@ function Get-MboxStatistics {
         Returns simplified mailbox statistics.
     .DESCRIPTION
         Ensures an Exchange Online session, retrieves mailbox statistics and returns
-        a concise set of key fields (size, quotas, and basic usage info).
+        a concise set of key fields (size, quotas, basic usage info, latest message trace,
+        and oldest mailbox item metadata).
     .PARAMETER UserPrincipalName
         Optional single mailbox identity. When omitted, returns all mailboxes.
     .PARAMETER IncludeArchive
         When present, includes archive size and archive usage percentage (if available).
+    .PARAMETER IncludeMessageActivity
+        When present, includes latest message trace info and oldest mailbox item metadata
+        (LastReceived, LastSent, OldestItemReceivedDate, OldestItemFolderPath).
     .PARAMETER Round
         Round quota values up to the nearest integer GB (default: $true).
     #>
@@ -170,6 +174,7 @@ function Get-MboxStatistics {
         [Alias('User', 'Identity')]
         [string]$UserPrincipalName,
         [switch]$IncludeArchive,
+        [switch]$IncludeMessageActivity,
         [bool]$Round = $true
     )
 
@@ -216,7 +221,27 @@ function Get-MboxStatistics {
             $mailboxSizeGb = Convert-MbxSizeToGB -SizeObject $stats.TotalItemSize
             $prohibitSendQuota = Resolve-MbxQuotaValue -RawValue $mailbox.ProhibitSendQuota -Round:$Round
             $warningQuota = Resolve-MbxQuotaValue -RawValue $mailbox.IssueWarningQuota -Round:$Round
-            $lastTrace = Get-MboxLastMessageTrace -SourceMailbox $mailbox.UserPrincipalName
+            $oldestItemReceivedDate = $null
+            $oldestItemFolderPath = $null
+            $lastTrace = $null
+            if ($IncludeMessageActivity) {
+                $lastTrace = Get-MboxLastMessageTrace -SourceMailbox $mailbox.UserPrincipalName
+
+                try {
+                    $oldestItem = Get-MailboxFolderStatistics -Identity $mailbox.UserPrincipalName -IncludeOldestAndNewestItems -ErrorAction Stop |
+                        Where-Object { $_.OldestItemReceivedDate -ne $null } |
+                        Sort-Object -Property OldestItemReceivedDate |
+                        Select-Object -First 1
+
+                    if ($oldestItem) {
+                        $oldestItemReceivedDate = $oldestItem.OldestItemReceivedDate
+                        $oldestItemFolderPath = $oldestItem.FolderPath
+                    }
+                }
+                catch {
+                    Write-NCMessage ("Unable to retrieve oldest mailbox item details for '{0}'. {1}" -f $mailbox.PrimarySmtpAddress, $_.Exception.Message) -Level WARNING
+                }
+            }
 
             $percentUsed = $null
             if ($prohibitSendQuota -is [double] -and $prohibitSendQuota -gt 0) {
@@ -247,17 +272,21 @@ function Get-MboxStatistics {
                 $mailbox.RecipientTypeDetails
             }
 
-            $mailboxCreated = if ($stats.PSObject.Properties.Match('Created').Count -gt 0) {
-                $stats.Created
+            $mailboxCreated = $null
+            if ($mailbox.PSObject.Properties.Match('WhenCreatedUTC').Count -gt 0 -and $mailbox.WhenCreatedUTC) {
+                $mailboxCreated = $mailbox.WhenCreatedUTC
             }
-            elseif ($stats.PSObject.Properties.Match('DateCreated').Count -gt 0) {
-                $stats.DateCreated
+            elseif ($mailbox.PSObject.Properties.Match('WhenCreated').Count -gt 0 -and $mailbox.WhenCreated) {
+                $mailboxCreated = $mailbox.WhenCreated
             }
-            elseif ($stats.PSObject.Properties.Match('WhenMailboxCreated').Count -gt 0) {
-                $stats.WhenMailboxCreated
+            elseif ($stats.PSObject.Properties.Match('WhenMailboxCreated').Count -gt 0 -and $stats.WhenMailboxCreated) {
+                $mailboxCreated = $stats.WhenMailboxCreated
             }
-            else {
-                $null
+            elseif ($stats.PSObject.Properties.Match('DateCreated').Count -gt 0 -and $stats.DateCreated) {
+                $mailboxCreated = $stats.DateCreated
+            }
+            elseif ($stats.PSObject.Properties.Match('Created').Count -gt 0 -and $stats.Created) {
+                $mailboxCreated = $stats.Created
             }
 
             $record = [ordered]@{
@@ -269,11 +298,16 @@ function Get-MboxStatistics {
                 ItemCount            = $stats.ItemCount
                 MailboxCreated       = $mailboxCreated
                 LastLogonTime        = $stats.LastLogonTime
-                LastReceived         = if ($lastTrace) { $lastTrace.LastReceived } else { $null }
-                LastSent             = if ($lastTrace) { $lastTrace.LastSent } else { $null }
                 WarningQuotaGB       = $warningQuota
                 ProhibitSendQuotaGB  = $prohibitSendQuota
                 PercentUsed          = $percentUsed
+            }
+
+            if ($IncludeMessageActivity) {
+                $record.LastReceived = if ($lastTrace) { $lastTrace.LastReceived } else { $null }
+                $record.LastSent = if ($lastTrace) { $lastTrace.LastSent } else { $null }
+                $record.OldestItemReceivedDate = $oldestItemReceivedDate
+                $record.OldestItemFolderPath = $oldestItemFolderPath
             }
 
             if ($IncludeArchive) {

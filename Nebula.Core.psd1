@@ -42,6 +42,7 @@
         'Get-MboxStatistics',
         'Get-MboxPermission',
         'Get-MboxPrimarySmtpAddress',
+        'Get-NebulaConnections',
         'Get-NebulaConfig',
         'Get-NebulaModuleUpdates',
         'Get-QuarantineFrom',
@@ -70,6 +71,7 @@
         'Test-SharedMailboxCompliance',
         'Unlock-QuarantineFrom',
         'Unlock-QuarantineMessageId',
+        'Update-NebulaConnections',
         'Update-LicenseCatalog'
     )
     CmdletsToExport      = @()
@@ -116,6 +118,7 @@ ReleaseNotes = @'
 - New: Get-EntraGroupMembers lists all members of an Entra group (users, devices, ...).
 - New: Get-MboxStatistics returns a simplified mailbox statistics view.
 - New: Get-NebulaModuleUpdates runs an on-demand update check for Nebula.* modules.
+- New: Update-NebulaConnections adds an explicit refresh entry point for connection status checks.
 - New: Get-TenantMsolAccountSku adds TotalCount with the numeric total for scripting.
 - New: Search-EntraGroup searches Entra groups by display name or description.
 - New: Update checks during Connect-Nebula can be throttled via CheckUpdatesIntervalHours.

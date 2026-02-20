@@ -58,7 +58,7 @@ if (-not $script:NC_Defaults) {
         CSV_DefaultLimiter      = ";"
         CSV_Encoding            = 'UTF-8'
         CheckUpdatesOnConnect   = $true
-        CheckUpdatesIntervalHours = 24
+        CheckUpdatesIntervalHours = 72
         DateTimeString_CSV      = 'yyyyMMdd'
         DateTimeString_Full     = 'yyy-MM-dd HH:mm:ss'
         LicenseCacheDays        = 7

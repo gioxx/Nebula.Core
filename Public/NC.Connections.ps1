@@ -105,7 +105,7 @@ function Connect-Nebula {
         [switch]$SkipGraph
     )
 
-    Write-NCMessage "Welcome to Nebula. Connecting, please wait ..." -Level INFO
+    Write-NCMessage "Welcome to Nebula.`nConnecting, please wait ..." -Level INFO
 
     try {
         $checkUpdates = $NCVars.CheckUpdatesOnConnect
@@ -201,6 +201,140 @@ function Disconnect-Nebula {
             Write-NCMessage "Failed to disconnect Microsoft Graph: $($_.Exception.Message)" -Level WARNING
         }
     }
+}
+
+function Get-NebulaConnections {
+    <#
+    .SYNOPSIS
+        Shows active Nebula connection status for Exchange Online and Microsoft Graph.
+    .DESCRIPTION
+        Checks current Exchange Online and Microsoft Graph session contexts and performs lightweight
+        health probes for both services (unless skipped). Those probes can also trigger provider-side
+        token/session refresh when supported. Returns a compact status object for interactive and
+        scripted usage.
+    #>
+    [CmdletBinding()]
+    param(
+        [switch]$SkipHealthCheck
+    )
+
+    $exoConnected = $false
+    $exoHealthy = $false
+    $exoHealthError = $null
+    $exoUser = $null
+    $exoOrganization = $null
+
+    try {
+        if (Get-Command -Name Get-ConnectionInformation -ErrorAction SilentlyContinue) {
+            $exoSession = Get-ConnectionInformation -ErrorAction Stop | Select-Object -First 1
+            if ($exoSession) {
+                $exoConnected = $true
+                $exoUser = $exoSession.UserPrincipalName
+                $exoOrganization = $exoSession.Organization
+            }
+        }
+    }
+    catch {
+        $exoConnected = $false
+    }
+
+    if ($SkipHealthCheck.IsPresent) {
+        $exoHealthy = $exoConnected
+    }
+    elseif ($exoConnected) {
+        try {
+            if (Get-Command -Name Get-EXOMailbox -ErrorAction SilentlyContinue) {
+                # Lightweight probe: if this fails, session is usually stale/expired.
+                Get-EXOMailbox -ResultSize 1 -ErrorAction Stop | Out-Null
+                $exoHealthy = $true
+            }
+            else {
+                $exoHealthError = "Get-EXOMailbox command not available for validation."
+            }
+        }
+        catch {
+            $exoHealthy = $false
+            $exoHealthError = $_.Exception.Message
+        }
+    }
+
+    $graphConnected = $false
+    $graphHealthy = $false
+    $graphHealthError = $null
+    $graphAccount = $null
+    $graphTenantId = $null
+    $graphScopes = @()
+
+    try {
+        if (Get-Command -Name Get-MgContext -ErrorAction SilentlyContinue) {
+            $graphContext = Get-MgContext -ErrorAction Stop
+            if ($graphContext -and $graphContext.Account) {
+                $graphConnected = $true
+                $graphAccount = $graphContext.Account
+                $graphTenantId = $graphContext.TenantId
+                $graphScopes = @($graphContext.Scopes)
+            }
+        }
+    }
+    catch {
+        $graphConnected = $false
+    }
+
+    if ($SkipHealthCheck.IsPresent) {
+        $graphHealthy = $graphConnected
+    }
+    elseif ($graphConnected) {
+        try {
+            if (Get-Command -Name Invoke-MgGraphRequest -ErrorAction SilentlyContinue) {
+                # Lightweight probe against /me to validate current access token.
+                Invoke-MgGraphRequest -Method GET -Uri 'v1.0/me?$select=id' -ErrorAction Stop | Out-Null
+                $graphHealthy = $true
+            }
+            else {
+                $graphHealthError = "Invoke-MgGraphRequest command not available for validation."
+            }
+        }
+        catch {
+            $graphHealthy = $false
+            $graphHealthError = $_.Exception.Message
+        }
+    }
+
+    [pscustomobject]@{
+        ExchangeOnlineConnected = $exoConnected
+        ExchangeOnlineHealthy   = $exoHealthy
+        ExchangeOnlineError     = $exoHealthError
+        ExchangeOnlineUser      = $exoUser
+        ExchangeOnlineTenant    = $exoOrganization
+        MicrosoftGraphConnected = $graphConnected
+        MicrosoftGraphHealthy   = $graphHealthy
+        MicrosoftGraphError     = $graphHealthError
+        MicrosoftGraphAccount   = $graphAccount
+        MicrosoftGraphTenantId  = $graphTenantId
+        MicrosoftGraphScopes    = $graphScopes
+    }
+}
+
+function Update-NebulaConnections {
+    <#
+    .SYNOPSIS
+        Refreshes Nebula connections status for Exchange Online and Microsoft Graph.
+    .DESCRIPTION
+        Explicit refresh entry point that runs the same checks used by Get-NebulaConnections,
+        including lightweight health probes (unless skipped), and returns the connection status.
+    .PARAMETER SkipHealthCheck
+        Skip probe calls and only report whether session contexts are currently present.
+    .EXAMPLE
+        Update-NebulaConnections
+    .EXAMPLE
+        Update-NebulaConnections -SkipHealthCheck
+    #>
+    [CmdletBinding()]
+    param(
+        [switch]$SkipHealthCheck
+    )
+
+    Get-NebulaConnections -SkipHealthCheck:$SkipHealthCheck.IsPresent
 }
 
 Set-Alias -Name Leave-Nebula -Value Disconnect-Nebula

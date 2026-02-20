@@ -18,10 +18,20 @@ function Test-NebulaModuleUpdates {
         [switch]$Force
     )
 
-    Write-NCMessage "Checking PowerShell Gallery for module updates, please wait ..." -Level INFO
-
     if (-not $Force.IsPresent -and $script:NC_ModuleUpdateChecked) {
         return $false
+    }
+
+    $defaultIntervalHours = 168
+    $licenseCacheDays = $NCVars.LicenseCacheDays
+    if ($licenseCacheDays -is [string]) {
+        $parsedLicenseCacheDays = 0
+        if ([int]::TryParse($licenseCacheDays, [ref]$parsedLicenseCacheDays)) {
+            $licenseCacheDays = $parsedLicenseCacheDays
+        }
+    }
+    if ($licenseCacheDays -is [int] -and $licenseCacheDays -gt 0) {
+        $defaultIntervalHours = ($licenseCacheDays * 24)
     }
 
     $intervalHours = $NCVars.CheckUpdatesIntervalHours
@@ -31,8 +41,11 @@ function Test-NebulaModuleUpdates {
             $intervalHours = $parsed
         }
     }
+    if (-not ($intervalHours -is [int]) -or $intervalHours -lt 1) {
+        $intervalHours = $defaultIntervalHours
+    }
 
-    if (-not $Force.IsPresent -and $intervalHours -is [int] -and $intervalHours -gt 0) {
+    if (-not $Force.IsPresent -and $intervalHours -gt 0) {
         $lastCheckUtc = Get-NCModuleUpdateLastCheck
         if ($lastCheckUtc) {
             $elapsedHours = ((Get-Date).ToUniversalTime() - $lastCheckUtc).TotalHours
@@ -42,6 +55,8 @@ function Test-NebulaModuleUpdates {
             }
         }
     }
+
+    Write-NCMessage "Checking PowerShell Gallery for module updates, please wait ..." -Level INFO
 
     $script:NC_ModuleUpdateChecked = $true
 
