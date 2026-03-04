@@ -119,6 +119,7 @@
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/Assets/icon.png'
 ReleaseNotes = @'
 - Change: Add-MboxPermission now prints confirmation messages by default; use -PassThru for detailed output objects.
+- Change: Get-MboxPrimarySmtpAddress (`gpa`) now returns a compact default view (`DisplayName`, `PrimarySmtpAddress`); use `-Detailed` for full recipient fields.
 - Change: Get-UserGroups now returns `GroupName` and `GroupMail` property names (instead of spaced names) for easier scripting and filtering.
 - Change: Remove-MboxPermission now uses -ClearAll (renamed from -RemoveAllAdditionalPermissions).
 - Fix: Add-UserMsolAccountSku now accepts positional and pipeline UPN input (`<UserPrincipalName> -License ...` and `'u1','u2' | Add-UserMsolAccountSku -License ...`).
@@ -135,6 +136,7 @@ ReleaseNotes = @'
 - Improve: Get-TenantMsolAccountSku now reports Available net of suspended seats and shows Total with enabled/suspended breakdown.
 - Improve: Get-UserMsolAccountSku can show tenant availability for assigned SKUs via -CheckAvailability.
 - Improve: Remove-EntraGroupDevice/Remove-EntraGroupUser can clear all group members via -ClearAll (with stronger confirmation).
+- Improve: User identifier resolution via `Find-UserRecipient` is now applied consistently across `Get/Add/Remove-EntraGroupUser` and `Disable-UserDevices`/`Disable-UserSignIn`/`Revoke-UserSessions`, including short identifiers.
 - Improve: User license cmdlets (`Add/Get/Remove/Copy/Move-UserMsolAccountSku`) now use a more consistent parameter style (positional UPNs where applicable, plus pipeline input on single-user cmdlets).
 - New: Get-EntraGroupMembers lists all members of an Entra group (users, devices, ...).
 - New: Get-MboxStatistics returns a simplified mailbox statistics view.

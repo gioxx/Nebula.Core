@@ -288,20 +288,18 @@ function Add-EntraGroupUser {
                     $resolvedUser = Get-MgUser -UserId $user -ErrorAction Stop
                 }
                 catch {
-                    $escapedUser = $user.Replace("'", "''")
-                    try {
-                        $userMatches = Get-MgUser -Filter "displayName eq '$escapedUser'" -All -ErrorAction Stop
-                    }
-                    catch {
-                        Write-NCMessage "Unable to resolve user '$user': $($_.Exception.Message)" -Level ERROR
-                        continue
-                    }
-
-                    if ($userMatches -and $userMatches.Count -gt 0) {
-                        if ($userMatches.Count -gt 1) {
-                            Write-NCMessage "Multiple users matched '$user'. Using the first result ($($userMatches[0].UserPrincipalName))." -Level WARNING
+                    $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $user
+                    if ($resolvedIdentifier) {
+                        try {
+                            $resolvedUser = Get-MgUser -UserId $resolvedIdentifier -ErrorAction Stop
                         }
-                        $resolvedUser = $userMatches | Select-Object -First 1
+                        catch {
+                            Write-NCMessage "Unable to resolve user '$user': $($_.Exception.Message)" -Level ERROR
+                            continue
+                        }
+                    }
+                    else {
+                        continue
                     }
                 }
 
@@ -1585,25 +1583,41 @@ function Get-EntraGroupUser {
                 $user = Get-MgUser -UserId $UserIdentifier -ErrorAction Stop
             }
             catch {
-                $escapedUser = $UserIdentifier.Replace("'", "''")
-                try {
-                    $userMatches = Get-MgUser -Filter "displayName eq '$escapedUser'" -All -ErrorAction Stop
-                }
-                catch {
-                    Write-NCMessage "Unable to resolve user '$UserIdentifier': $($_.Exception.Message)" -Level ERROR
-                    return
-                }
-
-                if (-not $userMatches -or $userMatches.Count -eq 0) {
-                    Write-NCMessage "User '$UserIdentifier' not found" -Level WARNING
-                    return
+                $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $UserIdentifier
+                if ($resolvedIdentifier) {
+                    try {
+                        $user = Get-MgUser -UserId $resolvedIdentifier -ErrorAction Stop
+                    }
+                    catch {
+                        Write-NCMessage "Unable to resolve user '$UserIdentifier': $($_.Exception.Message)" -Level ERROR
+                        return
+                    }
                 }
 
-                if ($userMatches.Count -gt 1) {
-                    Write-NCMessage "Multiple users matched '$UserIdentifier'. Using the first result ($($userMatches[0].UserPrincipalName))." -Level WARNING
+                if ($user) {
+                    $userLabel = if ($user.UserPrincipalName) { $user.UserPrincipalName } else { $user.DisplayName }
                 }
+                else {
+                    $escapedUser = $UserIdentifier.Replace("'", "''")
+                    try {
+                        $userMatches = Get-MgUser -Filter "displayName eq '$escapedUser'" -All -ErrorAction Stop
+                    }
+                    catch {
+                        Write-NCMessage "Unable to resolve user '$UserIdentifier': $($_.Exception.Message)" -Level ERROR
+                        return
+                    }
 
-                $user = $userMatches | Select-Object -First 1
+                    if (-not $userMatches -or $userMatches.Count -eq 0) {
+                        Write-NCMessage "User '$UserIdentifier' not found" -Level WARNING
+                        return
+                    }
+
+                    if ($userMatches.Count -gt 1) {
+                        Write-NCMessage "Multiple users matched '$UserIdentifier'. Using the first result ($($userMatches[0].UserPrincipalName))." -Level WARNING
+                    }
+
+                    $user = $userMatches | Select-Object -First 1
+                }
             }
         }
 
@@ -2285,20 +2299,18 @@ function Remove-EntraGroupUser {
                         $resolvedUser = Get-MgUser -UserId $user -ErrorAction Stop
                     }
                     catch {
-                        $escapedUser = $user.Replace("'", "''")
-                        try {
-                            $userMatches = Get-MgUser -Filter "displayName eq '$escapedUser'" -All -ErrorAction Stop
-                        }
-                        catch {
-                            Write-NCMessage "Unable to resolve user '$user': $($_.Exception.Message)" -Level ERROR
-                            continue
-                        }
-
-                        if ($userMatches -and $userMatches.Count -gt 0) {
-                            if ($userMatches.Count -gt 1) {
-                                Write-NCMessage "Multiple users matched '$user'. Using the first result ($($userMatches[0].UserPrincipalName))." -Level WARNING
+                        $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $user
+                        if ($resolvedIdentifier) {
+                            try {
+                                $resolvedUser = Get-MgUser -UserId $resolvedIdentifier -ErrorAction Stop
                             }
-                            $resolvedUser = $userMatches | Select-Object -First 1
+                            catch {
+                                Write-NCMessage "Unable to resolve user '$user': $($_.Exception.Message)" -Level ERROR
+                                continue
+                            }
+                        }
+                        else {
+                            continue
                         }
                     }
 

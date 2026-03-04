@@ -62,9 +62,13 @@ function Disable-UserDevices {
                 $percent = (($counter / $queue.Count) * 100)
                 Write-Progress -Activity "Resolving user $upn" -Status "$counter of $($queue.Count) ($($percent.ToString('0.00'))%)" -PercentComplete $percent
 
-                $escaped = $upn.Replace("'", "''")
                 try {
-                    $user = Get-MgUser -Filter "userPrincipalName eq '$escaped'" -ConsistencyLevel eventual -ErrorAction Stop | Select-Object -First 1
+                    $resolvedUpn = Find-UserRecipient -UserPrincipalName $upn
+                    if (-not $resolvedUpn) {
+                        continue
+                    }
+
+                    $user = Get-MgUser -UserId $resolvedUpn -ErrorAction Stop
                 }
                 catch {
                     Write-NCMessage "Can't find Azure AD account for user $upn. $($_.Exception.Message)" -Level ERROR
@@ -184,9 +188,13 @@ function Disable-UserSignIn {
                 $percent = (($counter / $queue.Count) * 100)
                 Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) ($($percent.ToString('0.00'))%)" -PercentComplete $percent
 
-                $escaped = $upn.Replace("'", "''")
                 try {
-                    $user = Get-MgUser -Filter "userPrincipalName eq '$escaped'" -ConsistencyLevel eventual -ErrorAction Stop | Select-Object -First 1
+                    $resolvedUpn = Find-UserRecipient -UserPrincipalName $upn
+                    if (-not $resolvedUpn) {
+                        continue
+                    }
+
+                    $user = Get-MgUser -UserId $resolvedUpn -ErrorAction Stop
                 }
                 catch {
                     Write-NCMessage "Can't find Azure AD account for user $upn. $($_.Exception.Message)" -Level ERROR
@@ -308,9 +316,13 @@ function Revoke-UserSessions {
                 $uniqueTargets = foreach ($entry in $targets) { if ($dedup.Add($entry)) { $entry } }
 
                 foreach ($upn in $uniqueTargets) {
-                    $escaped = $upn.Replace("'", "''")
                     try {
-                        $user = Get-MgUser -Filter "userPrincipalName eq '$escaped'" -ConsistencyLevel eventual -ErrorAction Stop | Select-Object -First 1
+                        $resolvedUpn = Find-UserRecipient -UserPrincipalName $upn
+                        if (-not $resolvedUpn) {
+                            continue
+                        }
+
+                        $user = Get-MgUser -UserId $resolvedUpn -ErrorAction Stop
                         if ($user) {
                             $queue.Add($user) | Out-Null
                         }

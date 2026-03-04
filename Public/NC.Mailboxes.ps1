@@ -509,15 +509,20 @@ function Get-MboxPrimarySmtpAddress {
         Mailbox or recipient identity. Accepts pipeline input.
     .PARAMETER Raw
         Return only the PrimarySmtpAddress values.
+    .PARAMETER Detailed
+        Return additional recipient fields (Identity and RecipientTypeDetails).
     .EXAMPLE
         Get-MboxPrimarySmtpAddress -SourceMailbox user@contoso.com
+    .EXAMPLE
+        Get-MboxPrimarySmtpAddress -SourceMailbox user@contoso.com -Detailed
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Identity')]
         [string[]]$SourceMailbox,
-        [switch]$Raw
+        [switch]$Raw,
+        [switch]$Detailed
     )
 
     begin { Set-ProgressAndInfoPreferences }
@@ -542,11 +547,19 @@ function Get-MboxPrimarySmtpAddress {
                 $recipient.PrimarySmtpAddress
             }
             else {
-                [pscustomobject]@{
-                    Identity             = $recipient.Identity
-                    DisplayName          = $recipient.DisplayName
-                    PrimarySmtpAddress   = $recipient.PrimarySmtpAddress
-                    RecipientTypeDetails = $recipient.RecipientTypeDetails
+                if ($Detailed) {
+                    [pscustomobject]@{
+                        DisplayName          = $recipient.DisplayName
+                        PrimarySmtpAddress   = $recipient.PrimarySmtpAddress
+                        Identity             = $recipient.Identity
+                        RecipientTypeDetails = $recipient.RecipientTypeDetails
+                    }
+                }
+                else {
+                    [pscustomobject]@{
+                        DisplayName        = $recipient.DisplayName
+                        PrimarySmtpAddress = $recipient.PrimarySmtpAddress
+                    }
                 }
             }
         }
