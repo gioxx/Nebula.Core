@@ -14,7 +14,7 @@ function Add-MboxAlias {
     .PARAMETER MailboxAlias
         Alias to add (SMTP address).
     .EXAMPLE
-        Add-MboxAlias -SourceMailbox info@contoso.com -MailboxAlias alias@contoso.com
+        Add-MboxAlias -SourceMailbox user@contoso.com -MailboxAlias alias@contoso.com
     #>
     [CmdletBinding()]
     param(
@@ -87,8 +87,12 @@ function Add-MboxPermission {
         Permission type: All, FullAccess, SendAs, SendOnBehalfTo. Defaults to All (FullAccess + SendAs).
     .PARAMETER AutoMapping
         Enable Outlook automapping when granting FullAccess.
+    .PARAMETER PassThru
+        When specified, emits detailed permission objects to the pipeline.
     .EXAMPLE
-        Add-MboxPermission -SourceMailbox info@contoso.com -UserMailbox mario.rossi@contoso.com -AccessRights FullAccess -AutoMapping
+        Add-MboxPermission -SourceMailbox user@contoso.com -UserMailbox user@contoso.com -AccessRights FullAccess -AutoMapping
+    .EXAMPLE
+        Add-MboxPermission -SourceMailbox user@contoso.com -UserMailbox user@contoso.com -PassThru
     #>
     [CmdletBinding()]
     param(
@@ -99,7 +103,8 @@ function Add-MboxPermission {
         [string[]]$UserMailbox,
         [ValidateSet('All', 'FullAccess', 'SendAs', 'SendOnBehalfTo')]
         [string]$AccessRights = 'All',
-        [switch]$AutoMapping
+        [switch]$AutoMapping,
+        [switch]$PassThru
     )
 
     begin { Set-ProgressAndInfoPreferences }
@@ -140,13 +145,15 @@ function Add-MboxPermission {
 
                     $added = Add-MailboxPermission -Identity $targetMailbox.PrimarySmtpAddress -User $userIdentity -AccessRights FullAccess -AutoMapping:$AutoMapping.IsPresent -Confirm:$false
                     Write-NCMessage ("Added FullAccess for {0} on {1}." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level SUCCESS
-                    [pscustomobject]@{
-                        Identity     = $added.Identity
-                        User         = $added.User
-                        DisplayName  = $userObject.DisplayName
-                        AccessRights = $added.AccessRights
-                        IsInherited  = $added.IsInherited
-                        Deny         = $added.Deny
+                    if ($PassThru) {
+                        [pscustomobject]@{
+                            Identity     = $added.Identity
+                            User         = $added.User
+                            DisplayName  = $userObject.DisplayName
+                            AccessRights = $added.AccessRights
+                            IsInherited  = $added.IsInherited
+                            Deny         = $added.Deny
+                        }
                     }
                 }
                 'SendAs' {
@@ -158,12 +165,14 @@ function Add-MboxPermission {
 
                     $added = Add-RecipientPermission -Identity $targetMailbox.PrimarySmtpAddress -Trustee $userIdentity -AccessRights SendAs -Confirm:$false
                     Write-NCMessage ("Added SendAs for {0} on {1}." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level SUCCESS
-                    [pscustomobject]@{
-                        Identity          = $added.Identity
-                        Trustee           = $added.Trustee
-                        DisplayName       = $userObject.DisplayName
-                        AccessControlType = $added.AccessControlType
-                        AccessRights      = $added.AccessRights
+                    if ($PassThru) {
+                        [pscustomobject]@{
+                            Identity          = $added.Identity
+                            Trustee           = $added.Trustee
+                            DisplayName       = $userObject.DisplayName
+                            AccessControlType = $added.AccessControlType
+                            AccessRights      = $added.AccessRights
+                        }
                     }
                 }
                 'SendOnBehalfTo' {
@@ -175,11 +184,13 @@ function Add-MboxPermission {
 
                     Set-Mailbox -Identity $targetMailbox.PrimarySmtpAddress -GrantSendOnBehalfTo @{ add = $userIdentity } -Confirm:$false | Out-Null
                     Write-NCMessage ("Added SendOnBehalfTo for {0} on {1}." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level SUCCESS
-                    [pscustomobject]@{
-                        Identity     = $targetMailbox.PrimarySmtpAddress
-                        Trustee      = $userIdentity
-                        DisplayName  = $userObject.DisplayName
-                        AccessRights = 'SendOnBehalfTo'
+                    if ($PassThru) {
+                        [pscustomobject]@{
+                            Identity     = $targetMailbox.PrimarySmtpAddress
+                            Trustee      = $userIdentity
+                            DisplayName  = $userObject.DisplayName
+                            AccessRights = 'SendOnBehalfTo'
+                        }
                     }
                 }
                 'All' {
@@ -218,7 +229,9 @@ function Add-MboxPermission {
                         Write-NCMessage ("{0} already has SendAs permission to {1}, skipping." -f $userIdentity, $targetMailbox.PrimarySmtpAddress) -Level WARNING
                     }
 
-                    $created
+                    if ($PassThru) {
+                        $created
+                    }
                 }
             }
         }
@@ -245,7 +258,7 @@ function Export-MboxAlias {
     .PARAMETER Domain
         Export aliases for recipients whose addresses match the provided domain.
     .EXAMPLE
-        Export-MboxAlias -SourceMailbox info@contoso.com
+        Export-MboxAlias -SourceMailbox user@contoso.com
     .EXAMPLE
         Export-MboxAlias -All -CsvFolder C:\Temp
     #>
@@ -431,7 +444,7 @@ function Get-MboxAlias {
     .PARAMETER SourceMailbox
         Mailbox or recipient identity. Accepts pipeline input.
     .EXAMPLE
-        Get-MboxAlias -SourceMailbox info@contoso.com
+        Get-MboxAlias -SourceMailbox user@contoso.com
     #>
     [CmdletBinding()]
     param(
@@ -497,7 +510,7 @@ function Get-MboxPrimarySmtpAddress {
     .PARAMETER Raw
         Return only the PrimarySmtpAddress values.
     .EXAMPLE
-        Get-MboxPrimarySmtpAddress -SourceMailbox info@contoso.com
+        Get-MboxPrimarySmtpAddress -SourceMailbox user@contoso.com
     #>
     [CmdletBinding()]
     param(
@@ -555,7 +568,7 @@ function Get-MboxPermission {
     .PARAMETER IncludeSummary
         Display a short summary of counts.
     .EXAMPLE
-        Get-MboxPermission -SourceMailbox info@contoso.com -IncludeSummary
+        Get-MboxPermission -SourceMailbox user@contoso.com -IncludeSummary
     #>
     [CmdletBinding()]
     param(
@@ -699,7 +712,7 @@ function Get-UserLastSeen {
     .PARAMETER User
         Mailbox identity (UPN, SMTP address, alias). Accepts pipeline input.
     .EXAMPLE
-        Get-UserLastSeen -User alice@contoso.com
+        Get-UserLastSeen -User user@contoso.com
     #>
     [CmdletBinding()]
     param(
@@ -787,7 +800,7 @@ function Get-MboxLastMessageTrace {
     .PARAMETER IncludeTrace
         Include raw message trace objects in the output.
     .EXAMPLE
-        Get-MboxLastMessageTrace -SourceMailbox info@contoso.com
+        Get-MboxLastMessageTrace -SourceMailbox user@contoso.com
     #>
     [CmdletBinding()]
     param(
@@ -875,7 +888,7 @@ function New-SharedMailbox {
     .PARAMETER SharedMailboxAlias
         Alias for the mailbox.
     .EXAMPLE
-        New-SharedMailbox -SharedMailboxSMTPAddress info@contoso.com -SharedMailboxDisplayName "Contoso - Info" -SharedMailboxAlias contoso_info
+        New-SharedMailbox -SharedMailboxSMTPAddress user@contoso.com -SharedMailboxDisplayName "Contoso - Info" -SharedMailboxAlias contoso_info
     #>
     [CmdletBinding()]
     param(
@@ -917,7 +930,7 @@ function Remove-MboxAlias {
     .PARAMETER MailboxAlias
         Alias to remove (SMTP address).
     .EXAMPLE
-        Remove-MboxAlias -SourceMailbox info@contoso.com -MailboxAlias alias@contoso.com
+        Remove-MboxAlias -SourceMailbox user@contoso.com -MailboxAlias alias@contoso.com
     #>
     [CmdletBinding()]
     param(
@@ -937,6 +950,28 @@ function Remove-MboxAlias {
             return
         }
 
+        $normalizedAlias = $MailboxAlias.Trim().ToLowerInvariant()
+
+        function Test-ProxyAddressPresent {
+            param(
+                [Parameter(Mandatory)]
+                [object[]]$EmailAddresses,
+                [Parameter(Mandatory)]
+                [string]$TargetAddress
+            )
+
+            foreach ($proxy in $EmailAddresses) {
+                $proxyText = $proxy.ToString()
+                $separatorIndex = $proxyText.IndexOf(':')
+                $addressPart = if ($separatorIndex -ge 0) { $proxyText.Substring($separatorIndex + 1) } else { $proxyText }
+                if ($addressPart.Trim().ToLowerInvariant() -eq $TargetAddress) {
+                    return $true
+                }
+            }
+
+            return $false
+        }
+
         try {
             $recipient = Get-Recipient -Identity $SourceMailbox -ErrorAction Stop
         }
@@ -954,15 +989,28 @@ function Remove-MboxAlias {
                 }
                 default { Set-Mailbox -Identity $recipient.Identity -EmailAddresses @{ remove = $MailboxAlias } -ErrorAction Stop }
             }
-
-            Write-NCMessage ("Alias '{0}' removed from {1}." -f $MailboxAlias, $recipient.PrimarySmtpAddress) -Level SUCCESS
         }
         catch {
             Write-NCMessage "Unable to remove alias '$MailboxAlias' from '$($recipient.PrimarySmtpAddress)'. $($_.Exception.Message)" -Level ERROR
             return
         }
 
-        Get-MboxAlias -SourceMailbox $recipient.PrimarySmtpAddress
+        try {
+            $updatedRecipient = Get-Recipient -Identity $recipient.Identity -ErrorAction Stop
+        }
+        catch {
+            Write-NCMessage "Alias removal attempted, but unable to validate final state for '$($recipient.PrimarySmtpAddress)'. $($_.Exception.Message)" -Level WARNING
+            return
+        }
+
+        if (Test-ProxyAddressPresent -EmailAddresses $updatedRecipient.EmailAddresses -TargetAddress $normalizedAlias) {
+            Write-NCMessage ("Alias '{0}' is still present on {1}. It may be protected (for example, used as WindowsLiveId)." -f $MailboxAlias, $updatedRecipient.PrimarySmtpAddress) -Level WARNING
+        }
+        else {
+            Write-NCMessage ("Alias '{0}' removed from {1}." -f $MailboxAlias, $updatedRecipient.PrimarySmtpAddress) -Level SUCCESS
+        }
+
+        Get-MboxAlias -SourceMailbox $updatedRecipient.PrimarySmtpAddress
     }
 
     end { Restore-ProgressAndInfoPreferences }
@@ -984,17 +1032,17 @@ function Remove-MboxPermission {
     .PARAMETER ClearAll
         Removes any non-inherited FullAccess, SendAs, and SendOnBehalfTo permissions for the source mailbox.
     .EXAMPLE
-        Remove-MboxPermission -SourceMailbox info@contoso.com -UserMailbox mario.rossi@contoso.com -AccessRights SendAs
+        Remove-MboxPermission -SourceMailbox user@contoso.com -UserMailbox user@contoso.com -AccessRights SendAs
     .EXAMPLE
-        Remove-MboxPermission -SourceMailbox info@contoso.com -ClearAll
+        Remove-MboxPermission -SourceMailbox user@contoso.com -ClearAll
     #>
     [CmdletBinding(DefaultParameterSetName = 'User')]
     param(
-        [Parameter(Mandatory, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'User')]
-        [Parameter(Mandatory, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'All')]
+        [Parameter(Mandatory, Position = 0, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'User')]
+        [Parameter(Mandatory, Position = 0, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'All')]
         [Alias('Identity')]
         [string]$SourceMailbox,
-        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'User')]
+        [Parameter(Mandatory, Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'User')]
         [string[]]$UserMailbox,
         [Parameter(ParameterSetName = 'User')]
         [ValidateSet('All', 'FullAccess', 'SendAs', 'SendOnBehalfTo')]
@@ -1101,7 +1149,7 @@ function Set-MboxLanguage {
     .PARAMETER Csv
         CSV file with EmailAddress column containing mailboxes to update.
     .EXAMPLE
-        Set-MboxLanguage -SourceMailbox info@contoso.com -Language en-US
+        Set-MboxLanguage -SourceMailbox user@contoso.com -Language en-US
     .EXAMPLE
         Set-MboxLanguage -Csv C:\temp\mailboxes.csv -Language it-IT
     #>
@@ -1184,7 +1232,7 @@ function Set-MboxRulesQuota {
     .PARAMETER SourceMailbox
         Mailboxes to update. Accepts pipeline input.
     .EXAMPLE
-        Set-MboxRulesQuota -SourceMailbox info@contoso.com, support@contoso.com
+        Set-MboxRulesQuota -SourceMailbox user1@contoso.com, user2@contoso.com
     #>
     [CmdletBinding()]
     param(
@@ -1249,7 +1297,7 @@ function Set-SharedMboxCopyForSent {
     .PARAMETER SourceMailbox
         Shared mailboxes to update. Accepts pipeline input.
     .EXAMPLE
-        Set-SharedMboxCopyForSent -SourceMailbox info@contoso.com
+        Set-SharedMboxCopyForSent -SourceMailbox user@contoso.com
     #>
     [CmdletBinding()]
     param(

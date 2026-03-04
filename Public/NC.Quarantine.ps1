@@ -184,7 +184,7 @@ function Get-QuarantineFrom {
     .PARAMETER IncludeReleased
         Include messages already released (default hides them).
     .EXAMPLE
-        Get-QuarantineFrom -SenderAddress mario.rossi@contoso.com
+        Get-QuarantineFrom -SenderAddress user@contoso.com
     #>
     [CmdletBinding()]
     param(
@@ -585,7 +585,7 @@ function Unlock-QuarantineFrom {
     .PARAMETER ReportFalsePositive
         Also report the released messages as false positives.
     .EXAMPLE
-        Unlock-QuarantineFrom -SenderAddress mario.rossi@contoso.com -ReportFalsePositive
+        Unlock-QuarantineFrom -SenderAddress user@contoso.com -ReportFalsePositive
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(

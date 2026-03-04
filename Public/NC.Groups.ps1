@@ -919,7 +919,7 @@ function Get-DynamicDistributionGroupFilter {
     .EXAMPLE
         Get-DynamicDistributionGroupFilter -DynamicDistributionGroup "Campus Assago"
     .EXAMPLE
-        "campusassago@tenant.onmicrosoft.com" | Get-DynamicDistributionGroupFilter -AsObject
+        "group@contoso.com" | Get-DynamicDistributionGroupFilter -AsObject
     #>
     [CmdletBinding()]
     param(
@@ -1261,8 +1261,8 @@ function Get-UserGroups {
         foreach ($membership in $memberships) {
             $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
             $row = [ordered]@{
-                'Group Name' = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
-                'Group Mail' = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
+                GroupName = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
+                GroupMail = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
             }
 
             if ($GridView.IsPresent) {
@@ -1280,7 +1280,7 @@ function Get-UserGroups {
             $results | Out-GridView -Title "M365 User Groups - $resolvedPrincipal"
         }
         else {
-            $results | Sort-Object 'Group Name'
+            $results | Sort-Object GroupName
         }
     }
 }

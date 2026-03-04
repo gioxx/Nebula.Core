@@ -178,149 +178,169 @@ function Get-MboxStatistics {
         [bool]$Round = $true
     )
 
-    Set-ProgressAndInfoPreferences
-    try {
-        if (-not (Test-EOLConnection)) {
-            Add-EmptyLine
-            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
-            return
-        }
-
-        $mailboxes = @()
-        try {
-            if ([string]::IsNullOrWhiteSpace($UserPrincipalName)) {
-                $mailboxes = Get-Mailbox -ResultSize Unlimited -WarningAction SilentlyContinue
-            }
-            else {
-                $mailboxes = @(Get-Mailbox -Identity $UserPrincipalName -ErrorAction Stop)
-            }
-        }
-        catch {
-            Write-NCMessage "Failed to retrieve mailbox information: $($_.Exception.Message)" -Level ERROR
-            return
-        }
-
-        if (-not $mailboxes -or $mailboxes.Count -eq 0) {
-            Write-NCMessage "No mailboxes found matching the provided criteria." -Level WARNING
-            return
-        }
-
-        $processedCount = 0
-        $totalMailboxes = $mailboxes.Count
-
-        foreach ($mailbox in $mailboxes) {
-            $processedCount++
-            $percentComplete = (($processedCount / $totalMailboxes) * 100)
-            Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
-
-            $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
-            if (-not $stats) {
-                continue
-            }
-
-            $mailboxSizeGb = Convert-MbxSizeToGB -SizeObject $stats.TotalItemSize
-            $prohibitSendQuota = Resolve-MbxQuotaValue -RawValue $mailbox.ProhibitSendQuota -Round:$Round
-            $warningQuota = Resolve-MbxQuotaValue -RawValue $mailbox.IssueWarningQuota -Round:$Round
-            $oldestItemReceivedDate = $null
-            $oldestItemFolderPath = $null
-            $lastTrace = $null
-            if ($IncludeMessageActivity) {
-                $lastTrace = Get-MboxLastMessageTrace -SourceMailbox $mailbox.UserPrincipalName
-
-                try {
-                    $oldestItem = Get-MailboxFolderStatistics -Identity $mailbox.UserPrincipalName -IncludeOldestAndNewestItems -ErrorAction Stop |
-                        Where-Object { $_.OldestItemReceivedDate -ne $null } |
-                        Sort-Object -Property OldestItemReceivedDate |
-                        Select-Object -First 1
-
-                    if ($oldestItem) {
-                        $oldestItemReceivedDate = $oldestItem.OldestItemReceivedDate
-                        $oldestItemFolderPath = $oldestItem.FolderPath
-                    }
-                }
-                catch {
-                    Write-NCMessage ("Unable to retrieve oldest mailbox item details for '{0}'. {1}" -f $mailbox.PrimarySmtpAddress, $_.Exception.Message) -Level WARNING
-                }
-            }
-
-            $percentUsed = $null
-            if ($prohibitSendQuota -is [double] -and $prohibitSendQuota -gt 0) {
-                $percentUsed = [Math]::Round(($mailboxSizeGb / $prohibitSendQuota) * 100, 2)
-            }
-
-            $archiveSize = $null
-            $archivePercentUsed = $null
-            $hasArchive = ($mailbox.ArchiveStatus -eq 'Active') -or ($mailbox.ArchiveGuid -and $mailbox.ArchiveGuid -ne [guid]::Empty)
-            if ($IncludeArchive -and $hasArchive) {
-                $archiveStats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName -Archive
-                if ($archiveStats) {
-                    $archiveSize = Convert-MbxSizeToGB -SizeObject $archiveStats.TotalItemSize
-                    $archiveQuota = Resolve-MbxQuotaValue -RawValue $mailbox.ArchiveQuota -Round:$Round
-                    if ($archiveQuota -is [double] -and $archiveQuota -gt 0) {
-                        $archivePercentUsed = [Math]::Round(($archiveSize / $archiveQuota) * 100, 2)
-                    }
-                }
-            }
-
-            $mailboxTypeDetail = if ($stats.PSObject.Properties.Match('MailboxTypeDetail').Count -gt 0) {
-                $stats.MailboxTypeDetail
-            }
-            elseif ($stats.PSObject.Properties.Match('RecipientTypeDetails').Count -gt 0) {
-                $stats.RecipientTypeDetails
-            }
-            else {
-                $mailbox.RecipientTypeDetails
-            }
-
-            $mailboxCreated = $null
-            if ($mailbox.PSObject.Properties.Match('WhenCreatedUTC').Count -gt 0 -and $mailbox.WhenCreatedUTC) {
-                $mailboxCreated = $mailbox.WhenCreatedUTC
-            }
-            elseif ($mailbox.PSObject.Properties.Match('WhenCreated').Count -gt 0 -and $mailbox.WhenCreated) {
-                $mailboxCreated = $mailbox.WhenCreated
-            }
-            elseif ($stats.PSObject.Properties.Match('WhenMailboxCreated').Count -gt 0 -and $stats.WhenMailboxCreated) {
-                $mailboxCreated = $stats.WhenMailboxCreated
-            }
-            elseif ($stats.PSObject.Properties.Match('DateCreated').Count -gt 0 -and $stats.DateCreated) {
-                $mailboxCreated = $stats.DateCreated
-            }
-            elseif ($stats.PSObject.Properties.Match('Created').Count -gt 0 -and $stats.Created) {
-                $mailboxCreated = $stats.Created
-            }
-
-            $record = [ordered]@{
-                DisplayName          = $mailbox.DisplayName
-                UserPrincipalName    = $mailbox.UserPrincipalName
-                PrimarySmtpAddress   = $mailbox.PrimarySmtpAddress
-                MailboxTypeDetail    = $mailboxTypeDetail
-                MailboxSizeGB        = $mailboxSizeGb
-                ItemCount            = $stats.ItemCount
-                MailboxCreated       = $mailboxCreated
-                LastLogonTime        = $stats.LastLogonTime
-                WarningQuotaGB       = $warningQuota
-                ProhibitSendQuotaGB  = $prohibitSendQuota
-                PercentUsed          = $percentUsed
-            }
-
-            if ($IncludeMessageActivity) {
-                $record.LastReceived = if ($lastTrace) { $lastTrace.LastReceived } else { $null }
-                $record.LastSent = if ($lastTrace) { $lastTrace.LastSent } else { $null }
-                $record.OldestItemReceivedDate = $oldestItemReceivedDate
-                $record.OldestItemFolderPath = $oldestItemFolderPath
-            }
-
-            if ($IncludeArchive) {
-                $record.ArchiveSizeGB = $archiveSize
-                $record.ArchivePercentUsed = $archivePercentUsed
-            }
-
-            [pscustomobject]$record
-        }
-
-        Write-Progress -Activity "Export complete" -Completed
+    begin {
+        Set-ProgressAndInfoPreferences
+        $pipelineUpns = [System.Collections.Generic.List[string]]::new()
     }
-    finally {
-        Restore-ProgressAndInfoPreferences
+
+    process {
+        if (-not [string]::IsNullOrWhiteSpace($UserPrincipalName)) {
+            [void]$pipelineUpns.Add($UserPrincipalName)
+        }
+    }
+
+    end {
+        try {
+            if (-not (Test-EOLConnection)) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
+                return
+            }
+
+            $mailboxes = @()
+            try {
+                if ($pipelineUpns.Count -eq 0) {
+                    $mailboxes = Get-Mailbox -ResultSize Unlimited -WarningAction SilentlyContinue
+                }
+                else {
+                    foreach ($upn in ($pipelineUpns | Select-Object -Unique)) {
+                        try {
+                            $mailboxes += @(Get-Mailbox -Identity $upn -ErrorAction Stop)
+                        }
+                        catch {
+                            Write-NCMessage "Mailbox not found for '$upn'. Skipping. $($_.Exception.Message)" -Level WARNING
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-NCMessage "Failed to retrieve mailbox information: $($_.Exception.Message)" -Level ERROR
+                return
+            }
+
+            if (-not $mailboxes -or $mailboxes.Count -eq 0) {
+                Write-NCMessage "No mailboxes found matching the provided criteria." -Level WARNING
+                return
+            }
+
+            $processedCount = 0
+            $totalMailboxes = $mailboxes.Count
+
+            foreach ($mailbox in $mailboxes) {
+                $processedCount++
+                $percentComplete = (($processedCount / $totalMailboxes) * 100)
+                Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+
+                $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
+                if (-not $stats) {
+                    continue
+                }
+
+                $mailboxSizeGb = Convert-MbxSizeToGB -SizeObject $stats.TotalItemSize
+                $prohibitSendQuota = Resolve-MbxQuotaValue -RawValue $mailbox.ProhibitSendQuota -Round:$Round
+                $warningQuota = Resolve-MbxQuotaValue -RawValue $mailbox.IssueWarningQuota -Round:$Round
+                $oldestItemReceivedDate = $null
+                $oldestItemFolderPath = $null
+                $lastTrace = $null
+                if ($IncludeMessageActivity) {
+                    $lastTrace = Get-MboxLastMessageTrace -SourceMailbox $mailbox.UserPrincipalName
+
+                    try {
+                        $oldestItem = Get-MailboxFolderStatistics -Identity $mailbox.UserPrincipalName -IncludeOldestAndNewestItems -ErrorAction Stop |
+                            Where-Object { $_.OldestItemReceivedDate -ne $null } |
+                            Sort-Object -Property OldestItemReceivedDate |
+                            Select-Object -First 1
+
+                        if ($oldestItem) {
+                            $oldestItemReceivedDate = $oldestItem.OldestItemReceivedDate
+                            $oldestItemFolderPath = $oldestItem.FolderPath
+                        }
+                    }
+                    catch {
+                        Write-NCMessage ("Unable to retrieve oldest mailbox item details for '{0}'. {1}" -f $mailbox.PrimarySmtpAddress, $_.Exception.Message) -Level WARNING
+                    }
+                }
+
+                $percentUsed = $null
+                if ($prohibitSendQuota -is [double] -and $prohibitSendQuota -gt 0) {
+                    $percentUsed = [Math]::Round(($mailboxSizeGb / $prohibitSendQuota) * 100, 2)
+                }
+
+                $archiveSize = $null
+                $archivePercentUsed = $null
+                $hasArchive = ($mailbox.ArchiveStatus -eq 'Active') -or ($mailbox.ArchiveGuid -and $mailbox.ArchiveGuid -ne [guid]::Empty)
+                if ($IncludeArchive -and $hasArchive) {
+                    $archiveStats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName -Archive
+                    if ($archiveStats) {
+                        $archiveSize = Convert-MbxSizeToGB -SizeObject $archiveStats.TotalItemSize
+                        $archiveQuota = Resolve-MbxQuotaValue -RawValue $mailbox.ArchiveQuota -Round:$Round
+                        if ($archiveQuota -is [double] -and $archiveQuota -gt 0) {
+                            $archivePercentUsed = [Math]::Round(($archiveSize / $archiveQuota) * 100, 2)
+                        }
+                    }
+                }
+
+                $mailboxTypeDetail = if ($stats.PSObject.Properties.Match('MailboxTypeDetail').Count -gt 0) {
+                    $stats.MailboxTypeDetail
+                }
+                elseif ($stats.PSObject.Properties.Match('RecipientTypeDetails').Count -gt 0) {
+                    $stats.RecipientTypeDetails
+                }
+                else {
+                    $mailbox.RecipientTypeDetails
+                }
+
+                $mailboxCreated = $null
+                if ($mailbox.PSObject.Properties.Match('WhenCreatedUTC').Count -gt 0 -and $mailbox.WhenCreatedUTC) {
+                    $mailboxCreated = $mailbox.WhenCreatedUTC
+                }
+                elseif ($mailbox.PSObject.Properties.Match('WhenCreated').Count -gt 0 -and $mailbox.WhenCreated) {
+                    $mailboxCreated = $mailbox.WhenCreated
+                }
+                elseif ($stats.PSObject.Properties.Match('WhenMailboxCreated').Count -gt 0 -and $stats.WhenMailboxCreated) {
+                    $mailboxCreated = $stats.WhenMailboxCreated
+                }
+                elseif ($stats.PSObject.Properties.Match('DateCreated').Count -gt 0 -and $stats.DateCreated) {
+                    $mailboxCreated = $stats.DateCreated
+                }
+                elseif ($stats.PSObject.Properties.Match('Created').Count -gt 0 -and $stats.Created) {
+                    $mailboxCreated = $stats.Created
+                }
+
+                $record = [ordered]@{
+                    DisplayName          = $mailbox.DisplayName
+                    UserPrincipalName    = $mailbox.UserPrincipalName
+                    PrimarySmtpAddress   = $mailbox.PrimarySmtpAddress
+                    MailboxTypeDetail    = $mailboxTypeDetail
+                    ArchiveEnabled       = [bool]$hasArchive
+                    MailboxSizeGB        = $mailboxSizeGb
+                    ItemCount            = $stats.ItemCount
+                    MailboxCreated       = $mailboxCreated
+                    LastLogonTime        = $stats.LastLogonTime
+                    WarningQuotaGB       = $warningQuota
+                    ProhibitSendQuotaGB  = $prohibitSendQuota
+                    PercentUsed          = $percentUsed
+                }
+
+                if ($IncludeMessageActivity) {
+                    $record.LastReceived = if ($lastTrace) { $lastTrace.LastReceived } else { $null }
+                    $record.LastSent = if ($lastTrace) { $lastTrace.LastSent } else { $null }
+                    $record.OldestItemReceivedDate = $oldestItemReceivedDate
+                    $record.OldestItemFolderPath = $oldestItemFolderPath
+                }
+
+                if ($IncludeArchive) {
+                    $record.ArchiveSizeGB = $archiveSize
+                    $record.ArchivePercentUsed = $archivePercentUsed
+                }
+
+                [pscustomobject]$record
+            }
+
+            Write-Progress -Activity "Export complete" -Completed
+        }
+        finally {
+            Restore-ProgressAndInfoPreferences
+        }
     }
 }

@@ -28,7 +28,7 @@ function Add-UserMsolAccountSku {
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('User', 'UPN')]
         [string]$UserPrincipalName,
         [Parameter(Mandatory = $true)]
@@ -37,8 +37,11 @@ function Add-UserMsolAccountSku {
         [switch]$ShowErrorDetails
     )
 
-    Set-ProgressAndInfoPreferences
-    try {
+    begin {
+        Set-ProgressAndInfoPreferences
+    }
+
+    process {
         $GraphConnection = Test-MgGraphConnection
         if (-not $GraphConnection) {
             Add-EmptyLine
@@ -170,6 +173,7 @@ function Add-UserMsolAccountSku {
         }
 
         $addLicenses = @()
+        $assignableItems = @()
         $namesNoAvailability = @()
         foreach ($item in $uniqueAdds) {
             $available = $item.Available
@@ -178,6 +182,7 @@ function Add-UserMsolAccountSku {
                 $namesNoAvailability += $item.Name
                 continue
             }
+            $assignableItems += $item
             $addLicenses += @{
                 SkuId         = $item.SkuId
                 DisabledPlans = @()
@@ -190,11 +195,12 @@ function Add-UserMsolAccountSku {
             return
         }
 
+        $assignableList = ($assignableItems | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', '
         $summary = if ($targetUsage) {
-            "Set usage location to {0} and assign license(s): {1} to {2}" -f $targetUsage, (($resolved | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', '), $user.UserPrincipalName
+            "Set usage location to {0} and assign license(s): {1} to {2}" -f $targetUsage, $assignableList, $user.UserPrincipalName
         }
         else {
-            "Assign license(s): {0} to {1}" -f (($resolved | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', '), $user.UserPrincipalName
+            "Assign license(s): {0} to {1}" -f $assignableList, $user.UserPrincipalName
         }
 
         if (-not $PSCmdlet.ShouldProcess($user.UserPrincipalName, $summary)) {
@@ -222,13 +228,17 @@ function Add-UserMsolAccountSku {
                 $currentMax = if ($max) { $max } else { $maxAttempts }
                 Write-NCMessage ("Failed to assign licenses to {0}, attempt {1} of {2}. {3}" -f $user.UserPrincipalName, $currentAttempt, $currentMax, $err.Exception.Message) -Level ERROR
             } | Out-Null
-            Write-NCMessage ("Assigned license(s) to {0}: {1}" -f $user.UserPrincipalName, (($resolved | ForEach-Object { $_.Name } | Select-Object -Unique) -join ', ')) -Level SUCCESS
+            Write-NCMessage ("Assigned license(s) to {0}: {1}" -f $user.UserPrincipalName, $assignableList) -Level SUCCESS
+            if ($namesNoAvailability.Count -gt 0) {
+                Write-NCMessage ("Skipped license(s) with no available units: {0}" -f (($namesNoAvailability | Select-Object -Unique) -join ', ')) -Level WARNING
+            }
         }
         catch {
             Write-NCMessage "License assignment failed for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
         }
     }
-    finally {
+
+    end {
         Restore-ProgressAndInfoPreferences
     }
 }
@@ -249,10 +259,10 @@ function Copy-UserMsolAccountSku {
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
     param(
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, Position = 0)]
         [Alias('Source', 'From')]
         [string]$SourceUserPrincipalName,
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, Position = 1)]
         [Alias('Destination', 'To')]
         [string]$DestinationUserPrincipalName
     )
@@ -870,7 +880,7 @@ function Get-UserMsolAccountSku {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, HelpMessage = "User Principal Name (e.g. user@contoso.com)")]
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, HelpMessage = "User Principal Name (e.g. user@contoso.com)")]
         [Alias('User', 'UPN')]
         [string] $UserPrincipalName,
         [switch] $Clipboard,
@@ -1082,10 +1092,10 @@ function Move-UserMsolAccountSku {
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, Position = 0)]
         [Alias('Source', 'From')]
         [string]$SourceUserPrincipalName,
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, Position = 1)]
         [Alias('Destination', 'To')]
         [string]$DestinationUserPrincipalName
     )
@@ -1335,12 +1345,14 @@ function Remove-UserMsolAccountSku {
     .EXAMPLE
         Remove-UserMsolAccountSku -UserPrincipalName user@contoso.com -License "ENTERPRISEPACK","VISIOCLIENT"
     .EXAMPLE
+        Remove-UserMsolAccountSku user@contoso.com -License "Exchange Online (Plan 2)"
+    .EXAMPLE
         Remove-UserMsolAccountSku -UserPrincipalName user@contoso.com -License "18181a46-0d4e-45cd-891e-60aabd171b4e"
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByLicense')]
-        [Parameter(Mandatory = $true, ParameterSetName = 'All')]
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'ByLicense')]
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'All')]
         [Alias('User', 'UPN')]
         [string]$UserPrincipalName,
         [Parameter(Mandatory = $true, ParameterSetName = 'ByLicense')]
@@ -1353,8 +1365,11 @@ function Remove-UserMsolAccountSku {
         [switch]$ShowErrorDetails
     )
 
-    Set-ProgressAndInfoPreferences
-    try {
+    begin {
+        Set-ProgressAndInfoPreferences
+    }
+
+    process {
         $GraphConnection = Test-MgGraphConnection
         if (-not $GraphConnection) {
             Add-EmptyLine
@@ -1525,7 +1540,8 @@ function Remove-UserMsolAccountSku {
             Write-NCMessage "License removal failed for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
         }
     }
-    finally {
+
+    end {
         Restore-ProgressAndInfoPreferences
     }
 }

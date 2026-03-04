@@ -247,7 +247,7 @@ function Revoke-UserSessions {
     .EXAMPLE
         Revoke-UserSessions -UserPrincipalName user1@contoso.com,user2@contoso.com
     .EXAMPLE
-        Revoke-UserSessions -All -Exclude breakglass@contoso.com -Confirm:$false
+        Revoke-UserSessions -All -Exclude user@contoso.com -Confirm:$false
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
