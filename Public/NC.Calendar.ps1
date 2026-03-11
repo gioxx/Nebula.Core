@@ -20,7 +20,7 @@ function Copy-OoOMessage {
     .PARAMETER PassThru
         Emit the updated auto-reply configuration for the destination mailbox.
     .EXAMPLE
-        Copy-OoOMessage -SourceMailbox source@contoso.com -DestinationMailbox destination@contoso.com
+        Copy-OoOMessage -SourceMailbox user1@contoso.com -DestinationMailbox user2@contoso.com
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
     param(
@@ -120,7 +120,7 @@ function Export-CalendarPermission {
     .PARAMETER PassThru
         Emit the collected permission objects in addition to writing the CSV report.
     .EXAMPLE
-        Export-CalendarPermission -SourceMailbox info@contoso.com -OutputFolder C:\Temp
+        Export-CalendarPermission -SourceMailbox user@contoso.com -OutputFolder C:\Temp
     .EXAMPLE
         Export-CalendarPermission -SourceDomain contoso.com -PassThru
     #>
@@ -457,9 +457,9 @@ function Set-OoO {
     .PARAMETER PassThru
         Emit the updated auto-reply configuration.
     .EXAMPLE
-        Set-OoO -SourceMailbox info@contoso.com -InternalMessage "<p>Back on Monday</p>" -ExternalMessage "<p>Back soon</p>"
+        Set-OoO -SourceMailbox user@contoso.com -InternalMessage "<p>Back on Monday</p>" -ExternalMessage "<p>Back soon</p>"
     .EXAMPLE
-        Set-OoO -SourceMailbox info@contoso.com -Disable
+        Set-OoO -SourceMailbox user@contoso.com -Disable
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium', DefaultParameterSetName = 'Enable')]
     param(

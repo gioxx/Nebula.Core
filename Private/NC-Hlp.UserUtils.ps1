@@ -57,6 +57,8 @@ function Find-UserRecipient {
     .DESCRIPTION
         Given a User Principal Name (UPN) or identifier, this function queries Exchange to find the recipient.
         It returns the primary SMTP address, ensuring a complete e-mail format.
+        If direct lookup fails, it tries Microsoft Graph lookups for common short identifiers
+        (for example mailNickname/SamAccountName/displayName) and uses the first match.
     .PARAMETER UserPrincipalName
         The UPN or identifier of the user recipient to resolve.
     .EXAMPLE
@@ -85,6 +87,47 @@ function Find-UserRecipient {
             }
         }
         catch {
+            # Try Graph search for short identifiers like alias/SamAccountName/displayName.
+            $escaped = $UserPrincipalName.Replace("'", "''")
+            $queries = @()
+            if ($UserPrincipalName -match '@') {
+                $queries += "userPrincipalName eq '$escaped'"
+                $queries += "mail eq '$escaped'"
+            }
+            else {
+                $queries += "mailNickname eq '$escaped'"
+                $queries += "onPremisesSamAccountName eq '$escaped'"
+                $queries += "displayName eq '$escaped'"
+                $queries += "startswith(userPrincipalName,'$escaped@')"
+            }
+
+            $matches = @()
+            foreach ($query in $queries) {
+                try {
+                    $matches = @(Get-MgUser -Filter $query -All -Property Id,UserPrincipalName,Mail,DisplayName -ErrorAction Stop)
+                    if ($matches.Count -gt 0) {
+                        break
+                    }
+                }
+                catch {
+                    # Ignore unsupported/failed filter attempts and continue with the next strategy.
+                    continue
+                }
+            }
+
+            if ($matches.Count -gt 0) {
+                $selected = $matches | Sort-Object UserPrincipalName | Select-Object -First 1
+                if ($matches.Count -gt 1) {
+                    $selectedLabel = if ($selected.UserPrincipalName) { $selected.UserPrincipalName } else { $selected.DisplayName }
+                    Write-NCMessage "Multiple users matched '$UserPrincipalName'. Using the first result ($selectedLabel)." -Level WARNING
+                }
+
+                $fallbackUpn = if ($selected.Mail) { $selected.Mail } else { $selected.UserPrincipalName }
+                if ($fallbackUpn) {
+                    return $fallbackUpn
+                }
+            }
+
             Write-NCMessage "Recipient not available or not found ($UserPrincipalName). $($_.Exception.Message)" -Level ERROR
         }
 

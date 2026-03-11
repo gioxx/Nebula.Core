@@ -18,9 +18,9 @@ function Connect-EOL {
     .PARAMETER PassThru
         Return the Connect-ExchangeOnline result (session info) to the caller.
     .EXAMPLE
-        Connect-EOL -UserPrincipalName 'admin@tenant.onmicrosoft.com'
+        Connect-EOL -UserPrincipalName 'admin@contoso.com'
     .EXAMPLE
-        'admin@tenant.onmicrosoft.com' | Connect-EOL -DelegatedOrganization 'customer.onmicrosoft.com' -PassThru
+        'admin@contoso.com' | Connect-EOL -DelegatedOrganization 'customer.contoso.com' -PassThru
     #>
     [CmdletBinding()]
     param(
@@ -105,7 +105,7 @@ function Connect-Nebula {
         [switch]$SkipGraph
     )
 
-    Write-NCMessage "Welcome to Nebula.`nConnecting, please wait ..." -Level INFO
+    Write-NCMessage "Welcome to Nebula! Connecting, please wait ..." -Level INFO
 
     try {
         $checkUpdates = $NCVars.CheckUpdatesOnConnect
