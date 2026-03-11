@@ -105,7 +105,7 @@ function Connect-Nebula {
         [switch]$SkipGraph
     )
 
-    Write-NCMessage "Welcome to Nebula.`nConnecting, please wait ..." -Level INFO
+    Write-NCMessage "Welcome to Nebula! Connecting, please wait ..." -Level INFO
 
     try {
         $checkUpdates = $NCVars.CheckUpdatesOnConnect
