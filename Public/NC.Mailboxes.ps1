@@ -921,7 +921,7 @@ function New-SharedMailbox {
 
     try {
         New-Mailbox -Name $SharedMailboxDisplayName -Alias $SharedMailboxAlias -Shared -PrimarySmtpAddress $SharedMailboxSMTPAddress -ErrorAction Stop
-        Write-NCMessage ("Set outgoing e-mail copy save for {0}" -f $SharedMailboxSMTPAddress) -Level INFO
+        Write-NCMessage ("`nSet outgoing e-mail copy save for {0}" -f $SharedMailboxSMTPAddress) -Level INFO
         Set-Mailbox -Identity $SharedMailboxSMTPAddress -MessageCopyForSentAsEnabled $true
         Set-Mailbox -Identity $SharedMailboxSMTPAddress -MessageCopyForSendOnBehalfEnabled $true
         Set-Mailbox -Identity $SharedMailboxSMTPAddress -RetainDeletedItemsFor 30
