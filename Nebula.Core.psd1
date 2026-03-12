@@ -120,7 +120,7 @@
 ReleaseNotes = @'
 - Change:
 - Fix:
-- Improve:
+- Improve: Added positional identifier support for Entra group member cmdlets (`Add/Get/Remove-EntraGroupDevice` and `Add/Get/Remove-EntraGroupUser`), so `DeviceIdentifier` / `UserIdentifier` can be passed without explicit parameter names.
 - New:
 '@
         }

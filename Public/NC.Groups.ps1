@@ -34,7 +34,8 @@ function Add-EntraGroupDevice {
         [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Device', 'DeviceName', 'Id', 'DeviceId', 'Name')]
         [string[]]$DeviceIdentifier,
 
@@ -206,7 +207,8 @@ function Add-EntraGroupUser {
         [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('User', 'UPN', 'Mail', 'Id', 'UserId')]
         [string[]]$UserIdentifier,
 
@@ -1303,7 +1305,7 @@ function Get-EntraGroupDevice {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Device', 'DeviceName', 'Id', 'DeviceId', 'Name', 'Identity', 'DisplayName')]
         [string]$DeviceIdentifier,
         [switch]$TreatInputAsId,
@@ -1545,7 +1547,7 @@ function Get-EntraGroupUser {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('User', 'UPN', 'Mail', 'Id', 'UserId', 'DisplayName', 'Identity')]
         [string]$UserIdentifier,
         [switch]$TreatInputAsId,
@@ -1893,8 +1895,8 @@ function Remove-EntraGroupDevice {
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Device', 'DeviceName', 'Id', 'DeviceId', 'Name')]
         [string[]]$DeviceIdentifier,
 
@@ -2149,8 +2151,8 @@ function Remove-EntraGroupUser {
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('User', 'UPN', 'Mail', 'Id', 'UserId')]
         [string[]]$UserIdentifier,
 
