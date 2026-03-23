@@ -9,6 +9,9 @@
     PowerShellVersion    = '5.1'
     CompatiblePSEditions = @('Desktop', 'Core')
     RequiredAssemblies   = @()
+    FormatsToProcess     = @(
+        'Formats\Nebula.Core.Format.ps1xml'
+    )
     FunctionsToExport    = @(
         'Add-EntraGroupDevice',
         'Add-EntraGroupUser',
@@ -37,6 +40,8 @@
         'Get-EntraGroupDevice',
         'Get-EntraGroupMembers',
         'Get-EntraGroupUser',
+        'Get-IntuneProfileAssignmentsByGroup',
+        'Get-IntuneProfileAssignmentsRaw',
         'Get-MboxAlias',
         'Get-MboxLastMessageTrace',
         'Get-MboxPermission',
@@ -54,10 +59,8 @@
         'Get-UserGroups',
         'Get-UserLastSeen',
         'Get-UserMsolAccountSku',
-        'Set-MboxMrmCleanup',
         'Move-UserMsolAccountSku',
         'New-SharedMailbox',
-        'Search-MboxCutoffWindow',
         'Remove-EntraGroupDevice',
         'Remove-EntraGroupUser',
         'Remove-MboxAlias',
@@ -65,7 +68,13 @@
         'Remove-UserMsolAccountSku',
         'Revoke-UserSessions',
         'Search-EntraGroup',
+        'Search-IntuneObjectById',
+        'Search-IntuneProfileLocation',
+        'Search-IntuneProfileLocation',
+        'Search-IntuneRawEndpoint',
+        'Search-MboxCutoffWindow',
         'Set-MboxLanguage',
+        'Set-MboxMrmCleanup',
         'Set-MboxRulesQuota',
         'Set-OoO',
         'Set-SharedMboxCopyForSent',
@@ -118,10 +127,13 @@
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/Assets/icon.png'
 ReleaseNotes = @'
-- Change:
-- Fix:
-- Improve: Added positional identifier support for Entra group member cmdlets (`Add/Get/Remove-EntraGroupDevice` and `Add/Get/Remove-EntraGroupUser`), so `DeviceIdentifier` / `UserIdentifier` can be passed without explicit parameter names.
-- New:
+- Change: Added resilient Exchange Online connection handling in `Connect-EOL`, including optional `-DisableWAM`, `-Device`, `-NoWamFallback`, and automatic retry without WAM after broker-related sign-in failures.
+- Change: Refactored Intune group usage logic into dedicated private helpers to keep `NC.Intune.ps1` focused on public cmdlets.
+- Fix: Quarantine workflows now benefit from the improved EXO reconnection path when WAM/MSAL broker state breaks after idle, lock, or sleep.
+- Fix: Reworked `Get-IntuneProfileAssignmentsByGroup` to correctly report Entra group usage across Intune device configurations, settings catalog policies, and app assignments.
+- Improve: Added support for nested group matching, diagnostic output, mixed include/exclude aggregation, and console highlighting for exclusion rows in Intune group usage results.
+- Improve: Updated `nebula-core\usage` connection and quarantine documentation to document EXO WAM fallback behavior and recovery options.
+- Improve: Updated `nebula-core\usage` documentation for the current Intune coverage and parameters.
 '@
         }
     }

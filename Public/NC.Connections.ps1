@@ -15,6 +15,12 @@ function Connect-EOL {
         UPN/e-mail used for the authentication prompt. Defaults to the current user.
     .PARAMETER DelegatedOrganization
         Optional customer tenant to target when running in delegated admin scenarios.
+    .PARAMETER DisableWAM
+        Disable Web Account Manager (WAM) for the Exchange Online sign-in flow.
+    .PARAMETER Device
+        Use device-code authentication instead of the default interactive flow.
+    .PARAMETER NoWamFallback
+        Do not automatically retry with -DisableWAM when the default WAM-based flow fails.
     .PARAMETER PassThru
         Return the Connect-ExchangeOnline result (session info) to the caller.
     .EXAMPLE
@@ -28,6 +34,9 @@ function Connect-EOL {
         [Alias('UPN', 'User')]
         [string]$UserPrincipalName,
         [string]$DelegatedOrganization,
+        [switch]$DisableWAM,
+        [switch]$Device,
+        [switch]$NoWamFallback,
         [switch]$PassThru
     )
 
@@ -63,8 +72,42 @@ function Connect-EOL {
             $connectParams.DelegatedOrganization = $DelegatedOrganization
         }
 
-        Write-NCMessage "Connecting to Exchange Online as $UserPrincipalName ..." -Level INFO
-        $session = Connect-ExchangeOnline @connectParams
+        if ($DisableWAM.IsPresent) {
+            $connectParams.DisableWAM = $true
+        }
+
+        if ($Device.IsPresent) {
+            $connectParams.Device = $true
+        }
+
+        $authMode = if ($Device.IsPresent) {
+            'device code'
+        }
+        elseif ($DisableWAM.IsPresent) {
+            'interactive without WAM'
+        }
+        else {
+            'interactive (WAM)'
+        }
+
+        Write-NCMessage "Connecting to Exchange Online as $UserPrincipalName using $authMode ..." -Level INFO
+
+        try {
+            $session = Connect-ExchangeOnline @connectParams
+        }
+        catch {
+            $shouldRetryWithoutWam = (-not $DisableWAM.IsPresent) -and (-not $Device.IsPresent) -and (-not $NoWamFallback.IsPresent)
+            $exceptionText = $_ | Out-String
+
+            if ($shouldRetryWithoutWam -and $exceptionText -match '(?i)(RuntimeBroker|Web Account Manager|\bWAM\b|Error Acquiring Token|NullReferenceException)') {
+                Write-NCMessage "Exchange Online sign-in via WAM failed. Retrying with WAM disabled ..." -Level WARNING
+                $connectParams.DisableWAM = $true
+                $session = Connect-ExchangeOnline @connectParams
+            }
+            else {
+                throw
+            }
+        }
 
         if ($PassThru.IsPresent) {
             return $session

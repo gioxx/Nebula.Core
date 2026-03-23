@@ -29,7 +29,11 @@ function Add-EmptyLine {
     )
 
     try {
-        Write-Output ""
+        $hostMsg = [HostInformationMessage]@{
+            Message   = ''
+            NoNewline = $false
+        }
+        Write-Information -MessageData $hostMsg -InformationAction Continue
     }
     catch {
         # Ignore
