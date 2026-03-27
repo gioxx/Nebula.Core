@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: (Private) Module's Utilities =========================================================================================================
+# Nebula.Core: (Private) Module helpers =============================================================================================================
 
 function Format-OutputString {
     <#

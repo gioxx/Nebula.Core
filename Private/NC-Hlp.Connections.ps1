@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: (Private) Connections ================================================================================================================
+# Nebula.Core: (Private) Connections helpers ========================================================================================================
 
 function Test-EOLConnection {
     <#

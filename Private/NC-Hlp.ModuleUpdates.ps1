@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: Module update checks =================================================================================================================
+# Nebula.Core: (Private) Module update helpers ======================================================================================================
 
 function Test-NebulaModuleUpdates {
     <#

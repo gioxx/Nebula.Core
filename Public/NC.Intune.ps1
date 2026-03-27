@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: Intune ===============================================================================================================================
+# Nebula.Core: Intune helpers =======================================================================================================================
 
 function Get-IntuneProfileAssignmentsByGroup {
     [CmdletBinding(DefaultParameterSetName = 'ByName')]
@@ -55,142 +55,6 @@ function Search-IntuneProfileLocation {
 
     begin {
         $graphConnected = $null
-
-        function Invoke-NCGraphCollectionRequestLocal {
-            [CmdletBinding()]
-            param(
-                [Parameter(Mandatory = $true)]
-                [string]$Uri
-            )
-
-            $items = [System.Collections.Generic.List[object]]::new()
-            $nextUri = $Uri
-
-            while (-not [string]::IsNullOrWhiteSpace($nextUri)) {
-                $response = Invoke-MgGraphRequest -Method GET -Uri $nextUri -ErrorAction Stop
-
-                $pageItems = @()
-                if ($response -is [System.Collections.IDictionary]) {
-                    if ($response.Contains('value')) {
-                        $value = $response['value']
-                        if ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) {
-                            foreach ($entry in $value) {
-                                if ($null -ne $entry) { $pageItems += $entry }
-                            }
-                        }
-                        elseif ($null -ne $value) {
-                            $pageItems = @($value)
-                        }
-                    }
-                    elseif (($response.Contains('id') -or $response.Contains('Id')) -and $null -ne $response) {
-                        $pageItems = @($response)
-                    }
-                }
-                elseif ($response -is [System.Array]) {
-                    $pageItems = @($response)
-                }
-                elseif ($response.PSObject.Properties.Name -contains 'value') {
-                    $value = $response.value
-                    if ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) {
-                        foreach ($entry in $value) {
-                            if ($null -ne $entry) { $pageItems += $entry }
-                        }
-                    }
-                    elseif ($null -ne $value) {
-                        $pageItems = @($value)
-                    }
-                }
-                elseif ((($response.PSObject.Properties.Name -contains 'id') -or ($response.PSObject.Properties.Name -contains 'Id')) -and $null -ne $response) {
-                    $pageItems = @($response)
-                }
-
-                foreach ($item in $pageItems) {
-                    $items.Add($item) | Out-Null
-                }
-
-                $nextLink = $null
-                if ($response -is [System.Collections.IDictionary]) {
-                    if ($response.Contains('@odata.nextLink')) {
-                        $nextLink = [string]$response['@odata.nextLink']
-                    }
-                }
-                else {
-                    $nextLinkProperty = $response.PSObject.Properties['@odata.nextLink']
-                    if ($nextLinkProperty) {
-                        $nextLink = [string]$nextLinkProperty.Value
-                    }
-                }
-
-                if (-not [string]::IsNullOrWhiteSpace($nextLink)) {
-                    $nextUri = $nextLink
-                }
-                else {
-                    $nextUri = $null
-                }
-            }
-
-            return $items.ToArray()
-        }
-
-        function Get-NCIntuneItemName {
-            [CmdletBinding()]
-            param(
-                [Parameter(Mandatory = $false)]
-                $Item
-            )
-
-            if (-not $Item) { return $null }
-
-            foreach ($propertyName in @('displayName', 'DisplayName', 'name', 'Name')) {
-                $property = $Item.PSObject.Properties[$propertyName]
-                if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-                    return [string]$property.Value
-                }
-            }
-
-            return $null
-        }
-
-        function Get-NCIntuneItemId {
-            [CmdletBinding()]
-            param(
-                [Parameter(Mandatory = $false)]
-                $Item
-            )
-
-            if (-not $Item) { return $null }
-
-            foreach ($propertyName in @('id', 'Id')) {
-                $property = $Item.PSObject.Properties[$propertyName]
-                if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-                    return [string]$property.Value
-                }
-            }
-
-            return $null
-        }
-
-        function Get-NCIntuneItemODataType {
-            [CmdletBinding()]
-            param(
-                [Parameter(Mandatory = $false)]
-                $Item
-            )
-
-            if (-not $Item) { return $null }
-
-            $odataProperty = $Item.PSObject.Properties['@odata.type']
-            if ($odataProperty -and -not [string]::IsNullOrWhiteSpace([string]$odataProperty.Value)) {
-                return [string]$odataProperty.Value
-            }
-
-            $additionalProperties = $Item.PSObject.Properties['AdditionalProperties']
-            if ($additionalProperties -and $additionalProperties.Value -and $additionalProperties.Value.ContainsKey('@odata.type')) {
-                return [string]$additionalProperties.Value['@odata.type']
-            }
-
-            return $null
-        }
     }
 
     process {
@@ -236,7 +100,7 @@ function Search-IntuneProfileLocation {
 
             foreach ($endpointUri in $endpoint.Uris) {
                 try {
-                    $items = @(Invoke-NCGraphCollectionRequestLocal -Uri $endpointUri)
+                    $items = @(Invoke-NCGraphCollectionRequest -Uri $endpointUri)
                     $queried = $true
                     break
                 }
@@ -296,640 +160,260 @@ function Search-IntuneProfileLocation {
     }
 }
 
-function Search-IntuneRawEndpoint {
+function Export-IntuneAppInventory {
     <#
     .SYNOPSIS
-        Probes raw Intune Microsoft Graph endpoints and filters results by profile name.
+        Reports Intune-managed devices that have matching applications installed.
     .DESCRIPTION
-        Connects to Microsoft Graph, queries a curated set of Intune deviceManagement endpoints,
-        and returns any items whose common identifying properties or object ID match the provided search text.
-        Use this as a low-level discovery tool when a profile is not found by the higher-level
-        Intune helper functions.
-    .PARAMETER SearchText
-        Text to search for in the returned profile names.
-    .PARAMETER Endpoint
-        Optional custom endpoint URIs to probe. When omitted, a built-in curated list is used.
-    .PARAMETER Exact
-        Match the profile name exactly instead of using a contains search.
-    .PARAMETER GridView
-        Show the results in Out-GridView instead of returning objects.
+        Connects to Microsoft Graph, scans managed devices for detected apps, and can optionally
+        enrich the report with deployed app device status information. The output is report-friendly
+        and can also be exported to CSV and/or JSON.
+    .PARAMETER ApplicationName
+        Application name or wildcard pattern to match. Accepts pipeline input.
+    .PARAMETER MinimumVersion
+        Minimum application version to keep in the report.
+    .PARAMETER FilterByType
+        Optional app type filter when deployed app data is included.
+    .PARAMETER FilterByPlatform
+        Optional device platform filter.
+    .PARAMETER OnlySuccessfulInstalls
+        When deployed app data is included, keep only successful installs.
+    .PARAMETER IncludeDeployedApps
+        Also query deployed app device statuses in addition to detected apps.
+    .PARAMETER MaxDevices
+        Maximum number of devices to process. Use 0 for all devices.
+    .PARAMETER OutputCsvPath
+        Optional CSV export path.
+    .PARAMETER OutputJsonPath
+        Optional JSON export path.
+    .PARAMETER PivotSummary
+        Print a per-app summary after the report is built.
     .EXAMPLE
-        Search-IntuneRawEndpoint -SearchText "iOS - Wi-Fi M-Smartphone"
+        Export-IntuneAppInventory -ApplicationName "TeamViewer"
     .EXAMPLE
-        Search-IntuneRawEndpoint -SearchText "Wi-Fi" -GridView
-    .EXAMPLE
-        Search-IntuneRawEndpoint -SearchText "Wi-Fi" -Endpoint 'beta/deviceManagement/configurationPolicies?$top=100'
+        Export-IntuneAppInventory -ApplicationName "Microsoft*" -IncludeDeployedApps -FilterByType Win32 -OutputCsvPath "apps.csv"
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Alias('Name', 'DisplayName', 'ProfileName', 'Query')]
-        [string]$SearchText,
-        [string[]]$Endpoint,
-        [switch]$Exact,
-        [switch]$GridView
+        [Alias('SearchText', 'Name', 'DisplayName', 'Query', 'AppName')]
+        [string]$ApplicationName,
+
+        [string]$MinimumVersion,
+
+        [ValidateSet('Win32', 'Store', 'LOB', 'Web', 'iOS', 'Android', 'macOS', 'All')]
+        [string]$FilterByType = 'All',
+
+        [ValidateSet('Windows', 'iOS', 'Android', 'macOS', 'All')]
+        [string]$FilterByPlatform = 'All',
+
+        [switch]$OnlySuccessfulInstalls,
+        [switch]$IncludeDeployedApps,
+
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$MaxDevices = 0,
+
+        [string]$OutputCsvPath,
+        [string]$OutputJsonPath,
+        [switch]$PivotSummary
     )
 
     begin {
         $graphConnected = $null
-
-        function Invoke-NCRawGraphCollectionRequest {
-            [CmdletBinding()]
-            param(
-                [Parameter(Mandatory = $true)]
-                [string]$Uri
-            )
-
-            $items = [System.Collections.Generic.List[object]]::new()
-            $nextUri = $Uri
-
-            while (-not [string]::IsNullOrWhiteSpace($nextUri)) {
-                $response = Invoke-MgGraphRequest -Method GET -Uri $nextUri -ErrorAction Stop
-
-                $pageItems = @()
-                if ($response -is [System.Collections.IDictionary]) {
-                    if ($response.Contains('value')) {
-                        $value = $response['value']
-                        if ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) {
-                            foreach ($entry in $value) {
-                                if ($null -ne $entry) { $pageItems += $entry }
-                            }
-                        }
-                        elseif ($null -ne $value) {
-                            $pageItems = @($value)
-                        }
-                    }
-                    elseif (($response.Contains('id') -or $response.Contains('Id')) -and $null -ne $response) {
-                        $pageItems = @($response)
-                    }
-                }
-                elseif ($response -is [System.Array]) {
-                    $pageItems = @($response)
-                }
-                elseif ($response.PSObject.Properties.Name -contains 'value') {
-                    $value = $response.value
-                    if ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) {
-                        foreach ($entry in $value) {
-                            if ($null -ne $entry) { $pageItems += $entry }
-                        }
-                    }
-                    elseif ($null -ne $value) {
-                        $pageItems = @($value)
-                    }
-                }
-                elseif ((($response.PSObject.Properties.Name -contains 'id') -or ($response.PSObject.Properties.Name -contains 'Id')) -and $null -ne $response) {
-                    $pageItems = @($response)
-                }
-
-                foreach ($item in $pageItems) {
-                    $items.Add($item) | Out-Null
-                }
-
-                $nextLink = $null
-                if ($response -is [System.Collections.IDictionary]) {
-                    if ($response.Contains('@odata.nextLink')) {
-                        $nextLink = [string]$response['@odata.nextLink']
-                    }
-                }
-                else {
-                    $nextLinkProperty = $response.PSObject.Properties['@odata.nextLink']
-                    if ($nextLinkProperty) {
-                        $nextLink = [string]$nextLinkProperty.Value
-                    }
-                }
-
-                if (-not [string]::IsNullOrWhiteSpace($nextLink)) {
-                    $nextUri = $nextLink
-                }
-                else {
-                    $nextUri = $null
-                }
-            }
-
-            return $items.ToArray()
-        }
-
-        function Get-NCRawItemName {
-            [CmdletBinding()]
-            param(
-                [Parameter(Mandatory = $false)]
-                $Item
-            )
-
-            if (-not $Item) { return $null }
-
-            foreach ($propertyName in @('displayName', 'DisplayName', 'name', 'Name')) {
-                $property = $Item.PSObject.Properties[$propertyName]
-                if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-                    return [string]$property.Value
-                }
-            }
-
-            return $null
-        }
-
-        function Get-NCRawItemId {
-            [CmdletBinding()]
-            param(
-                [Parameter(Mandatory = $false)]
-                $Item
-            )
-
-            if (-not $Item) { return $null }
-
-            foreach ($propertyName in @('id', 'Id')) {
-                $property = $Item.PSObject.Properties[$propertyName]
-                if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-                    return [string]$property.Value
-                }
-            }
-
-            return $null
-        }
-
-        function Get-NCRawItemODataType {
-            [CmdletBinding()]
-            param(
-                [Parameter(Mandatory = $false)]
-                $Item
-            )
-
-            if (-not $Item) { return $null }
-
-            $odataProperty = $Item.PSObject.Properties['@odata.type']
-            if ($odataProperty -and -not [string]::IsNullOrWhiteSpace([string]$odataProperty.Value)) {
-                return [string]$odataProperty.Value
-            }
-
-            $additionalProperties = $Item.PSObject.Properties['AdditionalProperties']
-            if ($additionalProperties -and $additionalProperties.Value -and $additionalProperties.Value.ContainsKey('@odata.type')) {
-                return [string]$additionalProperties.Value['@odata.type']
-            }
-
-            return $null
-        }
-
-        function Get-NCRawSearchFields {
-            [CmdletBinding()]
-            param(
-                [Parameter(Mandatory = $false)]
-                $Item
-            )
-
-            $fields = [System.Collections.Generic.List[object]]::new()
-            if (-not $Item) { return $fields.ToArray() }
-
-            foreach ($propertyName in @('id', 'Id', 'displayName', 'DisplayName', 'name', 'Name', 'description', 'Description', 'networkName', 'NetworkName', 'ssid', 'Ssid')) {
-                $property = $Item.PSObject.Properties[$propertyName]
-                if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-                    $fields.Add([pscustomobject]@{
-                            Property = $propertyName
-                            Value    = [string]$property.Value
-                        }) | Out-Null
-                }
-            }
-
-            return $fields.ToArray()
-        }
     }
 
     process {
-        if ($null -eq $graphConnected) {
-            $graphConnected = Test-MgGraphConnection -Scopes @('DeviceManagementConfiguration.Read.All', 'DeviceManagementApps.Read.All', 'Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
-            if (-not $graphConnected) {
-                Add-EmptyLine
-                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+        try {
+            if ($null -eq $graphConnected) {
+                $graphConnected = Test-MgGraphConnection -Scopes @('DeviceManagementManagedDevices.Read.All', 'DeviceManagementApps.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+                if (-not $graphConnected) {
+                    Add-EmptyLine
+                    Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+                    return
+                }
+
+                if (-not (Get-Command -Name Invoke-MgGraphRequest -ErrorAction SilentlyContinue)) {
+                    Write-NCMessage "Invoke-MgGraphRequest is not available in the current Microsoft Graph session." -Level ERROR
+                    return
+                }
+            }
+
+            if ([string]::IsNullOrWhiteSpace($ApplicationName)) {
+                Write-NCMessage "ApplicationName cannot be empty." -Level WARNING
                 return
             }
 
-            if (-not (Get-Command -Name Invoke-MgGraphRequest -ErrorAction SilentlyContinue)) {
-                Write-NCMessage "Invoke-MgGraphRequest is not available in the current Microsoft Graph session." -Level ERROR
-                return
+            Write-Information "Starting app inventory reporting..." -InformationAction Continue
+
+            # 1) Pull devices
+            $devicesUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices"
+            if ($MaxDevices -gt 0) {
+                $devicesUri += "?`$top=$MaxDevices"
             }
-        }
-
-        if ([string]::IsNullOrWhiteSpace($SearchText)) {
-            Write-NCMessage "SearchText cannot be empty." -Level WARNING
-            return
-        }
-
-        $endpointsToProbe = if ($Endpoint -and $Endpoint.Count -gt 0) {
-            @($Endpoint)
-        }
-        else {
-            @(
-                'v1.0/deviceManagement/deviceConfigurations?$top=100',
-                'beta/deviceManagement/deviceConfigurations?$top=100',
-                'v1.0/deviceManagement/configurationPolicies?$top=100',
-                'beta/deviceManagement/configurationPolicies?$top=100',
-                'beta/deviceManagement/groupPolicyConfigurations?$top=100',
-                'beta/deviceManagement/resourceAccessProfiles?$top=100',
-                'v1.0/deviceManagement/deviceCompliancePolicies?$top=100',
-                'v1.0/deviceManagement/deviceEnrollmentConfigurations?$top=100',
-                'beta/deviceManagement/deviceHealthScripts?$top=100',
-                'beta/deviceManagement/deviceManagementScripts?$top=100',
-                'beta/deviceManagement/deviceShellScripts?$top=100',
-                'beta/deviceManagement/intent?$top=100',
-                'beta/deviceManagement/templates?$top=100',
-                'beta/deviceAppManagement/mobileApps?$top=100'
-            )
-        }
-
-        $normalizedSearch = $SearchText.Trim()
-        $results = [System.Collections.Generic.List[object]]::new()
-
-        foreach ($endpointUri in $endpointsToProbe) {
-            $items = @()
-            try {
-                $items = @(Invoke-NCRawGraphCollectionRequest -Uri $endpointUri)
+            $devices = @(Invoke-NCGraphAllPagesCore -Uri $devicesUri)
+            if ($FilterByPlatform -ne "All") {
+                $devices = $devices | Where-Object { $_.operatingSystem -like "$FilterByPlatform*" }
             }
-            catch {
-                Write-NCMessage "Unable to query $endpointUri : $($_.Exception.Message)" -Level WARNING
-                continue
-            }
+            Write-Information "✓ Devices retrieved: $($devices.Count)" -InformationAction Continue
 
-            foreach ($item in $items) {
-                $itemName = Get-NCRawItemName -Item $item
-                $searchFields = @(Get-NCRawSearchFields -Item $item)
-                if ($searchFields.Count -eq 0) {
-                    continue
-                }
-
-                $matchedField = $null
-                foreach ($field in $searchFields) {
-                    $isMatch = if ($Exact.IsPresent) {
-                        $field.Value -eq $normalizedSearch
-                    }
-                    else {
-                        $field.Value -like "*$normalizedSearch*"
-                    }
-
-                    if ($isMatch) {
-                        $matchedField = $field
-                        break
-                    }
-                }
-
-                if (-not $matchedField) {
-                    continue
-                }
-
-                $results.Add([pscustomobject][ordered]@{
-                        'Profile Name'      = $itemName
-                        'Endpoint'          = $endpointUri
-                        'Matched Property'  = $matchedField.Property
-                        'Matched Value'     = $matchedField.Value
-                        'Profile Id'        = Get-NCRawItemId -Item $item
-                        'Profile Type'      = Get-NCRawItemODataType -Item $item
-                    }) | Out-Null
-            }
-        }
-
-        Add-EmptyLine
-        Write-NCMessage "Raw Intune matches found for '$normalizedSearch': $($results.Count)" -Level VERBOSE
-
-        if ($results.Count -eq 0) {
-            Write-NCMessage "No raw Intune matches found for '$normalizedSearch' in the probed endpoints." -Level WARNING
-            return
-        }
-
-        $sorted = $results | Sort-Object 'Profile Name', 'Endpoint' -Unique
-        if ($GridView.IsPresent) {
-            $sorted | Out-GridView -Title "Intune Raw Endpoint Search - $normalizedSearch"
-        }
-        else {
-            $sorted
-        }
-    }
-}
-
-function Search-IntuneObjectById {
-    <#
-    .SYNOPSIS
-        Probes raw Intune Microsoft Graph object endpoints by ID.
-    .DESCRIPTION
-        Connects to Microsoft Graph and attempts direct GET requests against a curated set of
-        Intune deviceManagement object endpoints using the provided ID. Use this when an object
-        does not appear in collection listings but you have an identifier from the Intune portal.
-    .PARAMETER Id
-        Object ID to probe across Intune Graph endpoints.
-    .PARAMETER Endpoint
-        Optional custom object endpoint prefixes. When omitted, a built-in curated list is used.
-    .PARAMETER GridView
-        Show the results in Out-GridView instead of returning objects.
-    .EXAMPLE
-        Search-IntuneObjectById -Id "cbbf1b23-3a92-47d6-974b-9d8295b9978d"
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Alias('ObjectId', 'ProfileId')]
-        [string]$Id,
-        [string[]]$Endpoint,
-        [switch]$GridView
-    )
-
-    process {
-        $graphConnected = Test-MgGraphConnection -Scopes @('DeviceManagementConfiguration.Read.All', 'DeviceManagementApps.Read.All', 'Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
-        if (-not $graphConnected) {
-            Add-EmptyLine
-            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
-            return
-        }
-
-        if (-not (Get-Command -Name Invoke-MgGraphRequest -ErrorAction SilentlyContinue)) {
-            Write-NCMessage "Invoke-MgGraphRequest is not available in the current Microsoft Graph session." -Level ERROR
-            return
-        }
-
-        if ([string]::IsNullOrWhiteSpace($Id)) {
-            Write-NCMessage "Id cannot be empty." -Level WARNING
-            return
-        }
-
-        $endpointPrefixes = if ($Endpoint -and $Endpoint.Count -gt 0) {
-            @($Endpoint)
-        }
-        else {
-            @(
-                'v1.0/deviceManagement/deviceConfigurations',
-                'beta/deviceManagement/deviceConfigurations',
-                'v1.0/deviceManagement/configurationPolicies',
-                'beta/deviceManagement/configurationPolicies',
-                'beta/deviceManagement/groupPolicyConfigurations',
-                'beta/deviceManagement/resourceAccessProfiles',
-                'v1.0/deviceManagement/deviceCompliancePolicies',
-                'v1.0/deviceManagement/deviceEnrollmentConfigurations',
-                'beta/deviceManagement/deviceHealthScripts',
-                'beta/deviceManagement/deviceManagementScripts',
-                'beta/deviceManagement/deviceShellScripts',
-                'beta/deviceManagement/intents',
-                'beta/deviceManagement/templates',
-                'beta/deviceAppManagement/mobileApps'
-            )
-        }
-
-        $results = [System.Collections.Generic.List[object]]::new()
-        foreach ($prefix in $endpointPrefixes) {
-            $uri = "$prefix/$Id"
-            try {
-                $response = Invoke-MgGraphRequest -Method GET -Uri $uri -ErrorAction Stop
-            }
-            catch {
-                continue
-            }
-
-            $name = $null
-            foreach ($propertyName in @('displayName', 'DisplayName', 'name', 'Name')) {
-                $property = $response.PSObject.Properties[$propertyName]
-                if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-                    $name = [string]$property.Value
-                    break
-                }
-            }
-
-            $odataType = $null
-            $odataProperty = $response.PSObject.Properties['@odata.type']
-            if ($odataProperty -and -not [string]::IsNullOrWhiteSpace([string]$odataProperty.Value)) {
-                $odataType = [string]$odataProperty.Value
-            }
-            else {
-                $additionalProperties = $response.PSObject.Properties['AdditionalProperties']
-                if ($additionalProperties -and $additionalProperties.Value -and $additionalProperties.Value.ContainsKey('@odata.type')) {
-                    $odataType = [string]$additionalProperties.Value['@odata.type']
-                }
-            }
-
-            $results.Add([pscustomobject][ordered]@{
-                    'Endpoint'     = $prefix
-                    'Profile Id'   = $Id
-                    'Profile Name' = $name
-                    'Profile Type' = $odataType
-                }) | Out-Null
-        }
-
-        Add-EmptyLine
-        Write-NCMessage "Direct Intune endpoint matches found for '$Id': $($results.Count)" -Level VERBOSE
-
-        if ($results.Count -eq 0) {
-            Write-NCMessage "No direct Intune endpoint matches found for '$Id' in the probed endpoints." -Level WARNING
-            return
-        }
-
-        $sorted = $results | Sort-Object 'Endpoint' -Unique
-        if ($GridView.IsPresent) {
-            $sorted | Out-GridView -Title "Intune Direct Object Search - $Id"
-        }
-        else {
-            $sorted
-        }
-    }
-}
-
-function Get-IntuneProfileAssignmentsRaw {
-    <#
-    .SYNOPSIS
-        Returns raw Intune profile assignments for a specific profile ID.
-    .DESCRIPTION
-        Probes multiple Microsoft Graph assignment endpoints for the provided profile ID and returns
-        the raw assignment target details. Use this to understand how Intune exposes assignment data
-        for profiles that do not behave as expected through higher-level helper functions.
-    .PARAMETER ProfileId
-        Intune profile ID to inspect.
-    .PARAMETER GridView
-        Show the results in Out-GridView instead of returning objects.
-    .EXAMPLE
-        Get-IntuneProfileAssignmentsRaw -ProfileId "00000000-0000-0000-0000-000000000000"
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Alias('Id', 'ObjectId')]
-        [string]$ProfileId,
-        [switch]$GridView
-    )
-
-    begin {
-        function Invoke-NCRawAssignmentCollectionRequest {
-            [CmdletBinding()]
-            param(
-                [Parameter(Mandatory = $true)]
-                [string]$Uri
-            )
-
-            $items = [System.Collections.Generic.List[object]]::new()
-            $nextUri = $Uri
-
-            while (-not [string]::IsNullOrWhiteSpace($nextUri)) {
-                $response = Invoke-MgGraphRequest -Method GET -Uri $nextUri -ErrorAction Stop
-
-                $pageItems = @()
-                if ($response -is [System.Collections.IDictionary]) {
-                    if ($response.Contains('value')) {
-                        $value = $response['value']
-                        if ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) {
-                            foreach ($entry in $value) {
-                                if ($null -ne $entry) { $pageItems += $entry }
+            # 2) Build app->device mapping from Detected Apps
+            $appDeviceMap = @{}
+            $processed = 0
+            foreach ($device in $devices) {
+                $processed++
+                Write-Progress -Activity "Reading Detected Apps" -Status "$processed / $($devices.Count)" -PercentComplete (($processed / [Math]::Max($devices.Count,1)) * 100)
+                try {
+                    $deviceAppsUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$($device.id)?`$expand=detectedApps"
+                    $deviceWithApps = Invoke-MgGraphRequest -Uri $deviceAppsUri -Method GET -ErrorAction Stop
+                    foreach ($app in ($deviceWithApps.detectedApps | Where-Object { $_.displayName -like $ApplicationName })) {
+                        if ($MinimumVersion -and $app.version) {
+                            if (-not (Test-NCIntuneVersionAtLeast -CurrentVersion $app.version -MinimumVersion $MinimumVersion)) {
+                                continue
                             }
                         }
-                        elseif ($null -ne $value) {
-                            $pageItems = @($value)
+                        $key = $app.displayName
+                        if (-not $appDeviceMap.ContainsKey($key)) {
+                            $appDeviceMap[$key] = [ordered]@{ Devices = @(); Versions = @{}; Publishers = @{} }
+                        }
+                        $appDeviceMap[$key].Devices += [ordered]@{
+                            DeviceId   = $device.id
+                            DeviceName = $device.deviceName
+                            Platform   = $device.operatingSystem
+                            User       = $device.userPrincipalName
+                            Version    = $app.version
+                            Publisher  = $app.publisher
+                            Source     = "DetectedApps"
+                        }
+                        if ($app.version)   { $appDeviceMap[$key].Versions[$app.version]   = ($appDeviceMap[$key].Versions[$app.version]   + 1) }
+                        if ($app.publisher) { $appDeviceMap[$key].Publishers[$app.publisher] = ($appDeviceMap[$key].Publishers[$app.publisher] + 1) }
+                    }
+                    Start-Sleep -Milliseconds 40
+                }
+                catch {
+                    if ($_.Exception.Message -like "*429*") {
+                        Write-Information "`nRate limit hit, waiting 60 seconds..." -InformationAction Continue
+                        Start-Sleep -Seconds 60
+                        $processed--
+                        continue
+                    }
+                    Write-Warning "Error reading apps for $($device.deviceName): $($_.Exception.Message)"
+                }
+            }
+            Write-Progress -Activity "Reading Detected Apps" -Completed
+
+            # 3) Optionally incorporate deployment statuses (broadens coverage)
+            if ($IncludeDeployedApps) {
+                Write-Information "Including deployed apps device status..." -InformationAction Continue
+                $appsUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps"
+                $allApps = @(Invoke-NCGraphAllPagesCore -Uri $appsUri)
+                foreach ($app in $allApps | Where-Object { $_.displayName -like $ApplicationName }) {
+                    $appType = Get-NCIntuneAppTypeFromODataType -ODataType $app.'@odata.type'
+                    if ($FilterByType -ne "All" -and $appType -ne $FilterByType) {
+                        continue
+                    }
+                    $statusUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($app.id)/deviceStatuses"
+                    $statuses = @(Invoke-NCGraphAllPagesCore -Uri $statusUri)
+                    foreach ($s in $statuses) {
+                        if ($OnlySuccessfulInstalls -and $s.installState -ne "installed") {
+                            continue
+                        }
+                        $d = $devices | Where-Object { $_.id -eq $s.deviceId } | Select-Object -First 1
+                        if (-not $d) {
+                            continue
+                        }
+                        $key = $app.displayName
+                        if (-not $appDeviceMap.ContainsKey($key)) {
+                            $appDeviceMap[$key] = [ordered]@{ Devices = @(); Versions = @{}; Publishers = @{} }
+                        }
+                        # Avoid duplicates for the same device/app when DetectedApps already included it
+                        $exists = $appDeviceMap[$key].Devices | Where-Object { $_.DeviceId -eq $d.id }
+                        if (-not $exists) {
+                            $appDeviceMap[$key].Devices += [ordered]@{
+                                DeviceId     = $d.id
+                                DeviceName   = $d.deviceName
+                                Platform     = $d.operatingSystem
+                                User         = $d.userPrincipalName
+                                Version      = $null
+                                Publisher    = $null
+                                InstallState = $s.installState
+                                AppType      = $appType
+                                Source       = "DeploymentStatus"
+                            }
                         }
                     }
-                    elseif (($response.Contains('id') -or $response.Contains('Id')) -and $null -ne $response) {
-                        $pageItems = @($response)
-                    }
-                }
-                elseif ($response -is [System.Array]) {
-                    $pageItems = @($response)
-                }
-                elseif ($response.PSObject.Properties.Name -contains 'value') {
-                    $value = $response.value
-                    if ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) {
-                        foreach ($entry in $value) {
-                            if ($null -ne $entry) { $pageItems += $entry }
-                        }
-                    }
-                    elseif ($null -ne $value) {
-                        $pageItems = @($value)
-                    }
-                }
-                elseif ((($response.PSObject.Properties.Name -contains 'id') -or ($response.PSObject.Properties.Name -contains 'Id')) -and $null -ne $response) {
-                    $pageItems = @($response)
-                }
-
-                foreach ($item in $pageItems) {
-                    $items.Add($item) | Out-Null
-                }
-
-                $nextLink = $null
-                if ($response -is [System.Collections.IDictionary]) {
-                    if ($response.Contains('@odata.nextLink')) {
-                        $nextLink = [string]$response['@odata.nextLink']
-                    }
-                }
-                else {
-                    $nextLinkProperty = $response.PSObject.Properties['@odata.nextLink']
-                    if ($nextLinkProperty) {
-                        $nextLink = [string]$nextLinkProperty.Value
-                    }
-                }
-
-                if (-not [string]::IsNullOrWhiteSpace($nextLink)) {
-                    $nextUri = $nextLink
-                }
-                else {
-                    $nextUri = $null
                 }
             }
 
-            return $items.ToArray()
-        }
-    }
-
-    process {
-        $graphConnected = Test-MgGraphConnection -Scopes @('DeviceManagementConfiguration.Read.All', 'Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
-        if (-not $graphConnected) {
-            Add-EmptyLine
-            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
-            return
-        }
-
-        if (-not (Get-Command -Name Invoke-MgGraphRequest -ErrorAction SilentlyContinue)) {
-            Write-NCMessage "Invoke-MgGraphRequest is not available in the current Microsoft Graph session." -Level ERROR
-            return
-        }
-
-        $assignmentEndpoints = @(
-            "beta/deviceManagement/deviceConfigurations('$ProfileId')/assignments?`$top=100",
-            "v1.0/deviceManagement/deviceConfigurations('$ProfileId')/assignments?`$top=100",
-            "beta/deviceManagement/configurationPolicies('$ProfileId')/assignments?`$top=100",
-            "beta/deviceManagement/groupPolicyConfigurations('$ProfileId')/assignments?`$top=100",
-            "beta/deviceManagement/resourceAccessProfiles('$ProfileId')/assignments?`$top=100"
-        )
-
-        $results = [System.Collections.Generic.List[object]]::new()
-        foreach ($endpoint in $assignmentEndpoints) {
-            $assignments = @()
-            try {
-                $assignments = @(Invoke-NCRawAssignmentCollectionRequest -Uri $endpoint)
-            }
-            catch {
-                continue
+            # 4) Optional app type filter when only Detected Apps were used
+            if (-not $IncludeDeployedApps -and $FilterByType -ne "All") {
+                Write-Verbose "FilterByType applies only when -IncludeDeployedApps is used. Skipping type filter for Detected Apps only."
             }
 
-            foreach ($assignment in $assignments) {
-                $target = $null
-                if ($assignment -is [System.Collections.IDictionary]) {
-                    foreach ($key in @('target', 'Target')) {
-                        if ($assignment.Contains($key) -and $null -ne $assignment[$key]) {
-                            $target = $assignment[$key]
-                            break
-                        }
+            # 5) Build flat rows
+            $rows = @()
+            foreach ($appName in $appDeviceMap.Keys) {
+                foreach ($dev in $appDeviceMap[$appName].Devices) {
+                    $rows += [pscustomobject]@{
+                        AppName      = $appName
+                        Version      = $dev.Version
+                        Publisher    = $dev.Publisher
+                        AppType      = $dev.AppType
+                        DeviceName   = $dev.DeviceName
+                        DeviceId     = $dev.DeviceId
+                        Platform     = $dev.Platform
+                        User         = $dev.User
+                        InstallState = $dev.InstallState
+                        Source       = $dev.Source
                     }
                 }
-                elseif ($assignment.PSObject.Properties['Target']) {
-                    $target = $assignment.Target
-                }
-                elseif ($assignment.PSObject.Properties['target']) {
-                    $target = $assignment.PSObject.Properties['target'].Value
-                }
-
-                $targetProps = @{}
-                if ($target) {
-                    foreach ($prop in $target.PSObject.Properties) {
-                        if ($prop.Name -ne 'AdditionalProperties') {
-                            $targetProps[$prop.Name] = $prop.Value
-                        }
-                    }
-
-                    $additionalTargetProperties = $target.PSObject.Properties['AdditionalProperties']
-                    if ($additionalTargetProperties -and $additionalTargetProperties.Value) {
-                        foreach ($key in $additionalTargetProperties.Value.Keys) {
-                            $targetProps[$key] = $additionalTargetProperties.Value[$key]
-                        }
-                    }
-                }
-
-                $assignmentId = $null
-                if ($assignment -is [System.Collections.IDictionary]) {
-                    foreach ($key in @('id', 'Id')) {
-                        if ($assignment.Contains($key) -and -not [string]::IsNullOrWhiteSpace([string]$assignment[$key])) {
-                            $assignmentId = [string]$assignment[$key]
-                            break
-                        }
-                    }
-                }
-                elseif ($assignment.PSObject.Properties['Id']) {
-                    $assignmentId = $assignment.Id
-                }
-                elseif ($assignment.PSObject.Properties['id']) {
-                    $assignmentId = $assignment.PSObject.Properties['id'].Value
-                }
-
-                $results.Add([pscustomobject][ordered]@{
-                        'Endpoint'         = $endpoint
-                        'Assignment Id'    = $assignmentId
-                        'Target Summary'   = ($targetProps.GetEnumerator() | Sort-Object Name | ForEach-Object { "{0}={1}" -f $_.Name, $_.Value }) -join '; '
-                        'Target Properties' = [pscustomobject]$targetProps
-                    }) | Out-Null
             }
-        }
 
-        Add-EmptyLine
-        Write-NCMessage "Raw assignment rows found for '$ProfileId': $($results.Count)" -Level VERBOSE
+            if (-not $rows -or $rows.Count -eq 0) {
+                Write-Warning "No matches found for '$ApplicationName' with the provided filters."
+                return
+            }
 
-        if ($results.Count -eq 0) {
-            Write-NCMessage "No raw assignments found for '$ProfileId' in the probed endpoints." -Level WARNING
-            return
-        }
+            # 6) Console table output
+            $rows | Sort-Object AppName, DeviceName | Format-Table -AutoSize AppName, Version, Publisher, AppType, DeviceName, Platform, User, InstallState, Source
 
-        $sorted = $results | Sort-Object 'Endpoint', 'Assignment Id' -Unique
-        if ($GridView.IsPresent) {
-            $sorted | Out-GridView -Title "Intune Raw Assignments - $ProfileId"
+            # 7) Optional exports
+            if ($OutputCsvPath) {
+                try {
+                    $rows | Sort-Object AppName, DeviceName | Export-Csv -Path $OutputCsvPath -NoTypeInformation -Encoding UTF8
+                    Write-Information "✓ CSV exported to $OutputCsvPath" -InformationAction Continue
+                }
+                catch {
+                    Write-Warning "Failed to export CSV: $($_.Exception.Message)"
+                }
+            }
+
+            if ($OutputJsonPath) {
+                try {
+                    $rows | ConvertTo-Json -Depth 5 | Out-File -FilePath $OutputJsonPath -Encoding UTF8
+                    Write-Information "✓ JSON exported to $OutputJsonPath" -InformationAction Continue
+                }
+                catch {
+                    Write-Warning "Failed to export JSON: $($_.Exception.Message)"
+                }
+            }
+
+            # 8) Optional per-app pivot/summary
+            if ($PivotSummary) {
+                Write-Host "`n=== SUMMARY BY APPLICATION ===" -ForegroundColor Cyan
+                $rows | Group-Object AppName | Sort-Object Count -Descending | ForEach-Object {
+                    $app = $_.Name
+                    $count = $_.Count
+                    $versions = ($_.Group | Where-Object Version | Group-Object Version | Sort-Object Count -Descending | ForEach-Object { "{0} ({1})" -f $_.Name, $_.Count }) -join ", "
+                    $publishers = ($_.Group | Where-Object Publisher | Group-Object Publisher | Sort-Object Count -Descending | Select-Object -First 3 | ForEach-Object { "{0} ({1})" -f $_.Name, $_.Count }) -join ", "
+                    "• {0}: {1} devices`n    Versions: {2}`n    Top publishers: {3}" -f $app, $count, ($(if ($versions) { $versions } else { 'n/a' })), ($(if ($publishers) { $publishers } else { 'n/a' }))
+                }
+            }
+
+            Write-Information "`n🎉 Reporting completed successfully!" -InformationAction Continue
         }
-        else {
-            $sorted
+        catch {
+            Write-Error "Script execution failed: $($_.Exception.Message)"
+            exit 1
         }
     }
 }

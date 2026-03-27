@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: (Private) Quarantine's utilities =====================================================================================================
+# Nebula.Core: (Private) Quarantine helpers =========================================================================================================
 
 function ConvertTo-QuarantineMessageId {
     <#

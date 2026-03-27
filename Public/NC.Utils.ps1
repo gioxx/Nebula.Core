@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: Utilities ============================================================================================================================
+# Nebula.Core: Utilities helpers ====================================================================================================================
 
 function Format-MessageIDsFromClipboard {
     <#

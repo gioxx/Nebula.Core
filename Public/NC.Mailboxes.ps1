@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: Mailboxes ============================================================================================================================
+# Nebula.Core: Mailboxes helpers ====================================================================================================================
 
 function Add-MboxAlias {
     <#

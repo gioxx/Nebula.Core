@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: Configuration bootstrap ==============================================================================================================
+# Nebula.Core: (Private) Configuration helpers ======================================================================================================
 
 function Import-NCConfigurationFile {
     [CmdletBinding()]

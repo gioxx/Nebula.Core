@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: Groups ===============================================================================================================================
+# Nebula.Core: Groups helpers =======================================================================================================================
 
 function Add-EntraGroupDevice {
     <#
@@ -1523,6 +1523,117 @@ function Search-EntraGroup {
         }
         else {
             $results | Sort-Object 'Group Name'
+        }
+    }
+}
+
+function Export-EmptyEntraGroups {
+    <#
+    .SYNOPSIS
+        Exports Entra groups that have no members.
+    .DESCRIPTION
+        Connects to Microsoft Graph, enumerates groups, checks membership for each one, and exports
+        the groups with zero members to CSV by default.
+    .PARAMETER CsvFolder
+        Destination folder for the CSV file when exporting the report.
+    .PARAMETER Csv
+        When present, export the report to CSV. Defaults to on.
+    .EXAMPLE
+        Export-EmptyEntraGroups
+    .EXAMPLE
+        Export-EmptyEntraGroups -CsvFolder 'C:\Reports\Groups'
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$CsvFolder,
+        [bool]$Csv = $true
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $report = [System.Collections.Generic.List[object]]::new()
+    }
+
+    process {
+        try {
+            if (-not (Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false)) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+                return
+            }
+
+            $groups = @(Get-MgGroup -All -ErrorAction Stop)
+            if (-not $groups -or $groups.Count -eq 0) {
+                Write-NCMessage "No Entra groups found." -Level WARNING
+                return
+            }
+
+            $totalGroups = $groups.Count
+            $processedCount = 0
+
+            foreach ($group in $groups) {
+                $processedCount++
+                $percentComplete = (($processedCount / $totalGroups) * 100)
+                Write-Progress -Activity "Checking $($group.DisplayName)" -Status "$processedCount of $totalGroups ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+
+                try {
+                    $members = @(Get-MgGroupMember -GroupId $group.Id -All -ErrorAction Stop)
+                }
+                catch {
+                    Write-NCMessage "Unable to read members for group '$($group.DisplayName)'. $($_.Exception.Message)" -Level WARNING
+                    continue
+                }
+
+                if ($members.Count -gt 0) {
+                    continue
+                }
+
+                $groupType = if ($group.GroupTypes -contains 'Unified' -and $group.SecurityEnabled) {
+                    'Microsoft 365 (security-enabled)'
+                }
+                elseif ($group.GroupTypes -contains 'Unified' -and -not $group.SecurityEnabled) {
+                    'Microsoft 365'
+                }
+                elseif (-not ($group.GroupTypes -contains 'Unified') -and $group.SecurityEnabled -and $group.MailEnabled) {
+                    'Mail-enabled security'
+                }
+                elseif (-not ($group.GroupTypes -contains 'Unified') -and $group.SecurityEnabled) {
+                    'Security'
+                }
+                elseif (-not ($group.GroupTypes -contains 'Unified') -and $group.MailEnabled) {
+                    'Distribution'
+                }
+                else {
+                    'N/A'
+                }
+
+                $report.Add([pscustomobject][ordered]@{
+                        DisplayName     = $group.DisplayName
+                        Id              = $group.Id
+                        GroupType       = $groupType
+                        MemberCount     = 0
+                        MailEnabled     = $group.MailEnabled
+                        SecurityEnabled = $group.SecurityEnabled
+                    }) | Out-Null
+            }
+
+            if ($Csv) {
+                $folder = if ($CsvFolder) { Test-Folder $CsvFolder } else { Test-Folder $null }
+                $csvPath = New-File "$folder\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-EmptyGroups.csv"
+                $report | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+                Write-NCMessage "Empty groups report exported to $csvPath." -Level SUCCESS
+                $csvPath
+            }
+            else {
+                $report | Sort-Object DisplayName
+            }
+        }
+        catch {
+            Write-NCMessage "Unable to export empty Entra groups. $($_.Exception.Message)" -Level ERROR
+        }
+        finally {
+            Write-Progress -Activity "Checking empty Entra groups" -Completed
+            Restore-ProgressAndInfoPreferences
         }
     }
 }

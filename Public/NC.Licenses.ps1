@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: Licenses =============================================================================================================================
+# Nebula.Core: Licenses helpers =====================================================================================================================
 
 function Add-UserMsolAccountSku {
     <#
@@ -49,7 +49,7 @@ function Add-UserMsolAccountSku {
             return
         }
 
-        $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $UserPrincipalName
+        $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $UserPrincipalName -PreferGraphIdentity
         if (-not $resolvedPrincipal) {
             Write-NCMessage "Unable to resolve user recipient for $UserPrincipalName" -Level ERROR
             return
@@ -276,8 +276,8 @@ function Copy-UserMsolAccountSku {
             return
         }
 
-        $resolvedSource = Find-UserRecipient -UserPrincipalName $SourceUserPrincipalName
-        $resolvedDestination = Find-UserRecipient -UserPrincipalName $DestinationUserPrincipalName
+        $resolvedSource = Find-UserRecipient -UserPrincipalName $SourceUserPrincipalName -PreferGraphIdentity
+        $resolvedDestination = Find-UserRecipient -UserPrincipalName $DestinationUserPrincipalName -PreferGraphIdentity
 
         try {
             if ($resolvedSource) {
@@ -893,6 +893,7 @@ function Get-UserMsolAccountSku {
         Set-ProgressAndInfoPreferences
         $initSucceeded = $true
         $clipboardLines = @()
+        $clipboardHasContent = $false
         $availabilityBySkuId = @{}
 
         try {
@@ -975,16 +976,16 @@ function Get-UserMsolAccountSku {
 
     process {
         if (-not $initSucceeded) { return }
-
+        
         $inputUserPrincipalName = $UserPrincipalName
-        $resolvedRecipient = Find-UserRecipient -UserPrincipalName $inputUserPrincipalName
-        if (-not $resolvedRecipient) {
+        $resolvedGraphIdentity = Find-UserRecipient -UserPrincipalName $inputUserPrincipalName -PreferGraphIdentity
+        if (-not $resolvedGraphIdentity) {
             Write-NCMessage "Unable to resolve user recipient for $inputUserPrincipalName" -Level ERROR
             return
         }
 
         try {
-            $User = Get-MgUser -UserId $resolvedRecipient -ErrorAction Stop
+            $User = Get-MgUser -UserId $resolvedGraphIdentity -Property Id, DisplayName, UserPrincipalName, Mail -ErrorAction Stop
         }
         catch {
             $detail = if ($ShowErrorDetails.IsPresent) { ": $($_.Exception.Message)" } else { "." }
@@ -1048,18 +1049,18 @@ function Get-UserMsolAccountSku {
             if ($Clipboard.IsPresent) {
                 $normalized = $licensesForClipboard | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
                 $quoted = $normalized | ForEach-Object { "`"$($_.Replace('"', '\"'))`"" }
-                $clipboardLines += ($quoted -join ",")
+                if ((@($quoted)).Count -gt 0) {
+                    $clipboardLines += ($quoted -join ",")
+                    $clipboardHasContent = $true
+                }
             }
         }
         else {
             Write-NCMessage "No licenses assigned to this user." -Level VERBOSE
-            if ($Clipboard.IsPresent) {
-                $clipboardLines += ''
-            }
         }
     }
     end {
-        if ($Clipboard.IsPresent) {
+        if ($Clipboard.IsPresent -and $clipboardHasContent) {
             $clipboardText = ($clipboardLines -join [Environment]::NewLine)
             try {
                 $clipboardText | Set-Clipboard
@@ -1069,6 +1070,10 @@ function Get-UserMsolAccountSku {
             catch {
                 Write-NCMessage "Unable to copy license list to clipboard: $($_.Exception.Message)" -Level WARNING
             }
+        }
+        elseif ($Clipboard.IsPresent) {
+            Add-EmptyLine
+            Write-NCMessage "No license data available to copy to clipboard." -Level WARNING
         }
 
         Add-EmptyLine
@@ -1109,8 +1114,8 @@ function Move-UserMsolAccountSku {
             return
         }
 
-        $resolvedSource = Find-UserRecipient -UserPrincipalName $SourceUserPrincipalName
-        $resolvedDestination = Find-UserRecipient -UserPrincipalName $DestinationUserPrincipalName
+        $resolvedSource = Find-UserRecipient -UserPrincipalName $SourceUserPrincipalName -PreferGraphIdentity
+        $resolvedDestination = Find-UserRecipient -UserPrincipalName $DestinationUserPrincipalName -PreferGraphIdentity
 
         if (-not $resolvedSource) {
             Write-NCMessage "Unable to resolve source user recipient for $SourceUserPrincipalName" -Level ERROR
@@ -1377,7 +1382,7 @@ function Remove-UserMsolAccountSku {
             return
         }
 
-        $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $UserPrincipalName
+        $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $UserPrincipalName -PreferGraphIdentity
         if (-not $resolvedPrincipal) {
             Write-NCMessage "Unable to resolve user recipient for $UserPrincipalName" -Level ERROR
             return

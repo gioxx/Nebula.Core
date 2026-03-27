@@ -1,3 +1,6 @@
+#Requires -Version 5.0
+using namespace System.Management.Automation
+
 # Nebula.Core: (Private) Intune helpers =============================================================================================================
 
 function Invoke-NCIntuneGroupUsageCore {
@@ -366,4 +369,229 @@ function Invoke-NCIntuneGroupUsageCore {
     else {
         $sorted
     }
+}
+
+function Invoke-NCGraphCollectionRequest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri
+    )
+
+    $items = [System.Collections.Generic.List[object]]::new()
+    $nextUri = $Uri
+    $requestCount = 0
+
+    while (-not [string]::IsNullOrWhiteSpace($nextUri)) {
+        try {
+            if ($requestCount -gt 0) {
+                Start-Sleep -Milliseconds 100
+            }
+
+            $response = Invoke-MgGraphRequest -Uri $nextUri -Method GET -ErrorAction Stop
+            $requestCount++
+
+            if ($response.PSObject.Properties['value']) {
+                $items.AddRange(@($response.value))
+            }
+            else {
+                $items.AddRange(@($response))
+            }
+
+            if ($requestCount % 10 -eq 0) {
+                Write-Information "." -InformationAction Continue
+            }
+
+            $nextLink = $response.'@odata.nextLink'
+            $nextUri = if ($nextLink) { [string]$nextLink } else { $null }
+        }
+        catch {
+            if ($_.Exception.Message -like '*429*') {
+                Write-Information "`nRate limit hit, waiting 60 seconds..." -InformationAction Continue
+                Start-Sleep -Seconds 60
+                continue
+            }
+
+            Write-Warning "Error fetching data: $($_.Exception.Message)"
+            break
+        }
+    }
+
+    return @($items)
+}
+
+function Invoke-NCGraphAllPagesCore {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+        [int]$DelayMs = 100
+    )
+
+    $allResults = @()
+    $nextLink = $Uri
+    $requestCount = 0
+
+    do {
+        try {
+            if ($requestCount -gt 0) {
+                Start-Sleep -Milliseconds $DelayMs
+            }
+
+            $response = Invoke-MgGraphRequest -Uri $nextLink -Method GET
+            $requestCount++
+
+            if ($response.value) {
+                $allResults += $response.value
+            }
+            else {
+                $allResults += $response
+            }
+
+            $nextLink = $response.'@odata.nextLink'
+            if ($requestCount % 10 -eq 0) {
+                Write-Information "." -InformationAction Continue
+            }
+        }
+        catch {
+            if ($_.Exception.Message -like "*429*") {
+                Write-Information "`nRate limit hit, waiting 60 seconds..." -InformationAction Continue
+                Start-Sleep -Seconds 60
+                continue
+            }
+
+            Write-Warning "Error fetching data: $($_.Exception.Message)"
+            break
+        }
+    }
+    while ($nextLink)
+
+    return $allResults
+}
+
+function Get-NCIntuneItemName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        $Item
+    )
+
+    if (-not $Item) { return $null }
+
+    foreach ($propertyName in @('displayName', 'DisplayName', 'name', 'Name')) {
+        $property = $Item.PSObject.Properties[$propertyName]
+        if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            return [string]$property.Value
+        }
+    }
+
+    return $null
+}
+
+function Get-NCIntuneItemId {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        $Item
+    )
+
+    if (-not $Item) { return $null }
+
+    foreach ($propertyName in @('id', 'Id')) {
+        $property = $Item.PSObject.Properties[$propertyName]
+        if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            return [string]$property.Value
+        }
+    }
+
+    return $null
+}
+
+function Get-NCIntuneItemODataType {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        $Item
+    )
+
+    if (-not $Item) { return $null }
+
+    $odataProperty = $Item.PSObject.Properties['@odata.type']
+    if ($odataProperty -and -not [string]::IsNullOrWhiteSpace([string]$odataProperty.Value)) {
+        return [string]$odataProperty.Value
+    }
+
+    $additionalProperties = $Item.PSObject.Properties['AdditionalProperties']
+    if ($additionalProperties -and $additionalProperties.Value -and $additionalProperties.Value.ContainsKey('@odata.type')) {
+        return [string]$additionalProperties.Value['@odata.type']
+    }
+
+    return $null
+}
+
+function Get-NCIntuneSearchFields {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        $Item
+    )
+
+    $fields = [System.Collections.Generic.List[object]]::new()
+    if (-not $Item) { return $fields.ToArray() }
+
+    foreach ($propertyName in @('id', 'Id', 'displayName', 'DisplayName', 'name', 'Name', 'description', 'Description', 'networkName', 'NetworkName', 'ssid', 'Ssid')) {
+        $property = $Item.PSObject.Properties[$propertyName]
+        if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            $fields.Add([pscustomobject]@{
+                    Property = $propertyName
+                    Value    = [string]$property.Value
+                }) | Out-Null
+        }
+    }
+
+    return $fields.ToArray()
+}
+
+function Get-NCIntuneAppTypeFromODataType {
+    [CmdletBinding()]
+    param([string]$ODataType)
+
+    switch ($ODataType) {
+        '#microsoft.graph.win32LobApp' { return 'Win32' }
+        '#microsoft.graph.microsoftStoreForBusinessApp' { return 'Store' }
+        '#microsoft.graph.webApp' { return 'Web' }
+        '#microsoft.graph.officeSuiteApp' { return 'Office' }
+        '#microsoft.graph.winGetApp' { return 'WinGet' }
+        '#microsoft.graph.iosLobApp' { return 'iOS' }
+        '#microsoft.graph.iosStoreApp' { return 'iOS' }
+        '#microsoft.graph.androidManagedStoreApp' { return 'Android' }
+        '#microsoft.graph.androidLobApp' { return 'Android' }
+        '#microsoft.graph.macOSLobApp' { return 'macOS' }
+        '#microsoft.graph.macOSOfficeSuiteApp' { return 'macOS' }
+        default { return 'Other' }
+    }
+}
+
+function Test-NCIntuneVersionAtLeast {
+    [CmdletBinding()]
+    param(
+        [string]$CurrentVersion,
+        [string]$MinimumVersion
+    )
+
+    if ([string]::IsNullOrWhiteSpace($MinimumVersion)) {
+        return $true
+    }
+
+    if ([string]::IsNullOrWhiteSpace($CurrentVersion)) {
+        return $false
+    }
+
+    $currentParsed = [version]'0.0'
+    $minimumParsed = [version]'0.0'
+    if ([version]::TryParse($CurrentVersion, [ref]$currentParsed) -and [version]::TryParse($MinimumVersion, [ref]$minimumParsed)) {
+        return $currentParsed -ge $minimumParsed
+    }
+
+    return $CurrentVersion -ge $MinimumVersion
 }

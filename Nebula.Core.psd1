@@ -28,8 +28,11 @@
         'Export-CalendarPermission',
         'Export-DistributionGroups',
         'Export-DynamicDistributionGroups',
+        'Export-EmptyEntraGroups',
+        'Export-IntuneAppInventory',
         'Export-M365Group',
         'Export-MboxAlias',
+        'Export-MboxDeletedItemSize',
         'Export-MboxPermission',
         'Export-MboxStatistics',
         'Export-MsolAccountSku',
@@ -41,7 +44,6 @@
         'Get-EntraGroupMembers',
         'Get-EntraGroupUser',
         'Get-IntuneProfileAssignmentsByGroup',
-        'Get-IntuneProfileAssignmentsRaw',
         'Get-MboxAlias',
         'Get-MboxLastMessageTrace',
         'Get-MboxPermission',
@@ -68,10 +70,7 @@
         'Remove-UserMsolAccountSku',
         'Revoke-UserSessions',
         'Search-EntraGroup',
-        'Search-IntuneObjectById',
         'Search-IntuneProfileLocation',
-        'Search-IntuneProfileLocation',
-        'Search-IntuneRawEndpoint',
         'Search-MboxCutoffWindow',
         'Set-MboxLanguage',
         'Set-MboxMrmCleanup',
@@ -106,19 +105,20 @@
                 'Automation',
                 'Calendar',
                 'Configuration',
-                'Entra', 
-                'Exchange', 
+                'Entra',
+                'Exchange',
                 'Exchange-Online',
-                'Groups', 
-                'Licenses', 
-                'M365', 
-                'Mailboxes', 
-                'Microsoft', 
-                'Microsoft-365', 
+                'Groups',
+                'Intune',
+                'Licenses',
+                'M365',
+                'Mailboxes',
+                'Microsoft',
+                'Microsoft-365',
                 'Microsoft-Graph',
-                'Office-365', 
-                'PowerShell', 
-                'Quarantine', 
+                'Office-365',
+                'PowerShell',
+                'Quarantine',
                 'Reporting',
                 'Rooms',
                 'Security'
@@ -126,14 +126,19 @@
             ProjectUri   = 'https://github.com/gioxx/Nebula.Core'
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/Assets/icon.png'
-ReleaseNotes = @'
+            ReleaseNotes = @'
+- Change: Added `Export-IntuneAppInventory` for Intune app inventory reporting, with optional deployed-app status enrichment and CSV/JSON export.
+- Change: Added `Search-IntuneProfileLocation` to locate which Intune Graph surface hosts a profile and return its source, ID, and OData type.
 - Change: Added resilient Exchange Online connection handling in `Connect-EOL`, including optional `-DisableWAM`, `-Device`, `-NoWamFallback`, and automatic retry without WAM after broker-related sign-in failures.
 - Change: Refactored Intune group usage logic into dedicated private helpers to keep `NC.Intune.ps1` focused on public cmdlets.
+- Fix: `Get-UserMsolAccountSku -Clipboard` no longer claims success when user lookup or license retrieval fails; it now warns when there is no license data to copy.
 - Fix: Quarantine workflows now benefit from the improved EXO reconnection path when WAM/MSAL broker state breaks after idle, lock, or sleep.
 - Fix: Reworked `Get-IntuneProfileAssignmentsByGroup` to correctly report Entra group usage across Intune device configurations, settings catalog policies, and app assignments.
 - Improve: Added support for nested group matching, diagnostic output, mixed include/exclude aggregation, and console highlighting for exclusion rows in Intune group usage results.
+- Improve: License user resolution now prefers Microsoft Graph identity (via shared `Find-UserRecipient -PreferGraphIdentity`) in `Add/Copy/Move/Get/Remove-UserMsolAccountSku`, with better handling of object IDs and hybrid alias lookups.
 - Improve: Updated `nebula-core\usage` connection and quarantine documentation to document EXO WAM fallback behavior and recovery options.
 - Improve: Updated `nebula-core\usage` documentation for the current Intune coverage and parameters.
+- Improve: Updated `nebula-core\usage` documentation to cover `Search-IntuneProfileLocation`, `Export-IntuneAppInventory`, and the associated examples.
 '@
         }
     }

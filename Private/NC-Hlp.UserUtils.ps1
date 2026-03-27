@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: (Private) User's Utilities ===========================================================================================================
+# Nebula.Core: (Private) User helpers ===============================================================================================================
 
 function Find-UserConnected {
     <#
@@ -49,27 +49,27 @@ function Find-UserConnected {
     }
 }
 
-
 function Find-UserRecipient {
     <#
     .SYNOPSIS
-        Resolves and returns the primary SMTP address of a user recipient.
+        Resolves and returns a user identity for Exchange or Microsoft Graph usage.
     .DESCRIPTION
-        Given a User Principal Name (UPN) or identifier, this function queries Exchange to find the recipient.
-        It returns the primary SMTP address, ensuring a complete e-mail format.
-        If direct lookup fails, it tries Microsoft Graph lookups for common short identifiers
-        (for example mailNickname/SamAccountName/displayName) and uses the first match.
+        By default, this function preserves the historical behavior and returns the user's
+        primary SMTP address when available.
+        When -PreferGraphIdentity is specified, the function prefers a Graph-friendly identity
+        such as the Entra object ID or the user principal name.
     .PARAMETER UserPrincipalName
         The UPN or identifier of the user recipient to resolve.
-    .EXAMPLE
-        Find-UserRecipient -UserPrincipalName "john.doe"
+    .PARAMETER PreferGraphIdentity
+        Returns a Graph-friendly identity instead of the primary SMTP address.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$UserPrincipalName
+        [string]$UserPrincipalName,
+        [switch]$PreferGraphIdentity
     )
-    
+
     if ([string]::IsNullOrWhiteSpace($UserPrincipalName)) {
         return
     }
@@ -78,18 +78,23 @@ function Find-UserRecipient {
         $recipient = Get-Recipient -Identity $UserPrincipalName -ErrorAction Stop
     }
     catch {
-        # If no Exchange recipient exists yet (e.g., user without mailbox), fall back to Graph user info
         try {
-            $user = Get-MgUser -UserId $UserPrincipalName -ErrorAction Stop
-            $fallbackUpn = if ($user.Mail) { $user.Mail } else { $user.UserPrincipalName }
-            if ($fallbackUpn) {
-                return $fallbackUpn
+            $user = Get-MgUser -UserId $UserPrincipalName -Property Id, UserPrincipalName, Mail -ErrorAction Stop
+
+            if ($PreferGraphIdentity.IsPresent) {
+                return $user.Id
             }
+
+            if ($user.Mail) {
+                return $user.Mail
+            }
+
+            return $user.UserPrincipalName
         }
         catch {
-            # Try Graph search for short identifiers like alias/SamAccountName/displayName.
             $escaped = $UserPrincipalName.Replace("'", "''")
             $queries = @()
+
             if ($UserPrincipalName -match '@') {
                 $queries += "userPrincipalName eq '$escaped'"
                 $queries += "mail eq '$escaped'"
@@ -101,31 +106,36 @@ function Find-UserRecipient {
                 $queries += "startswith(userPrincipalName,'$escaped@')"
             }
 
-            $matches = @()
+            $matchedUsers = @()
             foreach ($query in $queries) {
                 try {
-                    $matches = @(Get-MgUser -Filter $query -All -Property Id,UserPrincipalName,Mail,DisplayName -ErrorAction Stop)
-                    if ($matches.Count -gt 0) {
+                    $matchedUsers = @(Get-MgUser -Filter $query -All -Property Id, UserPrincipalName, Mail, DisplayName -ErrorAction Stop)
+                    if ($matchedUsers.Count -gt 0) {
                         break
                     }
                 }
                 catch {
-                    # Ignore unsupported/failed filter attempts and continue with the next strategy.
                     continue
                 }
             }
 
-            if ($matches.Count -gt 0) {
-                $selected = $matches | Sort-Object UserPrincipalName | Select-Object -First 1
-                if ($matches.Count -gt 1) {
-                    $selectedLabel = if ($selected.UserPrincipalName) { $selected.UserPrincipalName } else { $selected.DisplayName }
+            if ($matchedUsers.Count -gt 0) {
+                $selectedUser = $matchedUsers | Sort-Object UserPrincipalName | Select-Object -First 1
+
+                if ($matchedUsers.Count -gt 1) {
+                    $selectedLabel = if ($selectedUser.UserPrincipalName) { $selectedUser.UserPrincipalName } else { $selectedUser.DisplayName }
                     Write-NCMessage "Multiple users matched '$UserPrincipalName'. Using the first result ($selectedLabel)." -Level WARNING
                 }
 
-                $fallbackUpn = if ($selected.Mail) { $selected.Mail } else { $selected.UserPrincipalName }
-                if ($fallbackUpn) {
-                    return $fallbackUpn
+                if ($PreferGraphIdentity.IsPresent) {
+                    return $selectedUser.Id
                 }
+
+                if ($selectedUser.Mail) {
+                    return $selectedUser.Mail
+                }
+
+                return $selectedUser.UserPrincipalName
             }
 
             Write-NCMessage "Recipient not available or not found ($UserPrincipalName). $($_.Exception.Message)" -Level ERROR
@@ -139,24 +149,45 @@ function Find-UserRecipient {
         return
     }
 
-    $UserPrincipalName = $recipient.PrimarySmtpAddress
-    if (-not $UserPrincipalName) {
-        $UserPrincipalName = $recipient.WindowsLiveID
+    if ($PreferGraphIdentity.IsPresent) {
+        if ($recipient.ExternalDirectoryObjectId) {
+            return [string]$recipient.ExternalDirectoryObjectId
+        }
+
+        if ($recipient.WindowsLiveID -and $recipient.WindowsLiveID -match '@') {
+            return [string]$recipient.WindowsLiveID
+        }
+
+        if ($recipient.PrimarySmtpAddress) {
+            return [string]$recipient.PrimarySmtpAddress
+        }
+
+        $primaryGraphCandidate = @($recipient.EmailAddresses | Where-Object { $_ -clike 'SMTP:*' } | Select-Object -First 1)
+        if ($primaryGraphCandidate.Count -gt 0) {
+            return $primaryGraphCandidate[0].Substring(5)
+        }
+
+        return
     }
 
-    if ($UserPrincipalName -notmatch '@') {
+    $resolvedAddress = $recipient.PrimarySmtpAddress
+    if (-not $resolvedAddress) {
+        $resolvedAddress = $recipient.WindowsLiveID
+    }
+
+    if ($resolvedAddress -notmatch '@') {
         $primaryMatches = @($recipient.EmailAddresses | Where-Object { $_ -clike 'SMTP:*' })
         if ($primaryMatches.Count -eq 0) {
-            Write-NCMessage "Complete e-mail address not specified and no primary SMTP address found for $UserPrincipalName." -Level WARNING
+            Write-NCMessage "Complete e-mail address not specified and no primary SMTP address found for $resolvedAddress." -Level WARNING
             return
         }
 
         if ($primaryMatches.Count -gt 1) {
-            Write-NCMessage "Multiple SMTP addresses detected for $UserPrincipalName. Using the first match ($($primaryMatches[0].Substring(5)))." -Level WARNING
+            Write-NCMessage "Multiple SMTP addresses detected for $resolvedAddress. Using the first match ($($primaryMatches[0].Substring(5)))." -Level WARNING
         }
 
-        $UserPrincipalName = $primaryMatches[0].Substring(5)
+        $resolvedAddress = $primaryMatches[0].Substring(5)
     }
 
-    return $UserPrincipalName
+    return $resolvedAddress
 }
