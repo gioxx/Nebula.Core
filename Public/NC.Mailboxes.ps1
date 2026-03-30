@@ -1405,7 +1405,7 @@ function Test-SharedMailboxCompliance {
         }
 
         Add-EmptyLine
-        Write-NCMessage "Finding shared mailboxes..." -NoNewline
+        Write-NCMessage "Finding shared mailboxes ..." -NoNewline
         $mailboxes = Get-ExoMailbox -RecipientTypeDetails SharedMailbox -ResultSize Unlimited | Sort-Object DisplayName
         if (-not $mailboxes) {
             Write-NCMessage "No shared mailboxes found." -Level WARNING

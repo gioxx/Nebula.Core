@@ -486,6 +486,9 @@ function Export-MsolAccountSku {
         maps SKU part numbers to friendly names, and writes/resumes a CSV report.
     .PARAMETER CSVFolder
         Output folder (defaults to the current directory if omitted).
+    .PARAMETER Domain
+        Optional domain filter. When specified, only users whose Mail, UserPrincipalName,
+        or ProxyAddresses belong to that domain are exported.
     .PARAMETER ForceLicenseCatalogRefresh
         Force a fresh download of the cached license catalog before processing.
     .PARAMETER ShowErrorDetails
@@ -494,11 +497,14 @@ function Export-MsolAccountSku {
         Export-MsolAccountSku
     .EXAMPLE
         Export-MsolAccountSku -CsvFolder "C:\Temp"
+    .EXAMPLE
+        Export-MsolAccountSku -Domain "contoso.com"
     #>
     [CmdletBinding()]
     param(
         [Parameter(ValueFromPipeline = $True, HelpMessage = "Folder where export CSV file (e.g. C:\Temp)")]
         [string]$CSVFolder,
+        [string]$Domain,
         [switch]$ForceLicenseCatalogRefresh
     )
 
@@ -527,6 +533,64 @@ function Export-MsolAccountSku {
         $maxAttempts = 3
         $resolvedViaCustom = @{}
         $unknownSkuTracker = @{}
+        $normalizedDomain = $null
+        if (-not [string]::IsNullOrWhiteSpace($Domain)) {
+            $normalizedDomain = $Domain.Trim().ToLowerInvariant().TrimStart('@')
+            if ([string]::IsNullOrWhiteSpace($normalizedDomain)) {
+                Write-NCMessage "Domain filter cannot be empty." -Level ERROR
+                return
+            } else {
+                Write-NCMessage "Filtering users for domain '$normalizedDomain'." -Level VERBOSE
+            }
+        }
+
+        $getAddressDomain = {
+            param($value)
+
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                return $null
+            }
+
+            $address = [string]$value
+            if ($address.Contains(':')) {
+                $address = $address.Substring($address.IndexOf(':') + 1)
+            }
+
+            $atIndex = $address.LastIndexOf('@')
+            if ($atIndex -lt 0 -or $atIndex -eq ($address.Length - 1)) {
+                return $null
+            }
+
+            return $address.Substring($atIndex + 1).Trim().ToLowerInvariant()
+        }
+
+        $matchesDomain = {
+            param($user)
+
+            if (-not $normalizedDomain) {
+                return $true
+            }
+
+            $domains = @()
+
+            foreach ($candidate in @($user.Mail, $user.UserPrincipalName)) {
+                $candidateDomain = & $getAddressDomain $candidate
+                if ($candidateDomain) {
+                    $domains += $candidateDomain
+                }
+            }
+
+            if ($user.PSObject.Properties['ProxyAddresses'] -and $user.ProxyAddresses) {
+                foreach ($proxy in $user.ProxyAddresses) {
+                    $proxyDomain = & $getAddressDomain $proxy
+                    if ($proxyDomain) {
+                        $domains += $proxyDomain
+                    }
+                }
+            }
+
+            return ($domains | Select-Object -Unique) -contains $normalizedDomain
+        }
 
         $CSV = New-File("$($folder)\$((Get-Date -Format $($NCVars.DateTimeString_CSV)).ToString())_M365-User-License-Report.csv")
         if (Test-Path $CSV) {
@@ -537,11 +601,20 @@ function Export-MsolAccountSku {
         }
 
         try {
-            $Users = Get-MgUser -Filter 'assignedLicenses/$count ne 0' -ConsistencyLevel eventual -CountVariable totalUsers -All -ErrorAction Stop
+            $Users = Get-MgUser -Filter 'assignedLicenses/$count ne 0' -ConsistencyLevel eventual -CountVariable totalUsers -All -Property Id,DisplayName,UserPrincipalName,Mail,ProxyAddresses -ErrorAction Stop
         }
         catch {
             Write-NCMessage "Failed to retrieve users with assigned licenses: $_" -Level ERROR
             return
+        }
+
+        if ($normalizedDomain) {
+            $Users = $Users | Where-Object { & $matchesDomain $_ }
+            $totalUsers = @($Users).Count
+            if ($totalUsers -eq 0) {
+                Write-NCMessage "No licensed users match domain '$normalizedDomain'." -Level WARNING
+                return
+            }
         }
 
         foreach ($User in $Users) {
@@ -578,7 +651,7 @@ function Export-MsolAccountSku {
                         -MatchSource ([ref]$matchSource)
 
                     if (-not $productName) {
-                        Write-Verbose "Unknown license: $licenseSku for $($User.UserPrincipalName)"
+                        Write-NCMessage "Unknown license: $licenseSku for $($User.UserPrincipalName)" -Level VERBOSE
                         if ($unknownSkuTracker.ContainsKey($licenseSku)) {
                             $unknownSkuTracker[$licenseSku]++
                         }
@@ -1025,7 +1098,7 @@ function Get-UserMsolAccountSku {
                     Write-NCMessage ("  - {0}{2} ({1})" -f $display, $skuId, $suffix) -Level INFO
                 }
                 else {
-                    Write-Verbose ("  - Unknown license: {0} ({1})" -f $skuPart, $skuId)
+                    Write-NCMessage ("  - Unknown license: {0} ({1})" -f $skuPart, $skuId) -Level VERBOSE
                     Write-NCMessage ("  - {0} ({1})" -f $skuPart, $skuId) -Level WARNING
                 }
 

@@ -63,6 +63,7 @@
         'Get-UserMsolAccountSku',
         'Move-UserMsolAccountSku',
         'New-SharedMailbox',
+        'New-IntuneAppBasedGroup',
         'Remove-EntraGroupDevice',
         'Remove-EntraGroupUser',
         'Remove-MboxAlias',
@@ -128,7 +129,9 @@
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/Assets/icon.png'
             ReleaseNotes = @'
 - Change: Added `Export-IntuneAppInventory` for Intune app inventory reporting, with optional deployed-app status enrichment and CSV/JSON export.
+- Change: Added `New-IntuneAppBasedGroup` to create or update Entra security groups from Intune-managed devices and installed applications, with support for an explicit full group name that aggregates all matches into one group.
 - Change: Added `Search-IntuneProfileLocation` to locate which Intune Graph surface hosts a profile and return its source, ID, and OData type.
+- Change: Added an optional `-Domain` filter to `Export-MsolAccountSku` so exports can be limited to users in a specific domain, matching `Mail`, `UserPrincipalName`, and `ProxyAddresses`.
 - Change: Added resilient Exchange Online connection handling in `Connect-EOL`, including optional `-DisableWAM`, `-Device`, `-NoWamFallback`, and automatic retry without WAM after broker-related sign-in failures.
 - Change: Refactored Intune group usage logic into dedicated private helpers to keep `NC.Intune.ps1` focused on public cmdlets.
 - Fix: `Get-UserMsolAccountSku -Clipboard` no longer claims success when user lookup or license retrieval fails; it now warns when there is no license data to copy.
@@ -136,9 +139,6 @@
 - Fix: Reworked `Get-IntuneProfileAssignmentsByGroup` to correctly report Entra group usage across Intune device configurations, settings catalog policies, and app assignments.
 - Improve: Added support for nested group matching, diagnostic output, mixed include/exclude aggregation, and console highlighting for exclusion rows in Intune group usage results.
 - Improve: License user resolution now prefers Microsoft Graph identity (via shared `Find-UserRecipient -PreferGraphIdentity`) in `Add/Copy/Move/Get/Remove-UserMsolAccountSku`, with better handling of object IDs and hybrid alias lookups.
-- Improve: Updated `nebula-core\usage` connection and quarantine documentation to document EXO WAM fallback behavior and recovery options.
-- Improve: Updated `nebula-core\usage` documentation for the current Intune coverage and parameters.
-- Improve: Updated `nebula-core\usage` documentation to cover `Search-IntuneProfileLocation`, `Export-IntuneAppInventory`, and the associated examples.
 '@
         }
     }

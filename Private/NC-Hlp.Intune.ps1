@@ -4,6 +4,29 @@ using namespace System.Management.Automation
 # Nebula.Core: (Private) Intune helpers =============================================================================================================
 
 function Invoke-NCIntuneGroupUsageCore {
+    <#
+    .SYNOPSIS
+        Core Intune group usage lookup logic.
+    .DESCRIPTION
+        Resolves the requested Entra group, scans supported Intune surfaces, and returns matching assignment
+        records. This is the implementation behind the public group usage command.
+    .PARAMETER ParameterSetName
+        Active parameter set name from the public wrapper.
+    .PARAMETER GroupName
+        Target group display name.
+    .PARAMETER GroupId
+        Target group object ID.
+    .PARAMETER ProfileName
+        Optional filter for the profile or app display name.
+    .PARAMETER ProfileId
+        Optional filter for a specific Intune object ID.
+    .PARAMETER IncludeNestedGroups
+        Also include parent groups that contain the requested group.
+    .PARAMETER GridView
+        Show results in Out-GridView when requested.
+    .PARAMETER Diagnostic
+        Include diagnostic columns in the returned objects.
+    #>
     [CmdletBinding()]
     param(
         [string]$ParameterSetName,
@@ -372,6 +395,15 @@ function Invoke-NCIntuneGroupUsageCore {
 }
 
 function Invoke-NCGraphCollectionRequest {
+    <#
+    .SYNOPSIS
+        Retrieves a Graph collection with pagination.
+    .DESCRIPTION
+        Repeatedly calls Microsoft Graph until no next link remains, with light throttling and basic 429 retry
+        handling.
+    .PARAMETER Uri
+        Initial Graph request URI.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -399,7 +431,7 @@ function Invoke-NCGraphCollectionRequest {
             }
 
             if ($requestCount % 10 -eq 0) {
-                Write-Information "." -InformationAction Continue
+                Write-NCMessage "." -Level INFO -NoNewline
             }
 
             $nextLink = $response.'@odata.nextLink'
@@ -407,12 +439,12 @@ function Invoke-NCGraphCollectionRequest {
         }
         catch {
             if ($_.Exception.Message -like '*429*') {
-                Write-Information "`nRate limit hit, waiting 60 seconds..." -InformationAction Continue
+                Write-NCMessage "`nRate limit hit, waiting 60 seconds ..." -Level INFO
                 Start-Sleep -Seconds 60
                 continue
             }
 
-            Write-Warning "Error fetching data: $($_.Exception.Message)"
+            Write-NCMessage "Error fetching data: $($_.Exception.Message)" -Level WARNING
             break
         }
     }
@@ -421,6 +453,16 @@ function Invoke-NCGraphCollectionRequest {
 }
 
 function Invoke-NCGraphAllPagesCore {
+    <#
+    .SYNOPSIS
+        Retrieves all pages from a Graph endpoint.
+    .DESCRIPTION
+        Follows @odata.nextLink until the collection is exhausted and returns all items as an array.
+    .PARAMETER Uri
+        Initial Graph request URI.
+    .PARAMETER DelayMs
+        Delay in milliseconds between follow-up page requests.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -450,17 +492,17 @@ function Invoke-NCGraphAllPagesCore {
 
             $nextLink = $response.'@odata.nextLink'
             if ($requestCount % 10 -eq 0) {
-                Write-Information "." -InformationAction Continue
+                Write-NCMessage "." -Level INFO -NoNewline
             }
         }
         catch {
             if ($_.Exception.Message -like "*429*") {
-                Write-Information "`nRate limit hit, waiting 60 seconds..." -InformationAction Continue
+                Write-NCMessage "`nRate limit hit, waiting 60 seconds ..." -Level INFO
                 Start-Sleep -Seconds 60
                 continue
             }
 
-            Write-Warning "Error fetching data: $($_.Exception.Message)"
+            Write-NCMessage "Error fetching data: $($_.Exception.Message)" -Level WARNING
             break
         }
     }
@@ -470,6 +512,14 @@ function Invoke-NCGraphAllPagesCore {
 }
 
 function Get-NCIntuneItemName {
+    <#
+    .SYNOPSIS
+        Returns the best display name for an Intune object.
+    .DESCRIPTION
+        Reads common display-name properties and returns the first non-empty value.
+    .PARAMETER Item
+        Intune object to inspect.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
@@ -489,6 +539,14 @@ function Get-NCIntuneItemName {
 }
 
 function Get-NCIntuneItemId {
+    <#
+    .SYNOPSIS
+        Returns the best identifier for an Intune object.
+    .DESCRIPTION
+        Reads common id properties and returns the first non-empty value.
+    .PARAMETER Item
+        Intune object to inspect.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
@@ -508,6 +566,14 @@ function Get-NCIntuneItemId {
 }
 
 function Get-NCIntuneItemODataType {
+    <#
+    .SYNOPSIS
+        Returns the OData type for an Intune object.
+    .DESCRIPTION
+        Reads the standard @odata.type property or falls back to AdditionalProperties when available.
+    .PARAMETER Item
+        Intune object to inspect.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
@@ -530,6 +596,14 @@ function Get-NCIntuneItemODataType {
 }
 
 function Get-NCIntuneSearchFields {
+    <#
+    .SYNOPSIS
+        Returns searchable fields for an Intune object.
+    .DESCRIPTION
+        Collects common identifying and descriptive properties into a normalized search field list.
+    .PARAMETER Item
+        Intune object to inspect.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
@@ -553,6 +627,14 @@ function Get-NCIntuneSearchFields {
 }
 
 function Get-NCIntuneAppTypeFromODataType {
+    <#
+    .SYNOPSIS
+        Maps an Intune app OData type to a friendly app type.
+    .DESCRIPTION
+        Translates common Microsoft Graph Intune app type names into a short label used by the module.
+    .PARAMETER ODataType
+        OData type string to translate.
+    #>
     [CmdletBinding()]
     param([string]$ODataType)
 
@@ -573,6 +655,17 @@ function Get-NCIntuneAppTypeFromODataType {
 }
 
 function Test-NCIntuneVersionAtLeast {
+    <#
+    .SYNOPSIS
+        Compares two version strings.
+    .DESCRIPTION
+        Returns $true when the current version is greater than or equal to the minimum version. Falls back
+        to string comparison if the inputs cannot be parsed as [version].
+    .PARAMETER CurrentVersion
+        Current version string.
+    .PARAMETER MinimumVersion
+        Minimum version string to compare against.
+    #>
     [CmdletBinding()]
     param(
         [string]$CurrentVersion,
@@ -594,4 +687,50 @@ function Test-NCIntuneVersionAtLeast {
     }
 
     return $CurrentVersion -ge $MinimumVersion
+}
+
+function Get-NCIntuneAppBasedGroupName {
+    <#
+    .SYNOPSIS
+        Builds a sanitized Entra group name for app-based Intune groups.
+    .DESCRIPTION
+        Uses an explicit group name when provided, otherwise removes invalid characters, collapses
+        separators, trims edges, and enforces the Entra group name length limit while preserving the
+        requested prefix and suffix.
+    .PARAMETER GroupName
+        Explicit full group name to use as-is instead of generating one from prefix and suffix.
+    .PARAMETER AppName
+        Application display name used as the base for the group name.
+    .PARAMETER GroupPrefix
+        Prefix prepended to the sanitized application name.
+    .PARAMETER GroupSuffix
+        Suffix appended to the sanitized application name.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$GroupName,
+        [Parameter(Mandatory = $false)]
+        [string]$AppName,
+        [Parameter(Mandatory = $false)]
+        [string]$GroupPrefix = 'Devices-With-',
+        [Parameter(Mandatory = $false)]
+        [string]$GroupSuffix = ''
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($GroupName)) {
+        return $GroupName
+    }
+
+    $sanitized = $AppName -replace '[^\w\s-]', ''
+    $sanitized = $sanitized -replace '\s+', '-'
+    $sanitized = $sanitized -replace '-+', '-'
+    $sanitized = $sanitized.Trim('-')
+
+    $maxLength = 256 - $GroupPrefix.Length - $GroupSuffix.Length
+    if ($sanitized.Length -gt $maxLength) {
+        $sanitized = $sanitized.Substring(0, $maxLength)
+    }
+
+    return "${GroupPrefix}${sanitized}${GroupSuffix}"
 }

@@ -26,7 +26,7 @@ function Test-EOLConnection {
 
     $moduleAvailable = @(Get-Module -Name ExchangeOnlineManagement -ListAvailable).Count -gt 0
     if (-not $moduleAvailable) {
-        Write-Warning "Microsoft Exchange Online Management module is not available."
+        Write-NCMessage "Microsoft Exchange Online Management module is not available." -Level WARNING
 
         $installModule = $AutoInstall.IsPresent
         if (-not $installModule) {
@@ -139,7 +139,7 @@ function Test-MgGraphConnection {
 
     $graphModuleAvailable = @(Get-Module -Name Microsoft.Graph -ListAvailable).Count -gt 0
     if (-not $graphModuleAvailable) {
-        Write-Warning "Microsoft Graph PowerShell module is not available."
+        Write-NCMessage "Microsoft Graph PowerShell module is not available." -Level WARNING
 
         $installModule = $AutoInstall.IsPresent
         if (-not $installModule) {
