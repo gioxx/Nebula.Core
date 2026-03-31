@@ -166,8 +166,8 @@ function Get-LicenseSourceData {
 
     $needDownload = $ForceRefresh.IsPresent -or -not (Test-Path -LiteralPath $cacheFile)
     
-    Write-NCMessage ("License cache state: ForceRefresh={0} CacheExists={1} LastCheckedUtc={2:o} CacheDays={3} TTL={4} NeedDownload={5} CurrentCommit={6:o} RemoteCommit={7:o}" -f `
-            $ForceRefresh.IsPresent, (Test-Path -LiteralPath $cacheFile), $lastCheckedUtc, $CacheDays, $ttl, $needDownload, $currentCommitUtc, $remoteCommitUtc) -Level VERBOSE
+    Write-Verbose ("License cache state: ForceRefresh={0} CacheExists={1} LastCheckedUtc={2:o} CacheDays={3} TTL={4} NeedDownload={5} CurrentCommit={6:o} RemoteCommit={7:o}" -f `
+            $ForceRefresh.IsPresent, (Test-Path -LiteralPath $cacheFile), $lastCheckedUtc, $CacheDays, $ttl, $needDownload, $currentCommitUtc, $remoteCommitUtc)
 
     if (-not $needDownload -and $lastCheckedUtc) {
         if ($nowUtc - $lastCheckedUtc -ge $ttl) {
@@ -236,7 +236,7 @@ function Get-LicenseSourceData {
 
             $licenseItems | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $cacheFile -Encoding UTF8
             $source = 'Remote'
-            Write-NCMessage "License file downloaded and cached at $cacheFile." -Level VERBOSE
+            Write-Verbose "License file downloaded and cached at $cacheFile."
 
             if (-not $remoteCommitUtc) {
                 $remoteCommitUtc = $nowUtc
@@ -338,10 +338,10 @@ function Get-LicenseCatalog {
     }
 
     if ($IncludeMetadata.IsPresent -and $primaryData.LastCommitUtc) {
-        Write-NCMessage "License catalog last updated: $($primaryData.LastCommitUtc.ToLocalTime().ToString($NCVars.DateTimeString_Full)) (source: $primaryData.Source)" -Level VERBOSE
+        Write-Verbose "License catalog last updated: $($primaryData.LastCommitUtc.ToLocalTime().ToString($NCVars.DateTimeString_Full)) (source: $primaryData.Source)"
     }
     if ($IncludeMetadata.IsPresent -and $customData -and $customData.LastCommitUtc) {
-        Write-NCMessage "Custom license catalog last updated: $($customData.LastCommitUtc.ToLocalTime().ToString($NCVars.DateTimeString_Full)) (source: $customData.Source)" -Level VERBOSE
+        Write-Verbose "Custom license catalog last updated: $($customData.LastCommitUtc.ToLocalTime().ToString($NCVars.DateTimeString_Full)) (source: $customData.Source)"
     }
 
     return [pscustomobject]@{

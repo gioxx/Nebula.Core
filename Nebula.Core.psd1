@@ -132,6 +132,7 @@
 - Change: Added `New-IntuneAppBasedGroup` to create or update Entra security groups from Intune-managed devices and installed applications, with support for an explicit full group name that aggregates all matches into one group.
 - Change: Added `Search-IntuneProfileLocation` to locate which Intune Graph surface hosts a profile and return its source, ID, and OData type.
 - Change: Added an optional `-Domain` filter to `Export-MsolAccountSku` so exports can be limited to users in a specific domain, matching `Mail`, `UserPrincipalName`, and `ProxyAddresses`.
+- Change: Added an optional `-License` filter to `Export-MsolAccountSku` so exports can target users holding a specific license while still including all of their assigned licenses in the CSV.
 - Change: Added resilient Exchange Online connection handling in `Connect-EOL`, including optional `-DisableWAM`, `-Device`, `-NoWamFallback`, and automatic retry without WAM after broker-related sign-in failures.
 - Change: Refactored Intune group usage logic into dedicated private helpers to keep `NC.Intune.ps1` focused on public cmdlets.
 - Fix: `Get-UserMsolAccountSku -Clipboard` no longer claims success when user lookup or license retrieval fails; it now warns when there is no license data to copy.

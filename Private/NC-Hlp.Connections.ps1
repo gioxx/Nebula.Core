@@ -41,7 +41,7 @@ function Test-EOLConnection {
         }
 
         try {
-            Write-NCMessage "Installing Microsoft Exchange Online Management PowerShell module ..." -Level INFO
+            Write-Verbose "Installing Microsoft Exchange Online Management PowerShell module ..."
             Install-Module ExchangeOnlineManagement -Scope CurrentUser -AllowClobber -Force -ErrorAction Stop
         }
         catch {
@@ -75,7 +75,7 @@ function Test-EOLConnection {
     else {
         "Connecting to Microsoft Exchange Online Management ..."
     }
-    Write-NCMessage $message -Level INFO
+    Write-Verbose $message
 
     try {
         if ($resolvedUpn) {
@@ -154,7 +154,7 @@ function Test-MgGraphConnection {
         }
 
         try {
-            Write-NCMessage "Installing Microsoft Graph PowerShell module ..." -Level INFO
+            Write-Verbose "Installing Microsoft Graph PowerShell module ..."
             Install-Module Microsoft.Graph -Scope CurrentUser -AllowClobber -Force -ErrorAction Stop
         }
         catch {
@@ -192,7 +192,7 @@ function Test-MgGraphConnection {
                 Write-NCMessage "Existing Microsoft Graph session missing required scopes ($($missingScopes -join ', ')). Reconnecting ..." -Level WARNING
             }
             else {
-                Write-NCMessage "Microsoft Graph context not found. Establishing connection ..." -Level INFO
+                Write-Verbose "Microsoft Graph context not found. Establishing connection ..."
             }
         }
         catch {
@@ -201,7 +201,7 @@ function Test-MgGraphConnection {
     }
 
     $scopeLabel = $requestedScopes -join ', '
-    Write-NCMessage "Connecting to Microsoft Graph requesting scopes: $scopeLabel" -Level INFO
+    Write-Verbose "Connecting to Microsoft Graph requesting scopes: $scopeLabel"
 
     $connectParams = @{
         Scopes    = $requestedScopes

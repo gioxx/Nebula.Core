@@ -457,8 +457,8 @@ function Export-DistributionGroups {
 
             foreach ($group in $groups) {
                 $counter++
-                $percentComplete = (($counter / $total) * 100)
-                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+                $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
+                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total ($Percentage%)" -PercentComplete $Percentage
 
                 try {
                     $members = @(Get-DistributionGroupMember -Identity $group.Identity -ResultSize Unlimited -ErrorAction Stop)
@@ -640,8 +640,8 @@ function Export-DynamicDistributionGroups {
 
             foreach ($group in $groups) {
                 $counter++
-                $percentComplete = (($counter / $total) * 100)
-                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+                $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
+                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total ($Percentage%)" -PercentComplete $Percentage
 
                 try {
                     $members = @(Get-DynamicDistributionGroupMember -Identity $group.Identity -ErrorAction Stop)
@@ -823,8 +823,8 @@ function Export-M365Group {
 
             foreach ($group in $groups) {
                 $counter++
-                $percentComplete = (($counter / $total) * 100)
-                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+                $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
+                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total ($Percentage%)" -PercentComplete $Percentage
 
                 try {
                     $members = @(Get-UnifiedGroupLinks -Identity $group.Identity -LinkType Member -ErrorAction Stop)
@@ -1097,8 +1097,8 @@ function Get-RoleGroupsMembers {
 
         foreach ($group in $roleGroups) {
             $counter++
-            $percentComplete = (($counter / $total) * 100)
-            Write-Progress -Activity "Processing $($group.Name)" -Status "$counter of $total ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+            $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
+            Write-Progress -Activity "Processing $($group.Name)" -Status "$counter of $total ($Percentage%)" -PercentComplete $Percentage
 
             try {
                 $members = @(Get-RoleGroupMember -Identity $group.Identity -ErrorAction Stop)
@@ -1250,7 +1250,7 @@ function Get-UserGroups {
         }
 
         Add-EmptyLine
-        Write-NCMessage "$recipientType ($resolvedPrincipal) - Groups found: $($memberships.Count)" -Level VERBOSE
+        Write-Verbose "$recipientType ($resolvedPrincipal) - Groups found: $($memberships.Count)"
 
         if (-not $memberships -or $memberships.Count -eq 0) {
             Write-NCMessage "No groups found for $resolvedPrincipal." -Level WARNING
@@ -1374,7 +1374,7 @@ function Get-EntraGroupDevice {
         }
 
         Add-EmptyLine
-        Write-NCMessage "Device ($deviceLabel) - Groups found: $($memberships.Count)" -Level VERBOSE
+        Write-Verbose "Device ($deviceLabel) - Groups found: $($memberships.Count)"
 
         if (-not $memberships -or $memberships.Count -eq 0) {
             Write-NCMessage "No groups found for $deviceLabel." -Level WARNING
@@ -1493,7 +1493,7 @@ function Search-EntraGroup {
         }
 
         Add-EmptyLine
-        Write-NCMessage "Groups found: $($groups.Count) for '$SearchText'." -Level VERBOSE
+        Write-Verbose "Groups found: $($groups.Count) for '$SearchText'."
 
         if (-not $groups -or $groups.Count -eq 0) {
             Write-NCMessage "No groups found for '$SearchText'." -Level WARNING
@@ -1573,8 +1573,8 @@ function Export-EmptyEntraGroups {
 
             foreach ($group in $groups) {
                 $processedCount++
-                $percentComplete = (($processedCount / $totalGroups) * 100)
-                Write-Progress -Activity "Checking $($group.DisplayName)" -Status "$processedCount of $totalGroups ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+                $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalGroups, 1)) * 100, 2)
+                Write-Progress -Activity "Checking $($group.DisplayName)" -Status "$processedCount of $totalGroups ($Percentage%)" -PercentComplete $Percentage
 
                 try {
                     $members = @(Get-MgGroupMember -GroupId $group.Id -All -ErrorAction Stop)
@@ -1749,7 +1749,7 @@ function Get-EntraGroupUser {
         }
 
         Add-EmptyLine
-        Write-NCMessage "User ($userLabel) - Groups found: $($memberships.Count)" -Level VERBOSE
+        Write-Verbose "User ($userLabel) - Groups found: $($memberships.Count)"
 
         if (-not $memberships -or $memberships.Count -eq 0) {
             Write-NCMessage "No groups found for $userLabel." -Level WARNING
@@ -1866,7 +1866,7 @@ function Get-EntraGroupMembers {
     }
 
     Add-EmptyLine
-    Write-NCMessage "Group ($($resolvedGroup.DisplayName)) - Members found: $($members.Count)" -Level VERBOSE
+    Write-Verbose "Group ($($resolvedGroup.DisplayName)) - Members found: $($members.Count)"
 
     if (-not $members -or $members.Count -eq 0) {
         Write-NCMessage "No members found for $($resolvedGroup.DisplayName)." -Level WARNING

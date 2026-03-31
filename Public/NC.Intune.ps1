@@ -175,7 +175,7 @@ function Search-IntuneProfileLocation {
         }
 
         Add-EmptyLine
-        Write-NCMessage "Intune profiles found for '$normalizedSearch': $($results.Count)" -Level VERBOSE
+        Write-Verbose "Intune profiles found for '$normalizedSearch': $($results.Count)"
 
         if ($results.Count -eq 0) {
             Write-NCMessage "No Intune profiles found for '$normalizedSearch' in the currently scanned endpoints." -Level WARNING
@@ -294,13 +294,16 @@ function Export-IntuneAppInventory {
 
             foreach ($device in $devices) {
                 $processed++
-                Write-Progress -Activity "Reading Detected Apps" -Status "$processed / $($devices.Count) devices" -CurrentOperation "Device: $($device.deviceName)" -PercentComplete (($processed / [Math]::Max($devices.Count,1)) * 100)
+
+                $Percentage = [Math]::Round(($processed / [Math]::Max($devices.Count, 1)) * 100, 2)
+                Write-Progress -Activity "Reading Detected Apps" -Status "$($device.deviceName) ($processed / $($devices.Count) devices - $Percentage%)" -PercentComplete $Percentage
+
                 try {
                     $deviceAppsUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$($device.id)?`$expand=detectedApps"
                     $deviceWithApps = Invoke-MgGraphRequest -Uri $deviceAppsUri -Method GET -ErrorAction Stop
                     
                     foreach ($app in ($deviceWithApps.detectedApps | Where-Object { $_.displayName -like $ApplicationName })) {
-                        Write-Progress -Activity "Reading Detected Apps" -Status "$processed / $($devices.Count) devices" -CurrentOperation "Device: $($device.deviceName) | App: $($app.displayName)" -PercentComplete (($processed / [Math]::Max($devices.Count,1)) * 100)
+                        Write-Progress -Activity "Reading Detected Apps" -Status "$($device.deviceName) / $($app.displayName) ($processed / $($devices.Count) devices - $Percentage%)" -PercentComplete $Percentage
                         if ($MinimumVersion -and $app.version) {
                             if (-not (Test-NCIntuneVersionAtLeast -CurrentVersion $app.version -MinimumVersion $MinimumVersion)) {
                                 continue
@@ -318,7 +321,7 @@ function Export-IntuneAppInventory {
                             Platform   = $device.operatingSystem
                             User       = $device.userPrincipalName
                             Version    = $app.version
-                            # Publisher  = $app.publisher
+                            Publisher  = $app.publisher
                             Source     = "DetectedApps"
                         }
                         
@@ -337,7 +340,10 @@ function Export-IntuneAppInventory {
                         Write-NCMessage "`nRate limit hit, waiting 60 seconds ..." -Level INFO
                         Start-Sleep -Seconds 60
                         $processed--
-                        Write-Progress -Activity "Reading Detected Apps" -Status "$processed / $($devices.Count) devices" -CurrentOperation "Waiting after rate limit" -PercentComplete (($processed / [Math]::Max($devices.Count,1)) * 100)
+
+                        $Percentage = [Math]::Round(($processed / [Math]::Max($devices.Count, 1)) * 100, 2)
+                        Write-Progress -Activity "Reading Detected Apps" -Status "Waiting after rate limit ... ($processed / $($devices.Count) devices - $Percentage%)" -PercentComplete $Percentage
+
                         continue
                     }
                     Write-NCMessage "Error reading apps for $($device.deviceName): $($_.Exception.Message)" -Level WARNING
@@ -384,9 +390,9 @@ function Export-IntuneAppInventory {
                                 Platform     = $d.operatingSystem
                                 User         = $d.userPrincipalName
                                 Version      = $null
-                                # Publisher    = $null
-                                # InstallState = $s.installState
-                                # AppType      = $appType
+                                Publisher    = $null
+                                InstallState = $s.installState
+                                AppType      = $appType
                                 Source       = "DeploymentStatus"
                             }
                         }
@@ -396,7 +402,7 @@ function Export-IntuneAppInventory {
 
             # Optional app type filter when only Detected Apps were used
             if (-not $IncludeDeployedApps -and $FilterByType -ne "All") {
-                Write-NCMessage "FilterByType applies only when -IncludeDeployedApps is used. Skipping type filter for Detected Apps only." -Level VERBOSE
+                Write-Verbose "FilterByType applies only when -IncludeDeployedApps is used. Skipping type filter for Detected Apps only."
             }
 
             # Build flat rows
@@ -406,13 +412,13 @@ function Export-IntuneAppInventory {
                     $rows += [pscustomobject]@{
                         AppName      = $appName
                         Version      = $dev.Version
-                        # Publisher    = $dev.Publisher
-                        # AppType      = $dev.AppType
+                        Publisher    = $dev.Publisher
+                        AppType      = $dev.AppType
                         DeviceName   = $dev.DeviceName
                         DeviceId     = $dev.DeviceId
                         Platform     = $dev.Platform
                         User         = $dev.User
-                        # InstallState = $dev.InstallState
+                        InstallState = $dev.InstallState
                         Source       = $dev.Source
                     }
                 }
@@ -424,7 +430,7 @@ function Export-IntuneAppInventory {
             }
 
             # Console table output
-            $rows | Sort-Object AppName, DeviceName | Format-Table -AutoSize AppName, Version, Publisher, AppType, DeviceName, Platform, User, InstallState, Source
+            $rows | Sort-Object AppName, DeviceName | Format-Table -AutoSize AppName, Version, DeviceName, Platform, User, Source
 
             # Optional exports
             if ($OutputCsvPath) {
@@ -458,6 +464,8 @@ function Export-IntuneAppInventory {
                     "• {0}: {1} devices`n    Versions: {2}`n    Top publishers: {3}" -f $app, $count, ($(if ($versions) { $versions } else { 'n/a' })), ($(if ($publishers) { $publishers } else { 'n/a' }))
                 }
             }
+
+            Write-NCMessage "App inventory report completed successfully." -Level SUCCESS
         }
         catch {
             Write-NCMessage "Script execution failed: $($_.Exception.Message)" -Level ERROR
@@ -565,15 +573,15 @@ function New-IntuneAppBasedGroup {
 
             $useExplicitGroupName = -not [string]::IsNullOrWhiteSpace($GroupName)
             if ($useExplicitGroupName -and ($PSBoundParameters.ContainsKey('GroupPrefix') -or $PSBoundParameters.ContainsKey('GroupSuffix'))) {
-                Write-NCMessage 'GroupName was supplied; GroupPrefix and GroupSuffix will be ignored.' -Level VERBOSE
+                Write-Verbose 'GroupName was supplied; GroupPrefix and GroupSuffix will be ignored.'
             }
 
             Write-NCMessage "Starting app-based group creation process ..." -Level INFO
 
             Write-NCMessage "Retrieving managed devices ..." -Level INFO
-            $devicesUri = 'https://graph.microsoft.com/v1.0/deviceManagement/managedDevices'
+            $devicesUri = 'https://graph.microsoft.com/beta/deviceManagement/managedDevices?`$select=id,deviceName,operatingSystem,userPrincipalName,azureADDeviceId,azureActiveDirectoryDeviceId'
             if ($MaxDevices -gt 0) {
-                $devicesUri += "?`$top=$MaxDevices"
+                $devicesUri += "&`$top=$MaxDevices"
             }
 
             $devices = @(Invoke-NCGraphAllPagesCore -Uri $devicesUri)
@@ -589,16 +597,18 @@ function New-IntuneAppBasedGroup {
             Write-NCMessage "Processing device applications ..." -Level INFO
             foreach ($device in $devices) {
                 $processedDevices++
-                Write-Progress -Activity 'Processing Devices' -Status "$processedDevices of $($devices.Count) devices" -CurrentOperation "Device: $($device.deviceName)" -PercentComplete (($processedDevices / [Math]::Max($devices.Count, 1)) * 100)
+
+                $Percentage = [Math]::Round(($processedDevices / [Math]::Max($devices.Count, 1)) * 100, 2)
+                Write-Progress -Activity 'Processing Devices' -Status "$($device.deviceName) ($processedDevices of $($devices.Count) devices - $Percentage%)" -PercentComplete $Percentage
 
                 try {
-                    $deviceAppsUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$($device.id)?`$expand=detectedApps"
+                    $deviceAppsUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$($device.id)?`$select=id,deviceName,operatingSystem,userPrincipalName,azureADDeviceId,azureActiveDirectoryDeviceId&`$expand=detectedApps"
                     $deviceWithApps = Invoke-MgGraphRequest -Uri $deviceAppsUri -Method GET
 
                     if ($deviceWithApps.detectedApps) {
                         foreach ($app in $deviceWithApps.detectedApps) {
                             if ($app.displayName -like $ApplicationName) {
-                                Write-Progress -Activity 'Processing Devices' -Status "$processedDevices of $($devices.Count) devices" -CurrentOperation "Device: $($device.deviceName) | App: $($app.displayName)" -PercentComplete (($processedDevices / [Math]::Max($devices.Count, 1)) * 100)
+                                Write-Progress -Activity 'Processing Devices' -Status "$($device.deviceName) / $($app.displayName) ($processedDevices of $($devices.Count) devices - $Percentage%)" -PercentComplete $Percentage
 
                                 if ($MinimumVersion -and $app.version) {
                                     if (-not (Test-NCIntuneVersionAtLeast -CurrentVersion $app.version -MinimumVersion $MinimumVersion)) {
@@ -712,7 +722,7 @@ function New-IntuneAppBasedGroup {
                 }
             }
             elseif ($FilterByType -ne 'All') {
-                Write-NCMessage 'FilterByType applies only when deployment data is used. Skipping type filter for detected apps only.' -Level VERBOSE
+                Write-Verbose 'FilterByType applies only when deployment data is used. Skipping type filter for detected apps only.'
             }
 
             Write-NCMessage "Processing groups for $($appDeviceMap.Count) applications ..." -Level INFO
@@ -766,8 +776,13 @@ function New-IntuneAppBasedGroup {
                 $processedApps++
                 $appName = $target.AppName
                 $appInfo = $target
-                $uniqueDevices = $appInfo.Devices | Select-Object -Property DeviceId -Unique
-                $deviceCount = $uniqueDevices.Count
+                $uniqueDeviceIds = @(
+                    $appInfo.Devices |
+                        ForEach-Object { Get-NCCoreProperty -Object $_ -Names @('DeviceId', 'deviceId', 'Id', 'id') } |
+                        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+                        Select-Object -Unique
+                )
+                $deviceCount = $uniqueDeviceIds.Count
 
                 if ($deviceCount -eq 0) {
                     continue
@@ -781,7 +796,10 @@ function New-IntuneAppBasedGroup {
                     $groupName = Get-NCIntuneAppBasedGroupName -AppName $appName -GroupPrefix $GroupPrefix -GroupSuffix $GroupSuffix
                     $groupDescription = "Devices with $appName installed (Created via Nebula.Core)"
                 }
-                Write-Progress -Activity 'Processing App Groups' -Status "$processedApps of $($groupTargets.Count) groups" -CurrentOperation "App: $appName | Group: $groupName" -PercentComplete (($processedApps / [Math]::Max($groupTargets.Count, 1)) * 100)
+
+                $Percentage = ($processedApps / [Math]::Max($groupTargets.Count, 1)) * 100
+                Write-Progress -Activity 'Processing App Groups' -Status "$appName / $groupName ($processedApps of $($groupTargets.Count) groups - $Percentage%)" -PercentComplete $Percentage
+
                 if ($DryRun.IsPresent) {
                     Write-NCMessage "[DRY RUN] Would create/update group: $groupName" -Level INFO
                     Write-NCMessage "Total devices with app matches: $deviceCount" -Level INFO
@@ -816,45 +834,26 @@ function New-IntuneAppBasedGroup {
                 $entraDevices = @()
                 $processedMembers = 0
 
-                foreach ($device in $uniqueDevices) {
+                foreach ($deviceId in $uniqueDeviceIds) {
                     $processedMembers++
 
                     try {
-                        $intuneDevice = $devices | Where-Object { $_.id -eq $device.DeviceId } | Select-Object -First 1
-                        $deviceLabel = if ($intuneDevice -and -not [string]::IsNullOrWhiteSpace($intuneDevice.deviceName)) {
-                            $intuneDevice.deviceName
-                        }
-                        else {
-                            $device.DeviceId
-                        }
+                        $Percentage = [Math]::Round(($processedMembers / [Math]::Max($uniqueDeviceIds.Count, 1)) * 100, 2)
+                        $resolution = Resolve-NCIntuneManagedDeviceEntraMember -ManagedDevices $devices -DeviceId $deviceId
+                        $deviceLabel = if ($resolution -and -not [string]::IsNullOrWhiteSpace($resolution.DeviceName)) { $resolution.DeviceName } else { [string]$deviceId }
+                        Write-Progress -Activity 'Resolving Entra Devices' -Status "$deviceLabel ($processedMembers of $($uniqueDeviceIds.Count) devices - $Percentage%)" -PercentComplete $Percentage
 
-                        Write-Progress -Activity 'Resolving Entra Devices' -Status "$processedMembers of $($uniqueDevices.Count) devices" -CurrentOperation "Device: $deviceLabel" -PercentComplete (($processedMembers / [Math]::Max($uniqueDevices.Count, 1)) * 100)
-
-                        if ($intuneDevice -and $intuneDevice.azureADDeviceId) {
-                            $filter = "deviceId eq '$($intuneDevice.azureADDeviceId)'"
-                            $entraDeviceUri = "https://graph.microsoft.com/v1.0/devices?`$filter=$filter"
-                            $entraDeviceResponse = Invoke-MgGraphRequest -Uri $entraDeviceUri -Method GET
-
-                            if ($entraDeviceResponse.value -and $entraDeviceResponse.value.Count -gt 0) {
-                                $entraDevice = $entraDeviceResponse.value[0]
-                                $memberIds += "https://graph.microsoft.com/v1.0/directoryObjects/$($entraDevice.id)"
-                                $entraDevices += @{
-                                    IntuneDeviceId = $device.DeviceId
-                                    EntraDeviceId  = $entraDevice.id
-                                    DeviceName     = $intuneDevice.deviceName
-                                }
-                                Write-NCMessage "Found Entra ID device: $($intuneDevice.deviceName) -> $($entraDevice.id)" -Level VERBOSE
+                        if ($resolution) {
+                            $memberIds += "https://graph.microsoft.com/v1.0/directoryObjects/$($resolution.EntraDeviceId)"
+                            $entraDevices += @{
+                                IntuneDeviceId = $resolution.IntuneDeviceId
+                                EntraDeviceId  = $resolution.EntraDeviceId
+                                DeviceName     = $resolution.DeviceName
                             }
-                            else {
-                                Write-NCMessage "Device not found in Entra ID: $($intuneDevice.deviceName) (Azure AD Device ID: $($intuneDevice.azureADDeviceId))" -Level WARNING
-                            }
-                        }
-                        else {
-                            Write-NCMessage "No Azure AD Device ID for: $($intuneDevice.deviceName)" -Level WARNING
                         }
                     }
                     catch {
-                        Write-NCMessage "Error looking up Entra ID device for $($intuneDevice.deviceName): $($_.Exception.Message)" -Level ERROR
+                        Write-NCMessage "Error looking up Entra ID device for $($deviceId): $($_.Exception.Message)" -Level ERROR
                     }
                 }
 
@@ -952,7 +951,7 @@ function New-IntuneAppBasedGroup {
                         }
                         catch {
                             Write-NCMessage "Failed to create group: $($_.Exception.Message)" -Level ERROR
-                            Write-NCMessage "Group body: $groupBody" -Level VERBOSE
+                            Write-Verbose "Group body: $groupBody"
                         }
                     }
                 }

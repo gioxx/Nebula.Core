@@ -211,7 +211,7 @@ function Add-UserMsolAccountSku {
             try {
                 Update-MgUser -UserId $user.Id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
                 $user.UsageLocation = $targetUsage
-                Write-NCMessage "Usage location set to $targetUsage for $($user.UserPrincipalName)." -Level VERBOSE
+                Write-Verbose "Usage location set to $targetUsage for $($user.UserPrincipalName)."
             }
             catch {
                 Write-NCMessage "Unable to set usage location ($targetUsage) for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
@@ -331,7 +331,7 @@ function Copy-UserMsolAccountSku {
             try {
                 Update-MgUser -UserId $destinationUser.Id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
                 $destinationUser.UsageLocation = $targetUsage
-                Write-NCMessage "Usage location set to $targetUsage for $($destinationUser.UserPrincipalName)." -Level VERBOSE
+                Write-Verbose "Usage location set to $targetUsage for $($destinationUser.UserPrincipalName)."
             }
             catch {
                 Write-NCMessage "Unable to set usage location ($targetUsage) for $($destinationUser.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
@@ -407,7 +407,7 @@ function Copy-UserMsolAccountSku {
             }
 
             if ($destinationSkuIds -contains $parsedGuid) {
-                Write-NCMessage "Destination already has $($lic.SkuPartNumber); skipping add." -Level VERBOSE
+                Write-Verbose "Destination already has $($lic.SkuPartNumber); skipping add."
                 continue
             }
 
@@ -419,7 +419,7 @@ function Copy-UserMsolAccountSku {
                         $validatedDisabled += $plan
                     }
                     elseif (-not [string]::IsNullOrWhiteSpace($planString)) {
-                        Write-NCMessage "Skipping invalid disabled plan '$planString' for $($lic.SkuPartNumber)." -Level VERBOSE
+                        Write-Verbose "Skipping invalid disabled plan '$planString' for $($lic.SkuPartNumber)."
                     }
                 }
             }
@@ -489,6 +489,9 @@ function Export-MsolAccountSku {
     .PARAMETER Domain
         Optional domain filter. When specified, only users whose Mail, UserPrincipalName,
         or ProxyAddresses belong to that domain are exported.
+    .PARAMETER License
+        Optional license filter. When specified, only users who have at least one matching
+        license are exported, but all of their assigned licenses are still included in the report.
     .PARAMETER ForceLicenseCatalogRefresh
         Force a fresh download of the cached license catalog before processing.
     .PARAMETER ShowErrorDetails
@@ -499,12 +502,15 @@ function Export-MsolAccountSku {
         Export-MsolAccountSku -CsvFolder "C:\Temp"
     .EXAMPLE
         Export-MsolAccountSku -Domain "contoso.com"
+    .EXAMPLE
+        Export-MsolAccountSku -License "Exchange Online (Plan 1)"
     #>
     [CmdletBinding()]
     param(
         [Parameter(ValueFromPipeline = $True, HelpMessage = "Folder where export CSV file (e.g. C:\Temp)")]
         [string]$CSVFolder,
         [string]$Domain,
+        [string[]]$License,
         [switch]$ForceLicenseCatalogRefresh
     )
 
@@ -528,6 +534,28 @@ function Export-MsolAccountSku {
 
         $licenseLookup = $licenseCatalog.Lookup
         $customLookup = $licenseCatalog.CustomLookup
+        $tenantSkus = @()
+        if ($License) {
+            try {
+                $tenantSkus = Invoke-NCRetry -Action {
+                    Get-MgSubscribedSku -All -ErrorAction Stop
+                } -MaxAttempts 3 -DelaySeconds 5 -OperationDescription "retrieve tenant licenses" -OnError {
+                    param($attempt, $max, $err)
+                    $currentAttempt = if ($attempt) { $attempt } else { '?' }
+                    $currentMax = if ($max) { $max } else { 3 }
+                    Write-NCMessage "Failed to retrieve tenant licenses, attempt $currentAttempt of $currentMax." -Level ERROR
+                }
+            }
+            catch {
+                Write-NCMessage "Unable to retrieve tenant licenses for license filtering." -Level ERROR
+                return
+            }
+
+            if (-not $tenantSkus -or $tenantSkus.Count -eq 0) {
+                Write-NCMessage "No tenant licenses available to filter on." -Level WARNING
+                return
+            }
+        }
         $arr_MsolAccountSku = @()
         $ProcessedCount = 0
         $maxAttempts = 3
@@ -540,7 +568,7 @@ function Export-MsolAccountSku {
                 Write-NCMessage "Domain filter cannot be empty." -Level ERROR
                 return
             } else {
-                Write-NCMessage "Filtering users for domain '$normalizedDomain'." -Level VERBOSE
+                Write-Verbose "Filtering users for domain '$normalizedDomain'."
             }
         }
 
@@ -562,6 +590,105 @@ function Export-MsolAccountSku {
             }
 
             return $address.Substring($atIndex + 1).Trim().ToLowerInvariant()
+        }
+
+        $normalizeText = {
+            param($value)
+
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                return $null
+            }
+
+            return $value.Trim().ToUpperInvariant()
+        }
+
+        $resolveLicenseFilter = {
+            param(
+                [string[]]$RequestedLicenses,
+                $TenantSkus,
+                $Lookup,
+                $FallbackLookup
+            )
+
+            $resolved = @()
+            $unmatched = @()
+
+            $requestedItems = $RequestedLicenses |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                ForEach-Object { $_.Trim() } |
+                Select-Object -Unique
+
+            foreach ($entry in $requestedItems) {
+                $target = & $normalizeText $entry
+                $match = $null
+
+                foreach ($sku in $TenantSkus) {
+                    $skuIdString = [string]$sku.SkuId
+                    $skuIdNormalized = if ($skuIdString) { $skuIdString.ToUpperInvariant() } else { $null }
+                    $skuPart = & $normalizeText $sku.SkuPartNumber
+
+                    $display = $null
+                    $matchSource = $null
+                    if ($Lookup) {
+                        $display = Get-LicenseDisplayName -Lookup $Lookup -SkuPartNumber $sku.SkuPartNumber -FallbackLookup $FallbackLookup -MatchSource ([ref]$matchSource)
+                    }
+                    $displayNormalized = if ($display) { & $normalizeText $display } else { $null }
+
+                    if ($target -eq $skuPart -or $target -eq $skuIdNormalized -or ($displayNormalized -and $target -eq $displayNormalized)) {
+                        $match = [pscustomobject]@{
+                            SkuId         = $sku.SkuId
+                            SkuPartNumber = $sku.SkuPartNumber
+                            Name          = if ($display) { $display } else { $sku.SkuPartNumber }
+                        }
+                        break
+                    }
+                }
+
+                if ($match) {
+                    $resolved += $match
+                }
+                else {
+                    $unmatched += $entry
+                }
+            }
+
+            [pscustomobject]@{
+                Resolved  = $resolved
+                Unmatched = $unmatched
+            }
+        }
+
+        $licenseFilter = $null
+        $licenseFilterIds = @()
+        $licenseFilterParts = @()
+        $licenseFilterNames = @()
+        if ($License) {
+            $licenseFilter = & $resolveLicenseFilter $License $tenantSkus $licenseLookup $customLookup
+            if ($licenseFilter.Unmatched.Count -gt 0) {
+                Write-NCMessage ("Unable to resolve license filter(s): {0}" -f ($licenseFilter.Unmatched -join ', ')) -Level ERROR
+                return
+            }
+
+            $licenseFilterIds = @(
+                $licenseFilter.Resolved |
+                    ForEach-Object { ([string]$_.SkuId).ToUpperInvariant() } |
+                    Where-Object { $_ } |
+                    Select-Object -Unique
+            )
+            $licenseFilterParts = @(
+                $licenseFilter.Resolved |
+                    ForEach-Object { & $normalizeText $_.SkuPartNumber } |
+                    Where-Object { $_ } |
+                    Select-Object -Unique
+            )
+            $licenseFilterNames = @(
+                $licenseFilter.Resolved |
+                    ForEach-Object { $_.Name } |
+                    Where-Object { $_ } |
+                    Select-Object -Unique
+            )
+
+            Write-Verbose ("Filtering users by license(s): {0}" -f ($licenseFilterNames -join ', '))
         }
 
         $matchesDomain = {
@@ -619,17 +746,17 @@ function Export-MsolAccountSku {
 
         foreach ($User in $Users) {
             $ProcessedCount++
-            $PercentComplete = (($ProcessedCount / $totalUsers) * 100)
-            Write-Progress -Activity "Processing $($User.DisplayName)" -Status "$ProcessedCount out of $totalUsers ($($PercentComplete.ToString('0.00'))%)" -PercentComplete $PercentComplete
+            $Percentage = [Math]::Round(($ProcessedCount / [Math]::Max($totalUsers, 1)) * 100, 2)
+            Write-Progress -Activity "Processing $($User.DisplayName)" -Status "$ProcessedCount out of $totalUsers ($Percentage%)" -PercentComplete $Percentage
 
             if ($ProcessedUsers -contains $User.UserPrincipalName) {
                 Write-NCMessage "Skipping $($User.UserPrincipalName), already processed." -Level WARNING
                 continue
             }
 
-        try {
-            $GraphLicense = Invoke-NCRetry -Action {
-                Get-MgUserLicenseDetail -UserId $User.Id -ErrorAction Stop
+            try {
+                $GraphLicense = Invoke-NCRetry -Action {
+                    Get-MgUserLicenseDetail -UserId $User.Id -ErrorAction Stop
             } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve licenses for $($User.UserPrincipalName)" -OnError {
                 param($attempt, $max, $err)
                 $currentAttempt = if ($attempt) { $attempt } else { '?' }
@@ -642,34 +769,56 @@ function Export-MsolAccountSku {
                 continue
             }
 
+            $userMatchesLicenseFilter = -not $License
+            $userMatchedLicenseNames = @()
+            $userRows = @()
+
             if ($null -ne $GraphLicense) {
-                foreach ($licenseSku in $GraphLicense.SkuPartNumber) {
+                foreach ($licenseSku in $GraphLicense) {
                     $matchSource = $null
+                    $skuIdString = if ($licenseSku.SkuId) { [string]$licenseSku.SkuId } else { $null }
+                    $skuIdNormalized = if ($skuIdString) { $skuIdString.ToUpperInvariant() } else { $null }
+                    $skuPartNormalized = & $normalizeText $licenseSku.SkuPartNumber
+
                     $productName = Get-LicenseDisplayName -Lookup $licenseLookup `
-                        -SkuPartNumber $licenseSku `
+                        -SkuPartNumber $licenseSku.SkuPartNumber `
                         -FallbackLookup $customLookup `
                         -MatchSource ([ref]$matchSource)
 
                     if (-not $productName) {
-                        Write-NCMessage "Unknown license: $licenseSku for $($User.UserPrincipalName)" -Level VERBOSE
-                        if ($unknownSkuTracker.ContainsKey($licenseSku)) {
-                            $unknownSkuTracker[$licenseSku]++
+                        Write-Verbose "Unknown license: $($licenseSku.SkuPartNumber) for $($User.UserPrincipalName)"
+                        if ($unknownSkuTracker.ContainsKey($licenseSku.SkuPartNumber)) {
+                            $unknownSkuTracker[$licenseSku.SkuPartNumber]++
                         }
                         else {
-                            $unknownSkuTracker[$licenseSku] = 1
+                            $unknownSkuTracker[$licenseSku.SkuPartNumber] = 1
                         }
-                        $productName = $licenseSku
+                        $productName = $licenseSku.SkuPartNumber
                     }
                     elseif ($matchSource -and $matchSource -ne 'Primary') {
-                        if ($resolvedViaCustom.ContainsKey($licenseSku)) {
-                            $resolvedViaCustom[$licenseSku]++
+                        if ($resolvedViaCustom.ContainsKey($licenseSku.SkuPartNumber)) {
+                            $resolvedViaCustom[$licenseSku.SkuPartNumber]++
                         }
                         else {
-                            $resolvedViaCustom[$licenseSku] = 1
+                            $resolvedViaCustom[$licenseSku.SkuPartNumber] = 1
                         }
                     }
 
-                    $arr_MsolAccountSku += [pscustomobject]@{
+                    if ($License -and -not $userMatchesLicenseFilter) {
+                        if (($skuIdNormalized -and ($licenseFilterIds -contains $skuIdNormalized)) -or
+                            ($skuPartNormalized -and ($licenseFilterParts -contains $skuPartNormalized))) {
+                            $userMatchesLicenseFilter = $true
+                            $userMatchedLicenseNames += if ($productName) { $productName } else { $licenseSku.SkuPartNumber }
+                        }
+                    }
+                    elseif ($License) {
+                        if (($skuIdNormalized -and ($licenseFilterIds -contains $skuIdNormalized)) -or
+                            ($skuPartNormalized -and ($licenseFilterParts -contains $skuPartNormalized))) {
+                            $userMatchedLicenseNames += if ($productName) { $productName } else { $licenseSku.SkuPartNumber }
+                        }
+                    }
+
+                    $userRows += [pscustomobject]@{
                         DisplayName        = $User.DisplayName
                         UserPrincipalName  = $User.UserPrincipalName
                         PrimarySmtpAddress = $User.Mail
@@ -678,8 +827,26 @@ function Export-MsolAccountSku {
                 }
             }
 
+            if ($License -and -not $userMatchesLicenseFilter) {
+                continue
+            }
+
+            if ($License -and $userMatchedLicenseNames.Count -gt 0) {
+                $matchedNames = $userMatchedLicenseNames | Select-Object -Unique
+                $userRows = $userRows | ForEach-Object {
+                    $_ | Add-Member -NotePropertyName MatchedLicenses -NotePropertyValue ($matchedNames -join ', ') -PassThru
+                }
+            }
+            elseif ($License) {
+                $userRows = $userRows | ForEach-Object {
+                    $_ | Add-Member -NotePropertyName MatchedLicenses -NotePropertyValue $null -PassThru
+                }
+            }
+
+            $arr_MsolAccountSku += $userRows
+
             if ($ProcessedCount % 50 -eq 0) {
-                Write-NCMessage "Processed $ProcessedCount out of $totalUsers, saving partial results ..." -Level VERBOSE
+                Write-Verbose "Processed $ProcessedCount out of $totalUsers, saving partial results ..."
                 $arr_MsolAccountSku | Export-CSV $CSV -NoTypeInformation -Delimiter $($NCVars.CSV_DefaultLimiter) -Encoding $($NCVars.CSV_Encoding) -Append
             }
         }
@@ -1098,7 +1265,7 @@ function Get-UserMsolAccountSku {
                     Write-NCMessage ("  - {0}{2} ({1})" -f $display, $skuId, $suffix) -Level INFO
                 }
                 else {
-                    Write-NCMessage ("  - Unknown license: {0} ({1})" -f $skuPart, $skuId) -Level VERBOSE
+                    Write-Verbose ("  - Unknown license: {0} ({1})" -f $skuPart, $skuId)
                     Write-NCMessage ("  - {0} ({1})" -f $skuPart, $skuId) -Level WARNING
                 }
 
@@ -1129,7 +1296,7 @@ function Get-UserMsolAccountSku {
             }
         }
         else {
-            Write-NCMessage "No licenses assigned to this user." -Level VERBOSE
+            Write-Verbose "No licenses assigned to this user."
         }
     }
     end {
@@ -1231,7 +1398,7 @@ function Move-UserMsolAccountSku {
             try {
                 Update-MgUser -UserId $destinationUser.Id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
                 $destinationUser.UsageLocation = $targetUsage
-                Write-NCMessage "Usage location set to $targetUsage for $($destinationUser.UserPrincipalName)." -Level VERBOSE
+                Write-Verbose "Usage location set to $targetUsage for $($destinationUser.UserPrincipalName)."
             }
             catch {
                 Write-NCMessage "Unable to set usage location ($targetUsage) for $($destinationUser.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
@@ -1295,7 +1462,7 @@ function Move-UserMsolAccountSku {
                     $destinationSkuIds += $parsedSku
                 }
                 elseif (-not [string]::IsNullOrWhiteSpace([string]$sku)) {
-                    Write-NCMessage "Skipping invalid destination SkuId '$sku'." -Level VERBOSE
+                    Write-Verbose "Skipping invalid destination SkuId '$sku'."
                 }
             }
         }
@@ -1320,7 +1487,7 @@ function Move-UserMsolAccountSku {
 
             $removeSkuIds += $parsedGuid
             if ($destinationSkuIds -contains $parsedGuid) {
-                Write-NCMessage "Destination already has $($lic.SkuPartNumber); skipping add." -Level VERBOSE
+                Write-Verbose "Destination already has $($lic.SkuPartNumber); skipping add."
                 continue
             }
 
@@ -1332,7 +1499,7 @@ function Move-UserMsolAccountSku {
                         $validatedDisabled += $plan
                     }
                     elseif (-not [string]::IsNullOrWhiteSpace($planString)) {
-                        Write-NCMessage "Skipping invalid disabled plan '$planString' for $($lic.SkuPartNumber)." -Level VERBOSE
+                        Write-Verbose "Skipping invalid disabled plan '$planString' for $($lic.SkuPartNumber)."
                     }
                 }
             }

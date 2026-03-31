@@ -59,8 +59,8 @@ function Disable-UserDevices {
 
             foreach ($upn in $queue) {
                 $counter++
-                $percent = (($counter / $queue.Count) * 100)
-                Write-Progress -Activity "Resolving user $upn" -Status "$counter of $($queue.Count) ($($percent.ToString('0.00'))%)" -PercentComplete $percent
+                $Percentage = [Math]::Round(($counter / [Math]::Max($queue.Count, 1)) * 100, 2)
+                Write-Progress -Activity "Resolving user $upn" -Status "$counter of $($queue.Count) ($Percentage%)" -PercentComplete $Percentage
 
                 try {
                     $resolvedUpn = Find-UserRecipient -UserPrincipalName $upn
@@ -185,8 +185,8 @@ function Disable-UserSignIn {
 
             foreach ($upn in $queue) {
                 $counter++
-                $percent = (($counter / $queue.Count) * 100)
-                Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) ($($percent.ToString('0.00'))%)" -PercentComplete $percent
+                $Percentage = [Math]::Round(($counter / [Math]::Max($queue.Count, 1)) * 100, 2)
+                Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) ($Percentage%)" -PercentComplete $Percentage
 
                 try {
                     $resolvedUpn = Find-UserRecipient -UserPrincipalName $upn
@@ -346,8 +346,8 @@ function Revoke-UserSessions {
 
             foreach ($user in $queue) {
                 $counter++
-                $percent = (($counter / $queue.Count) * 100)
-                Write-Progress -Activity "Revoking sessions" -Status "$counter of $($queue.Count) ($($percent.ToString('0.00'))%)" -PercentComplete $percent
+                $Percentage = [Math]::Round(($counter / [Math]::Max($queue.Count, 1)) * 100, 2)
+                Write-Progress -Activity "Revoking sessions" -Status "$counter of $($queue.Count) ($Percentage%)" -PercentComplete $Percentage
 
                 if ($exclusions.Contains($user.UserPrincipalName)) {
                     Write-NCMessage ("Skipping user {0}" -f $user.UserPrincipalName) -Level INFO

@@ -519,8 +519,8 @@ function Get-QuarantineToRelease {
         $counter = 0
         foreach ($item in $selection) {
             $counter++
-            $percentComplete = (($counter / $selection.Count) * 100)
-            Write-Progress -Activity "Processing $($item.Subject)" -Status "$counter of $($selection.Count) ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+            $Percentage = [Math]::Round(($counter / [Math]::Max($selection.Count, 1)) * 100, 2)
+            Write-Progress -Activity "Processing $($item.Subject)" -Status "$counter of $($selection.Count) ($Percentage%)" -PercentComplete $Percentage
 
             if ($ReleaseSelected.IsPresent) {
                 if ($PSCmdlet.ShouldProcess($item.Subject, "Release quarantined message")) {
@@ -613,7 +613,7 @@ function Unlock-QuarantineFrom {
 
             try {
                 $messages = Get-QuarantineMessage -SenderAddress $currentSender -ErrorAction Stop | Where-Object { $_.ReleaseStatus -ne "Released" -and $null -ne $_.QuarantinedUser }
-                Write-NCMessage "Found $($messages.Count) message(s) from $currentSender not yet released." -Level VERBOSE
+                Write-Verbose "Found $($messages.Count) message(s) from $currentSender not yet released."
             }
             catch {
                 Write-NCMessage "Unable to retrieve messages for '$currentSender'. $($_.Exception.Message)" -Level ERROR
@@ -623,7 +623,7 @@ function Unlock-QuarantineFrom {
             foreach ($msg in $messages) {
                 if ($PSCmdlet.ShouldProcess($msg.Identity, "Release quarantined message")) {
                     try {
-                        Write-NCMessage "Trying to release $($msg.Identity) to $($msg.RecipientAddress)  ..." -Level VERBOSE
+                        Write-Verbose "Trying to release $($msg.Identity) to $($msg.RecipientAddress)  ..."
                         $releaseParams = @{
                             Identity            = $msg.Identity
                             ReleaseToAll        = $true
@@ -732,9 +732,9 @@ function Unlock-QuarantineMessageId {
 
             $processed++
             if ($targetCount -gt 1) {
-                $percentComplete = (($processed / $targetCount) * 100)
+                $Percentage = [Math]::Round(($processed / [Math]::Max($targetCount, 1)) * 100, 2)
                 $statusMessage = "$processed of $targetCount ($($msg.Identity))"
-                Write-Progress -Activity "Releasing quarantined messages" -Status $statusMessage -PercentComplete $percentComplete
+                Write-Progress -Activity "Releasing quarantined messages" -Status $statusMessage -PercentComplete $Percentage
             }
 
             if ($PSCmdlet.ShouldProcess($msg.Identity, "Release quarantined message")) {

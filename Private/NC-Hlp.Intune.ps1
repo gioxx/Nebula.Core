@@ -3,6 +3,114 @@ using namespace System.Management.Automation
 
 # Nebula.Core: (Private) Intune helpers =============================================================================================================
 
+function Convert-NCGraphObjectToPlainObject {
+    param($Object)
+
+    if ($null -eq $Object) { return $null }
+
+    try {
+        return (($Object | ConvertTo-Json -Depth 20 -Compress) | ConvertFrom-Json -Depth 20)
+    }
+    catch {
+        return $Object
+    }
+}
+
+function Get-NCCoreProperty {
+    param($Object, [string[]]$Names)
+
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) {
+        foreach ($name in $Names) {
+            if ($Object.Contains($name) -and -not [string]::IsNullOrWhiteSpace([string]$Object[$name])) {
+                return $Object[$name]
+            }
+        }
+    }
+
+    $additionalProperties = $Object.PSObject.Properties['AdditionalProperties']
+    if ($additionalProperties -and $additionalProperties.Value -is [System.Collections.IDictionary]) {
+        foreach ($name in $Names) {
+            if ($additionalProperties.Value.Contains($name) -and -not [string]::IsNullOrWhiteSpace([string]$additionalProperties.Value[$name])) {
+                return $additionalProperties.Value[$name]
+            }
+        }
+    }
+
+    foreach ($name in $Names) {
+        $property = $Object.PSObject.Properties[$name]
+        if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            return $property.Value
+        }
+    }
+    return $null
+}
+
+function Resolve-NCIntuneManagedDeviceEntraMember {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$ManagedDevices,
+        [Parameter(Mandatory = $true)]
+        [string]$DeviceId
+    )
+
+    $intuneDevice = $ManagedDevices | Where-Object { [string]$_.id -eq [string]$DeviceId } | Select-Object -First 1
+    $intuneDevicePlain = Convert-NCGraphObjectToPlainObject -Object $intuneDevice
+
+    $deviceLabel = Get-NCCoreProperty -Object $intuneDevicePlain -Names @('deviceName', 'DeviceName', 'displayName', 'DisplayName', 'id', 'Id')
+    if ([string]::IsNullOrWhiteSpace($deviceLabel)) {
+        $deviceLabel = [string]$DeviceId
+    }
+
+    $azureAdDeviceId = Get-NCCoreProperty -Object $intuneDevicePlain -Names @('azureADDeviceId', 'azureActiveDirectoryDeviceId', 'azureAdDeviceId')
+    if ($intuneDevicePlain -and -not $azureAdDeviceId) {
+        try {
+            $deviceDetailUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$DeviceId?`$select=id,deviceName,operatingSystem,userPrincipalName,azureADDeviceId,azureActiveDirectoryDeviceId"
+            $deviceDetails = Invoke-MgGraphRequest -Uri $deviceDetailUri -Method GET
+            $deviceDetailsPlain = Convert-NCGraphObjectToPlainObject -Object $deviceDetails
+            $azureAdDeviceId = Get-NCCoreProperty -Object $deviceDetailsPlain -Names @('azureADDeviceId', 'azureActiveDirectoryDeviceId', 'azureAdDeviceId')
+        }
+        catch {
+            Write-NCMessage "Unable to refresh Intune device details for ${deviceLabel}: $($_.Exception.Message)" -Level WARNING
+        }
+    }
+
+    if (-not $intuneDevicePlain) {
+        Write-NCMessage "No Azure AD Device ID for: $deviceLabel" -Level WARNING
+        return $null
+    }
+
+    if (-not $azureAdDeviceId) {
+        Write-NCMessage "No Azure AD Device ID for: $deviceLabel" -Level WARNING
+        return $null
+    }
+
+    $filter = "deviceId eq '$azureAdDeviceId'"
+    $entraDeviceUri = "https://graph.microsoft.com/v1.0/devices?`$filter=$filter"
+
+    try {
+        $entraDeviceResponse = Invoke-MgGraphRequest -Uri $entraDeviceUri -Method GET
+    }
+    catch {
+        Write-NCMessage "Error looking up Entra ID device for ${deviceLabel}: $($_.Exception.Message)" -Level ERROR
+        return $null
+    }
+
+    if ($entraDeviceResponse.value -and $entraDeviceResponse.value.Count -gt 0) {
+        $entraDevice = $entraDeviceResponse.value[0]
+        Write-NCMessage "Found Entra ID device: $deviceLabel -> $($entraDevice.id)" -Level INFO
+        return [pscustomobject]@{
+            IntuneDeviceId  = $DeviceId
+            EntraDeviceId   = $entraDevice.id
+            DeviceName      = $deviceLabel
+            AzureAdDeviceId = $azureAdDeviceId
+        }
+    }
+
+    Write-NCMessage "Device not found in Entra ID: $deviceLabel (Azure AD Device ID: $azureAdDeviceId)" -Level WARNING
+    return $null
+}
+
 function Invoke-NCIntuneGroupUsageCore {
     <#
     .SYNOPSIS
@@ -65,26 +173,6 @@ function Invoke-NCIntuneGroupUsageCore {
         }
 
         return @($items)
-    }
-
-    function Get-NCCoreProperty {
-        param($Object, [string[]]$Names)
-
-        if ($null -eq $Object) { return $null }
-        if ($Object -is [System.Collections.IDictionary]) {
-            foreach ($name in $Names) {
-                if ($Object.Contains($name) -and -not [string]::IsNullOrWhiteSpace([string]$Object[$name])) {
-                    return $Object[$name]
-                }
-            }
-        }
-        foreach ($name in $Names) {
-            $property = $Object.PSObject.Properties[$name]
-            if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-                return $property.Value
-            }
-        }
-        return $null
     }
 
     function Test-NCCoreNameMatch {
@@ -332,7 +420,7 @@ function Invoke-NCIntuneGroupUsageCore {
     }
 
     Add-EmptyLine
-    Write-NCMessage "Scanning $($scannedIds.Count) Intune profile(s) for group '$($resolvedGroup.DisplayName)' ..." -Level VERBOSE
+    Write-Verbose "Scanning $($scannedIds.Count) Intune profile(s) for group '$($resolvedGroup.DisplayName)' ..."
 
     foreach ($entity in $deviceConfigurations) {
         $entityId = [string](Get-NCCoreProperty -Object $entity -Names @('id', 'Id'))
@@ -379,7 +467,7 @@ function Invoke-NCIntuneGroupUsageCore {
     $sorted = $results | Sort-Object 'Category', 'Profile Name', 'Assignment' -Unique
 
     Add-EmptyLine
-    Write-NCMessage "Intune profiles found for '$($resolvedGroup.DisplayName)': $($sorted.Count)" -Level VERBOSE
+    Write-Verbose "Intune profiles found for '$($resolvedGroup.DisplayName)': $($sorted.Count)"
 
     if ($sorted.Count -eq 0) {
         Write-NCMessage "No Intune profiles found for group '$($resolvedGroup.DisplayName)'." -Level WARNING
@@ -431,7 +519,7 @@ function Invoke-NCGraphCollectionRequest {
             }
 
             if ($requestCount % 10 -eq 0) {
-                Write-NCMessage "." -Level INFO -NoNewline
+                Write-Verbose "."
             }
 
             $nextLink = $response.'@odata.nextLink'
@@ -439,7 +527,7 @@ function Invoke-NCGraphCollectionRequest {
         }
         catch {
             if ($_.Exception.Message -like '*429*') {
-                Write-NCMessage "`nRate limit hit, waiting 60 seconds ..." -Level INFO
+                Write-Verbose "`nRate limit hit, waiting 60 seconds ..."
                 Start-Sleep -Seconds 60
                 continue
             }
@@ -492,12 +580,12 @@ function Invoke-NCGraphAllPagesCore {
 
             $nextLink = $response.'@odata.nextLink'
             if ($requestCount % 10 -eq 0) {
-                Write-NCMessage "." -Level INFO -NoNewline
+                Write-Verbose "."
             }
         }
         catch {
             if ($_.Exception.Message -like "*429*") {
-                Write-NCMessage "`nRate limit hit, waiting 60 seconds ..." -Level INFO
+                Write-Verbose "`nRate limit hit, waiting 60 seconds ..."
                 Start-Sleep -Seconds 60
                 continue
             }

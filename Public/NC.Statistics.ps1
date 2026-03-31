@@ -75,8 +75,8 @@ function Export-MboxStatistics {
 
         foreach ($mailbox in $mailboxes) {
             $processedCount++
-            $percentComplete = (($processedCount / $totalMailboxes) * 100)
-            Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+            $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
+            Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes ($Percentage%)" -PercentComplete $Percentage
 
             $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
             $mailboxSizeGb = if ($stats) { Convert-MbxSizeToGB -SizeObject $stats.TotalItemSize } else { "Error" }
@@ -122,7 +122,7 @@ function Export-MboxStatistics {
                     $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter)
                     $csvInitialized = $true
                 }
-                Write-NCMessage "Processed $processedCount / $totalMailboxes mailboxes, flushed batch to CSV." -Level VERBOSE
+                Write-Verbose "Processed $processedCount / $totalMailboxes mailboxes, flushed batch to CSV."
                 $statsBuffer.Clear()
             }
         }
@@ -221,8 +221,8 @@ function Export-MboxDeletedItemSize {
 
             foreach ($mailbox in $mailboxes) {
                 $processedCount++
-                $percentComplete = (($processedCount / $totalMailboxes) * 100)
-                Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+                $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
+                Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes ($Percentage%)" -PercentComplete $Percentage
 
                 $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
                 if (-not $stats) {
@@ -332,8 +332,8 @@ function Get-MboxStatistics {
 
             foreach ($mailbox in $mailboxes) {
                 $processedCount++
-                $percentComplete = (($processedCount / $totalMailboxes) * 100)
-                Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+                $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
+                Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes ($Percentage%)" -PercentComplete $Percentage
 
                 $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
                 if (-not $stats) {
