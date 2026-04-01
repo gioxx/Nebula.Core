@@ -56,7 +56,7 @@ function Export-MboxStatistics {
         }
 
         if (-not $mailboxes -or $mailboxes.Count -eq 0) {
-            Write-NCMessage "No mailboxes found matching the provided criteria." -Level WARNING
+            Write-NCMessage "No mailboxes matched the provided criteria." -Level WARNING
             return
         }
 
@@ -76,7 +76,7 @@ function Export-MboxStatistics {
         foreach ($mailbox in $mailboxes) {
             $processedCount++
             $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
-            Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes ($Percentage%)" -PercentComplete $Percentage
+            Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes - $Percentage%" -PercentComplete $Percentage
 
             $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
             $mailboxSizeGb = if ($stats) { Convert-MbxSizeToGB -SizeObject $stats.TotalItemSize } else { "Error" }
@@ -212,7 +212,7 @@ function Export-MboxDeletedItemSize {
             }
 
             if (-not $mailboxes -or $mailboxes.Count -eq 0) {
-                Write-NCMessage "No user mailboxes found matching the provided criteria." -Level WARNING
+                Write-NCMessage "No user mailboxes matched the provided criteria." -Level WARNING
                 return
             }
 
@@ -222,7 +222,7 @@ function Export-MboxDeletedItemSize {
             foreach ($mailbox in $mailboxes) {
                 $processedCount++
                 $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
-                Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes ($Percentage%)" -PercentComplete $Percentage
+                Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes - $Percentage%" -PercentComplete $Percentage
 
                 $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
                 if (-not $stats) {
@@ -323,7 +323,7 @@ function Get-MboxStatistics {
             }
 
             if (-not $mailboxes -or $mailboxes.Count -eq 0) {
-                Write-NCMessage "No mailboxes found matching the provided criteria." -Level WARNING
+                Write-NCMessage "No mailboxes matched the provided criteria." -Level WARNING
                 return
             }
 
@@ -333,7 +333,7 @@ function Get-MboxStatistics {
             foreach ($mailbox in $mailboxes) {
                 $processedCount++
                 $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
-                Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes ($Percentage%)" -PercentComplete $Percentage
+                Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes - $Percentage%" -PercentComplete $Percentage
 
                 $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
                 if (-not $stats) {

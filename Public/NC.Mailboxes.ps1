@@ -323,7 +323,7 @@ function Export-MboxAlias {
 
             $counter++
             $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
-            Write-Progress -Activity "Processing $($recipient.PrimarySmtpAddress)" -Status "$counter of $total ($Percentage%)" -PercentComplete $Percentage
+            Write-Progress -Activity "Processing $($recipient.PrimarySmtpAddress)" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
             $primary = $recipient.PrimarySmtpAddress
             foreach ($address in $recipient.EmailAddresses | Where-Object { $_ -clike 'smtp*' }) {
@@ -403,7 +403,7 @@ function Export-MboxPermission {
         foreach ($mailbox in $mailboxes) {
             $counter++
             $Percentage = [Math]::Round(($counter / [Math]::Max($mailboxes.Count, 1)) * 100, 2)
-            Write-Progress -Activity "Processing $($mailbox.PrimarySmtpAddress)" -Status "$counter of $($mailboxes.Count) ($Percentage%)" -PercentComplete $Percentage
+            Write-Progress -Activity "Processing $($mailbox.PrimarySmtpAddress)" -Status "$counter of $($mailboxes.Count) - $Percentage%" -PercentComplete $Percentage
 
             $exoMailbox = Get-EXOMailbox -Identity $mailbox.Identity
             $sendAs = Get-RecipientPermission -Identity $exoMailbox.PrimarySmtpAddress -AccessRights SendAs | Where-Object { $_.Trustee.ToString() -ne 'NT AUTHORITY\SELF' -and $_.Trustee.ToString() -notlike 'S-1-5*' } | ForEach-Object { $_.Trustee.ToString() }
@@ -1213,7 +1213,7 @@ function Set-MboxLanguage {
 
             $counter++
             $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
-            Write-Progress -Activity "Changing language to $Language" -Status "$counter of $total ($Percentage%)" -PercentComplete $Percentage
+            Write-Progress -Activity "Changing language to $Language" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
             try {
                 Set-MailboxRegionalConfiguration -Identity $address -LocalizeDefaultFolderName:$true -Language $Language -ErrorAction Stop
@@ -1278,7 +1278,7 @@ function Set-MboxRulesQuota {
 
             $counter++
             $Percentage = [Math]::Round(($counter / [Math]::Max($SourceMailbox.Count, 1)) * 100, 2)
-            Write-Progress -Activity "Processing $($recipient.PrimarySmtpAddress)" -Status "$counter of $($SourceMailbox.Count) ($Percentage%)" -PercentComplete $Percentage
+            Write-Progress -Activity "Processing $($recipient.PrimarySmtpAddress)" -Status "$counter of $($SourceMailbox.Count) - $Percentage%" -PercentComplete $Percentage
 
             try {
                 Set-Mailbox -Identity $recipient.PrimarySmtpAddress -RulesQuota 256KB
@@ -1343,7 +1343,7 @@ function Set-SharedMboxCopyForSent {
 
                 $counter++
                 $Percentage = [Math]::Round(($counter / [Math]::Max($SourceMailbox.Count, 1)) * 100, 2)
-                Write-Progress -Activity "Processing $($recipient.PrimarySmtpAddress)" -Status "$counter of $($SourceMailbox.Count) ($Percentage%)" -PercentComplete $Percentage
+                Write-Progress -Activity "Processing $($recipient.PrimarySmtpAddress)" -Status "$counter of $($SourceMailbox.Count) - $Percentage%" -PercentComplete $Percentage
 
                 Set-Mailbox -Identity $recipient.PrimarySmtpAddress -MessageCopyForSentAsEnabled $true
                 Set-Mailbox -Identity $recipient.PrimarySmtpAddress -MessageCopyForSendOnBehalfEnabled $true
@@ -1412,7 +1412,8 @@ function Test-SharedMailboxCompliance {
             return
         }
 
-        Write-NCMessage (" {0} shared mailboxes found." -f $mailboxes.Count) -Level SUCCESS
+        $mailboxLabel = if ($mailboxes.Count -eq 1) { 'shared mailbox found' } else { 'shared mailboxes found' }
+        Write-NCMessage (" {0} {1}." -f $mailboxes.Count, $mailboxLabel) -Level SUCCESS
         $exoPlan1 = '9aaf7827-d63c-4b61-89c3-182f06f82e5c'
         $exoPlan2 = 'efb87545-963c-4e0d-99df-69c6916d9eb0'
         $report = [System.Collections.Generic.List[object]]::new()
@@ -1421,7 +1422,7 @@ function Test-SharedMailboxCompliance {
         foreach ($mbx in $mailboxes) {
             $counter++
             $Percentage = [Math]::Round(($counter / [Math]::Max($mailboxes.Count, 1)) * 100, 2)
-            Write-Progress -Activity "Checking $($mbx.DisplayName)" -Status "$counter of $($mailboxes.Count) ($Percentage%)" -PercentComplete $Percentage
+            Write-Progress -Activity "Checking $($mbx.DisplayName)" -Status "$counter of $($mailboxes.Count) - $Percentage%" -PercentComplete $Percentage
 
             $logsFound = $false
             $exoPlan1Found = $false

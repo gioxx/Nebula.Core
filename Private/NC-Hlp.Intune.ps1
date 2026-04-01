@@ -98,7 +98,7 @@ function Resolve-NCIntuneManagedDeviceEntraMember {
 
     if ($entraDeviceResponse.value -and $entraDeviceResponse.value.Count -gt 0) {
         $entraDevice = $entraDeviceResponse.value[0]
-        Write-NCMessage "Found Entra ID device: $deviceLabel -> $($entraDevice.id)" -Level INFO
+        Write-Verbose "Found Entra ID device: $deviceLabel -> $($entraDevice.id)"
         return [pscustomobject]@{
             IntuneDeviceId  = $DeviceId
             EntraDeviceId   = $entraDevice.id

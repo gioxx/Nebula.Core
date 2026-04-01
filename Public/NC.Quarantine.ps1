@@ -469,7 +469,8 @@ function Get-QuarantineToRelease {
             }
         }
 
-        Write-NCMessage ("Retrieved {0} quarantined items from {1:d} to {2:d}." -f $items.Count, $startDate, $endDate) -Level INFO
+        $itemLabel = if ($items.Count -eq 1) { 'item' } else { 'items' }
+        Write-NCMessage ("Retrieved {0} quarantined {1} from {2:d} to {3:d}." -f $items.Count, $itemLabel, $startDate, $endDate) -Level INFO
 
         if ($Csv.IsPresent) {
             try {
@@ -503,7 +504,8 @@ function Get-QuarantineToRelease {
 
         $selection = $items
         if ($GridView.IsPresent) {
-            $title = "{0} to {1} - {2} items" -f $startDate.Date, $endDate.Date, $items.Count
+            $itemLabel = if ($items.Count -eq 1) { 'item' } else { 'items' }
+            $title = "{0} to {1} - {2} {3}" -f $startDate.Date, $endDate.Date, $items.Count, $itemLabel
             $selection = $items | Sort-Object -Descending ReceivedTime | Out-GridView -Title $title -PassThru
             if (-not $selection) {
                 Write-NCMessage "No items selected." -Level WARNING
@@ -520,7 +522,7 @@ function Get-QuarantineToRelease {
         foreach ($item in $selection) {
             $counter++
             $Percentage = [Math]::Round(($counter / [Math]::Max($selection.Count, 1)) * 100, 2)
-            Write-Progress -Activity "Processing $($item.Subject)" -Status "$counter of $($selection.Count) ($Percentage%)" -PercentComplete $Percentage
+            Write-Progress -Activity "Processing $($item.Subject)" -Status "$counter of $($selection.Count) - $Percentage%" -PercentComplete $Percentage
 
             if ($ReleaseSelected.IsPresent) {
                 if ($PSCmdlet.ShouldProcess($item.Subject, "Release quarantined message")) {

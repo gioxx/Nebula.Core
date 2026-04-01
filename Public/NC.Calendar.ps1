@@ -223,7 +223,7 @@ function Export-CalendarPermission {
             foreach ($mailbox in $targets) {
                 $counter++
                 $Percentage = [Math]::Round(($counter / [Math]::Max($targets.Count, 1)) * 100, 2)
-                Write-Progress -Activity "Processing $($mailbox.PrimarySmtpAddress)" -Status "$counter of $($targets.Count) ($Percentage%)" -PercentComplete $Percentage
+                Write-Progress -Activity "Processing $($mailbox.PrimarySmtpAddress)" -Status "$counter of $($targets.Count) - $Percentage%" -PercentComplete $Percentage
 
                 try {
                     $exoMailbox = Get-EXOMailbox -Identity $mailbox.Identity -ErrorAction Stop
@@ -360,7 +360,7 @@ function Get-RoomDetails {
             foreach ($group in $roomGroups) {
                 $counter++
                 $Percentage = [Math]::Round(($counter / [Math]::Max($roomGroups.Count, 1)) * 100, 2)
-                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $($roomGroups.Count) ($Percentage%)" -PercentComplete $Percentage
+                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $($roomGroups.Count) - $Percentage%" -PercentComplete $Percentage
 
                 try {
                     $members = Get-DistributionGroupMember -Identity $group.PrimarySmtpAddress -ResultSize Unlimited -ErrorAction Stop

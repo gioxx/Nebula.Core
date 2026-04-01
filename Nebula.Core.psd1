@@ -133,8 +133,10 @@
 - Change: Added `Search-IntuneProfileLocation` to locate which Intune Graph surface hosts a profile and return its source, ID, and OData type.
 - Change: Added an optional `-Domain` filter to `Export-MsolAccountSku` so exports can be limited to users in a specific domain, matching `Mail`, `UserPrincipalName`, and `ProxyAddresses`.
 - Change: Added an optional `-License` filter to `Export-MsolAccountSku` so exports can target users holding a specific license while still including all of their assigned licenses in the CSV.
+- Change: `Get-TenantMsolAccountSku` now supports `-IncludeSampleUsers` for the default sample size and renders sample-user output separately for better readability in `-AsTable` and `-GridView`.
 - Change: Added resilient Exchange Online connection handling in `Connect-EOL`, including optional `-DisableWAM`, `-Device`, `-NoWamFallback`, and automatic retry without WAM after broker-related sign-in failures.
 - Change: Refactored Intune group usage logic into dedicated private helpers to keep `NC.Intune.ps1` focused on public cmdlets.
+- Change: `Get-UserMsolAccountSku` now shows an explicit warning when the target user exists but has no assigned licenses.
 - Fix: `Get-UserMsolAccountSku -Clipboard` no longer claims success when user lookup or license retrieval fails; it now warns when there is no license data to copy.
 - Fix: Quarantine workflows now benefit from the improved EXO reconnection path when WAM/MSAL broker state breaks after idle, lock, or sleep.
 - Fix: Reworked `Get-IntuneProfileAssignmentsByGroup` to correctly report Entra group usage across Intune device configurations, settings catalog policies, and app assignments.

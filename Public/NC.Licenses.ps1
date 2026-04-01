@@ -747,7 +747,7 @@ function Export-MsolAccountSku {
         foreach ($User in $Users) {
             $ProcessedCount++
             $Percentage = [Math]::Round(($ProcessedCount / [Math]::Max($totalUsers, 1)) * 100, 2)
-            Write-Progress -Activity "Processing $($User.DisplayName)" -Status "$ProcessedCount out of $totalUsers ($Percentage%)" -PercentComplete $Percentage
+            Write-Progress -Activity "Processing $($User.DisplayName)" -Status "$ProcessedCount out of $totalUsers - $Percentage%" -PercentComplete $Percentage
 
             if ($ProcessedUsers -contains $User.UserPrincipalName) {
                 Write-NCMessage "Skipping $($User.UserPrincipalName), already processed." -Level WARNING
@@ -889,7 +889,9 @@ function Get-TenantMsolAccountSku {
     .PARAMETER Filter
         Filters the output to licenses whose name or SkuPartNumber contains the provided text.
     .PARAMETER SampleUsers
-        Returns up to N sample users for each matching SKU (requires -Filter). Defaults to 5 when specified.
+        Returns up to N sample users for each matching SKU (requires -Filter).
+    .PARAMETER IncludeSampleUsers
+        Returns sample users using the default limit of 5 (requires -Filter).
     .PARAMETER AsTable
         Display the result as a formatted table instead of returning objects.
     .PARAMETER GridView
@@ -902,12 +904,15 @@ function Get-TenantMsolAccountSku {
         Get-TenantMsolAccountSku -Filter "E3"
     .EXAMPLE
         Get-TenantMsolAccountSku -Filter "E3" -SampleUsers 5
+    .EXAMPLE
+        Get-TenantMsolAccountSku -Filter "E3" -IncludeSampleUsers
     #>
     [CmdletBinding()]
     param(
         [switch]$ForceLicenseCatalogRefresh,
         [string]$Filter,
         [int]$SampleUsers = 5,
+        [switch]$IncludeSampleUsers,
         [switch]$AsTable,
         [switch]$GridView
     )
@@ -953,7 +958,8 @@ function Get-TenantMsolAccountSku {
             return
         }
 
-        $useSampleUsers = $PSBoundParameters.ContainsKey('SampleUsers')
+        $useSampleUsers = $PSBoundParameters.ContainsKey('SampleUsers') -or $IncludeSampleUsers.IsPresent
+        $sampleUserLimit = if ($PSBoundParameters.ContainsKey('SampleUsers')) { $SampleUsers } else { 5 }
 
         if ($useSampleUsers -and -not $Filter) {
             Write-NCMessage "SampleUsers requires -Filter to limit the query scope. Example: Get-TenantMsolAccountSku -Filter \"E3\" -SampleUsers 5" -Level ERROR
@@ -1007,7 +1013,7 @@ function Get-TenantMsolAccountSku {
         }
 
         if ($useSampleUsers) {
-            if ($SampleUsers -le 0) {
+            if ($sampleUserLimit -le 0) {
                 Write-NCMessage "SampleUsers must be greater than 0." -Level ERROR
                 return
             }
@@ -1017,7 +1023,7 @@ function Get-TenantMsolAccountSku {
                 try {
                     $examples = Invoke-NCRetry -Action {
                         Get-MgUser -Filter "assignedLicenses/any(x:x/skuId eq $($sku.SkuId))" `
-                            -Top $SampleUsers `
+                            -Top $sampleUserLimit `
                             -ConsistencyLevel eventual `
                             -Property Id,UserPrincipalName,DisplayName `
                             -ErrorAction Stop
@@ -1033,7 +1039,7 @@ function Get-TenantMsolAccountSku {
                 }
 
                 if ($examples) {
-                    foreach ($entry in ($examples | Select-Object -First $SampleUsers)) {
+                    foreach ($entry in ($examples | Select-Object -First $sampleUserLimit)) {
                         if ($entry.UserPrincipalName) {
                             if ($entry.DisplayName) {
                                 # $sampleUserList += ("{0} <{1}>" -f $entry.DisplayName, $entry.UserPrincipalName)
@@ -1059,32 +1065,54 @@ function Get-TenantMsolAccountSku {
                     Warning       = $sku.Warning
                     Source        = $sku.Source
                     SampleUsers   = $sampleUserList
+                    SampleUsersText = if ($sampleUserList.Count -gt 0) { $sampleUserList -join [Environment]::NewLine } else { $null }
                 }
             }
         }
 
         if ($GridView.IsPresent) {
-            $sorted | Out-GridView -Title "M365 Tenant Licenses"
+            $summaryRows = $sorted | Select-Object Name, SkuPartNumber, Total, Consumed, Available
+            $summaryRows | Out-GridView -Title "M365 Tenant Licenses"
+
+            if ($useSampleUsers) {
+                $sampleRows = foreach ($sku in $sorted) {
+                    if ($sku.PSObject.Properties['SampleUsers'] -and $sku.SampleUsers) {
+                        foreach ($sampleUser in $sku.SampleUsers) {
+                            [pscustomobject][ordered]@{
+                                Name          = $sku.Name
+                                SkuPartNumber = $sku.SkuPartNumber
+                                SampleUser    = $sampleUser
+                            }
+                        }
+                    }
+                }
+
+                if ($sampleRows) {
+                    $sampleRows | Out-GridView -Title "M365 Tenant License Sample Users"
+                }
+            }
         }
         elseif ($AsTable.IsPresent) {
             $limited = $sorted | Select-Object @{
                     Name       = 'Name'
                     Expression = { Format-OutputString -Value $_.Name -MaxLength $NCVars.MaxFieldLength }
-                }, SkuPartNumber, Total, Consumed, Available, @{
-                    Name       = 'SampleUsers'
-                    Expression = {
-                        if ($_.PSObject.Properties['SampleUsers'] -and $_.SampleUsers) {
-                            ($_.SampleUsers -join '; ')
-                        }
-                        else {
-                            $null
-                        }
+                }, SkuPartNumber, Total, Consumed, Available
+            Show-Table -Rows $limited -AsTable
+
+            if ($useSampleUsers) {
+                Add-EmptyLine
+                foreach ($sku in $sorted) {
+                    if (-not ($sku.PSObject.Properties['SampleUsers'] -and $sku.SampleUsers)) {
+                        continue
                     }
+
+                    Write-NCMessage ("Sample users for {0} ({1}):" -f $sku.Name, $sku.SkuPartNumber) -Level INFO
+                    foreach ($sampleUser in $sku.SampleUsers) {
+                        Write-NCMessage ("  - {0}" -f $sampleUser) -Level INFO
+                    }
+                    Add-EmptyLine
                 }
-            if (-not $useSampleUsers) {
-            $limited = $limited | Select-Object Name, SkuPartNumber, Total, Consumed, Available
-        }
-        Show-Table -Rows $limited -AsTable
+            }
         }
         else {
             $sorted
@@ -1297,6 +1325,7 @@ function Get-UserMsolAccountSku {
         }
         else {
             Write-Verbose "No licenses assigned to this user."
+            Write-NCMessage ("No licenses assigned to user {0}." -f $User.UserPrincipalName) -Level WARNING
         }
     }
     end {

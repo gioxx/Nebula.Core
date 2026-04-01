@@ -66,7 +66,7 @@ function Add-EntraGroupDevice {
     end {
         if (-not $graphConnected) { return }
         if ($devices.Count -eq 0) {
-            Write-NCMessage "No devices specified" -Level WARNING
+            Write-NCMessage "No devices were specified." -Level WARNING
             return
         }
 
@@ -239,7 +239,7 @@ function Add-EntraGroupUser {
     end {
         if (-not $graphConnected) { return }
         if ($users.Count -eq 0) {
-            Write-NCMessage "No users specified" -Level WARNING
+            Write-NCMessage "No users were specified." -Level WARNING
             return
         }
 
@@ -458,7 +458,7 @@ function Export-DistributionGroups {
             foreach ($group in $groups) {
                 $counter++
                 $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
-                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total ($Percentage%)" -PercentComplete $Percentage
+                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
                 try {
                     $members = @(Get-DistributionGroupMember -Identity $group.Identity -ResultSize Unlimited -ErrorAction Stop)
@@ -641,7 +641,7 @@ function Export-DynamicDistributionGroups {
             foreach ($group in $groups) {
                 $counter++
                 $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
-                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total ($Percentage%)" -PercentComplete $Percentage
+                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
                 try {
                     $members = @(Get-DynamicDistributionGroupMember -Identity $group.Identity -ErrorAction Stop)
@@ -824,7 +824,7 @@ function Export-M365Group {
             foreach ($group in $groups) {
                 $counter++
                 $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
-                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total ($Percentage%)" -PercentComplete $Percentage
+                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
                 try {
                     $members = @(Get-UnifiedGroupLinks -Identity $group.Identity -LinkType Member -ErrorAction Stop)
@@ -1098,7 +1098,7 @@ function Get-RoleGroupsMembers {
         foreach ($group in $roleGroups) {
             $counter++
             $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
-            Write-Progress -Activity "Processing $($group.Name)" -Status "$counter of $total ($Percentage%)" -PercentComplete $Percentage
+            Write-Progress -Activity "Processing $($group.Name)" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
             try {
                 $members = @(Get-RoleGroupMember -Identity $group.Identity -ErrorAction Stop)
@@ -1574,7 +1574,7 @@ function Export-EmptyEntraGroups {
             foreach ($group in $groups) {
                 $processedCount++
                 $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalGroups, 1)) * 100, 2)
-                Write-Progress -Activity "Checking $($group.DisplayName)" -Status "$processedCount of $totalGroups ($Percentage%)" -PercentComplete $Percentage
+                Write-Progress -Activity "Checking $($group.DisplayName)" -Status "$processedCount of $totalGroups - $Percentage%" -PercentComplete $Percentage
 
                 try {
                     $members = @(Get-MgGroupMember -GroupId $group.Id -All -ErrorAction Stop)
@@ -2043,7 +2043,7 @@ function Remove-EntraGroupDevice {
     end {
         if (-not $graphConnected) { return }
         if (-not $ClearAll.IsPresent -and $devices.Count -eq 0) {
-            Write-NCMessage "No devices specified" -Level WARNING
+            Write-NCMessage "No devices were specified." -Level WARNING
             return
         }
 
@@ -2299,7 +2299,7 @@ function Remove-EntraGroupUser {
     end {
         if (-not $graphConnected) { return }
         if (-not $ClearAll.IsPresent -and $users.Count -eq 0) {
-            Write-NCMessage "No users specified" -Level WARNING
+            Write-NCMessage "No users were specified." -Level WARNING
             return
         }
 

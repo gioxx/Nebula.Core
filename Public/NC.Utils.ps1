@@ -41,7 +41,8 @@ function Format-MessageIDsFromClipboard {
     $output = $quoted -join ", "
 
     $output | Set-Clipboard
-    Write-NCMessage ("Copied {0} quarantine identity value(s) to clipboard:`n{1}" -f $normalized.Count, ($normalized -join "`n")) -Level INFO
+    $identityLabel = if ($normalized.Count -eq 1) { 'quarantine identity value' } else { 'quarantine identity values' }
+    Write-NCMessage ("Copied {0} {1} to clipboard:`n{2}" -f $normalized.Count, $identityLabel, ($normalized -join "`n")) -Level INFO
     Add-EmptyLine
     Write-NCMessage "Please wait for messages to be released." -Level INFO
 
@@ -90,7 +91,8 @@ function Format-SortedEmailsFromClipboard {
     $output = $quoted -join ", "
 
     $output | Set-Clipboard
-    Write-NCMessage ("Copied {0} unique e-mail address(es) to clipboard." -f $uniqueSortedEmails.Count) -Level INFO
+    $emailLabel = if ($uniqueSortedEmails.Count -eq 1) { 'unique e-mail address' } else { 'unique e-mail addresses' }
+    Write-NCMessage ("Copied {0} {1} to clipboard." -f $uniqueSortedEmails.Count, $emailLabel) -Level INFO
 
     if ($PassThru.IsPresent) { $output }
 }
