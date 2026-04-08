@@ -925,8 +925,7 @@ function New-IntuneAppBasedGroup {
                             } | ConvertTo-Json -Depth 10
 
                             $newGroup = Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/groups' -Method POST -Body $groupBody -ContentType 'application/json'
-                            Write-NCMessage "Created group: $groupName" -Level SUCCESS
-                            Write-NCMessage "Group ID: $($newGroup.id)" -Level INFO
+                            Write-NCMessage "Created group: $groupName $($newGroup.id)" -Level SUCCESS
 
                             if ($memberIds.Count -gt 0) {
                                 try {
@@ -968,17 +967,18 @@ function New-IntuneAppBasedGroup {
 
             Write-Progress -Activity 'Processing App Groups' -Completed
 
-            Add-EmptyLine
-            Write-NCMessage " - Applications matched: $($appDeviceMap.Count)" -Level INFO
-            Write-NCMessage " - Total devices processed: $totalDevicesProcessed" -Level INFO
-            Write-NCMessage " - Groups created: $groupsCreated" -Level INFO
-            Write-NCMessage " - Groups updated: $groupsUpdated" -Level INFO
+            # Add-EmptyLine
+            # Write-NCMessage " - Applications matched: $($appDeviceMap.Count)" -Level INFO
+            # Write-NCMessage " - Total devices processed: $totalDevicesProcessed" -Level INFO
+            # Write-NCMessage " - Groups created: $groupsCreated" -Level INFO
+            # Write-NCMessage " - Groups updated: $groupsUpdated" -Level INFO
 
             if ($DryRun.IsPresent) {
                 Write-NCMessage "[DRY RUN] No changes were made" -Level INFO
             }
 
             if ($appDeviceMap.Count -gt 0) {
+                Add-EmptyLine
                 Write-NCMessage "Top Applications by Device Count:" -Level INFO
                 $appDeviceMap.GetEnumerator() |
                     Sort-Object { if ($_.Value.DeviceIds) { $_.Value.DeviceIds.Count } else { $_.Value.Devices.Count } } -Descending |
@@ -990,6 +990,7 @@ function New-IntuneAppBasedGroup {
                     }
             }
 
+            Add-EmptyLine
             Write-NCMessage "App-based group creation completed successfully." -Level SUCCESS
         }
         catch {
