@@ -59,8 +59,8 @@ function Disable-UserDevices {
 
             foreach ($upn in $queue) {
                 $counter++
-                $percent = (($counter / $queue.Count) * 100)
-                Write-Progress -Activity "Resolving user $upn" -Status "$counter of $($queue.Count) ($($percent.ToString('0.00'))%)" -PercentComplete $percent
+                $Percentage = [Math]::Round(($counter / [Math]::Max($queue.Count, 1)) * 100, 2)
+                Write-Progress -Activity "Resolving user $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
 
                 try {
                     $resolvedUpn = Find-UserRecipient -UserPrincipalName $upn
@@ -119,7 +119,8 @@ function Disable-UserDevices {
                 $results
             }
             elseif ($results.Count -gt 0) {
-                Write-NCMessage ("Disabled {0} device(s)." -f $results.Count) -Level SUCCESS
+                $deviceLabel = if ($results.Count -eq 1) { 'device' } else { 'devices' }
+                Write-NCMessage ("Disabled {0} {1}." -f $results.Count, $deviceLabel) -Level SUCCESS
             }
         }
         finally {
@@ -185,8 +186,8 @@ function Disable-UserSignIn {
 
             foreach ($upn in $queue) {
                 $counter++
-                $percent = (($counter / $queue.Count) * 100)
-                Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) ($($percent.ToString('0.00'))%)" -PercentComplete $percent
+                $Percentage = [Math]::Round(($counter / [Math]::Max($queue.Count, 1)) * 100, 2)
+                Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
 
                 try {
                     $resolvedUpn = Find-UserRecipient -UserPrincipalName $upn
@@ -227,7 +228,8 @@ function Disable-UserSignIn {
                 $results
             }
             elseif ($results.Count -gt 0) {
-                Write-NCMessage ("Sign-in disabled for {0} user(s)." -f $results.Count) -Level SUCCESS
+                $userLabel = if ($results.Count -eq 1) { 'user' } else { 'users' }
+                Write-NCMessage ("Sign-in disabled for {0} {1}." -f $results.Count, $userLabel) -Level SUCCESS
             }
         }
         finally {
@@ -346,8 +348,8 @@ function Revoke-UserSessions {
 
             foreach ($user in $queue) {
                 $counter++
-                $percent = (($counter / $queue.Count) * 100)
-                Write-Progress -Activity "Revoking sessions" -Status "$counter of $($queue.Count) ($($percent.ToString('0.00'))%)" -PercentComplete $percent
+                $Percentage = [Math]::Round(($counter / [Math]::Max($queue.Count, 1)) * 100, 2)
+                Write-Progress -Activity "Revoking sessions" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
 
                 if ($exclusions.Contains($user.UserPrincipalName)) {
                     Write-NCMessage ("Skipping user {0}" -f $user.UserPrincipalName) -Level INFO
@@ -375,7 +377,8 @@ function Revoke-UserSessions {
                 $results
             }
             elseif ($results.Count -gt 0) {
-                Write-NCMessage ("Revoked sessions for {0} user(s)." -f $results.Count) -Level SUCCESS
+                $userLabel = if ($results.Count -eq 1) { 'user' } else { 'users' }
+                Write-NCMessage ("Revoked sessions for {0} {1}." -f $results.Count, $userLabel) -Level SUCCESS
             }
         }
         finally {

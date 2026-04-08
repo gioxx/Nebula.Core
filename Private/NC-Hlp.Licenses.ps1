@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: (Private) Licenses's Utilities =======================================================================================================
+# Nebula.Core: (Private) Licenses helpers ===========================================================================================================
 
 function Get-LicenseCacheInfo {
     <#
@@ -61,6 +61,15 @@ function Get-NormalizedLicenseKey {
 }
 
 function New-LicenseLookup {
+    <#
+    .SYNOPSIS
+        Builds a lookup table for license identifiers.
+    .DESCRIPTION
+        Converts catalog items into a normalized hash table keyed by SKU identifier so friendly names can be
+        resolved quickly.
+    .PARAMETER Items
+        License catalog items to index.
+    #>
     [CmdletBinding()]
     param([object[]]$Items)
 
@@ -227,7 +236,7 @@ function Get-LicenseSourceData {
 
             $licenseItems | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $cacheFile -Encoding UTF8
             $source = 'Remote'
-            Write-NCMessage "License file downloaded and cached at $cacheFile." -Level VERBOSE
+            Write-Verbose "License file downloaded and cached at $cacheFile."
 
             if (-not $remoteCommitUtc) {
                 $remoteCommitUtc = $nowUtc

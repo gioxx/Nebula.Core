@@ -1,9 +1,18 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: Configuration bootstrap ==============================================================================================================
+# Nebula.Core: (Private) Configuration helpers ======================================================================================================
 
 function Import-NCConfigurationFile {
+    <#
+    .SYNOPSIS
+        Loads a Nebula.Core configuration file.
+    .DESCRIPTION
+        Imports a PowerShell data file and returns its hashtable content. If the file is missing or invalid,
+        returns an empty hashtable and logs the failure.
+    .PARAMETER Path
+        Path to the configuration file to import.
+    #>
     [CmdletBinding()]
     param([string]$Path)
 
@@ -25,6 +34,16 @@ function Import-NCConfigurationFile {
 }
 
 function Merge-NCConfig {
+    <#
+    .SYNOPSIS
+        Merges two configuration hashtables.
+    .DESCRIPTION
+        Copies override values into the base hashtable and returns the merged result.
+    .PARAMETER Base
+        Base configuration hashtable to update.
+    .PARAMETER Override
+        Hashtable containing values that should overwrite the base configuration.
+    #>
     [CmdletBinding()]
     param(
         [hashtable]$Base,
@@ -70,6 +89,13 @@ if (-not $script:NC_Defaults) {
 }
 
 function Initialize-NebulaConfig {
+    <#
+    .SYNOPSIS
+        Builds the effective Nebula.Core configuration.
+    .DESCRIPTION
+        Starts from module defaults, then layers machine settings, user settings, and environment overrides.
+        The merged configuration is stored in the script scope for use by the module.
+    #>
     $config = [ordered]@{}
     foreach ($key in $script:NC_Defaults.Keys) {
         $config[$key] = $script:NC_Defaults[$key]

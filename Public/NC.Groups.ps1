@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: Groups ===============================================================================================================================
+# Nebula.Core: Groups helpers =======================================================================================================================
 
 function Add-EntraGroupDevice {
     <#
@@ -34,7 +34,8 @@ function Add-EntraGroupDevice {
         [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Device', 'DeviceName', 'Id', 'DeviceId', 'Name')]
         [string[]]$DeviceIdentifier,
 
@@ -65,7 +66,7 @@ function Add-EntraGroupDevice {
     end {
         if (-not $graphConnected) { return }
         if ($devices.Count -eq 0) {
-            Write-NCMessage "No devices specified" -Level WARNING
+            Write-NCMessage "No devices were specified." -Level WARNING
             return
         }
 
@@ -206,7 +207,8 @@ function Add-EntraGroupUser {
         [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('User', 'UPN', 'Mail', 'Id', 'UserId')]
         [string[]]$UserIdentifier,
 
@@ -237,7 +239,7 @@ function Add-EntraGroupUser {
     end {
         if (-not $graphConnected) { return }
         if ($users.Count -eq 0) {
-            Write-NCMessage "No users specified" -Level WARNING
+            Write-NCMessage "No users were specified." -Level WARNING
             return
         }
 
@@ -455,8 +457,8 @@ function Export-DistributionGroups {
 
             foreach ($group in $groups) {
                 $counter++
-                $percentComplete = (($counter / $total) * 100)
-                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+                $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
+                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
                 try {
                     $members = @(Get-DistributionGroupMember -Identity $group.Identity -ResultSize Unlimited -ErrorAction Stop)
@@ -638,8 +640,8 @@ function Export-DynamicDistributionGroups {
 
             foreach ($group in $groups) {
                 $counter++
-                $percentComplete = (($counter / $total) * 100)
-                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+                $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
+                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
                 try {
                     $members = @(Get-DynamicDistributionGroupMember -Identity $group.Identity -ErrorAction Stop)
@@ -821,8 +823,8 @@ function Export-M365Group {
 
             foreach ($group in $groups) {
                 $counter++
-                $percentComplete = (($counter / $total) * 100)
-                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+                $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
+                Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
                 try {
                     $members = @(Get-UnifiedGroupLinks -Identity $group.Identity -LinkType Member -ErrorAction Stop)
@@ -1095,8 +1097,8 @@ function Get-RoleGroupsMembers {
 
         foreach ($group in $roleGroups) {
             $counter++
-            $percentComplete = (($counter / $total) * 100)
-            Write-Progress -Activity "Processing $($group.Name)" -Status "$counter of $total ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+            $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
+            Write-Progress -Activity "Processing $($group.Name)" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
             try {
                 $members = @(Get-RoleGroupMember -Identity $group.Identity -ErrorAction Stop)
@@ -1248,7 +1250,7 @@ function Get-UserGroups {
         }
 
         Add-EmptyLine
-        Write-NCMessage "$recipientType ($resolvedPrincipal) - Groups found: $($memberships.Count)" -Level VERBOSE
+        Write-Verbose "$recipientType ($resolvedPrincipal) - Groups found: $($memberships.Count)"
 
         if (-not $memberships -or $memberships.Count -eq 0) {
             Write-NCMessage "No groups found for $resolvedPrincipal." -Level WARNING
@@ -1303,7 +1305,7 @@ function Get-EntraGroupDevice {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Device', 'DeviceName', 'Id', 'DeviceId', 'Name', 'Identity', 'DisplayName')]
         [string]$DeviceIdentifier,
         [switch]$TreatInputAsId,
@@ -1372,7 +1374,7 @@ function Get-EntraGroupDevice {
         }
 
         Add-EmptyLine
-        Write-NCMessage "Device ($deviceLabel) - Groups found: $($memberships.Count)" -Level VERBOSE
+        Write-Verbose "Device ($deviceLabel) - Groups found: $($memberships.Count)"
 
         if (-not $memberships -or $memberships.Count -eq 0) {
             Write-NCMessage "No groups found for $deviceLabel." -Level WARNING
@@ -1491,7 +1493,7 @@ function Search-EntraGroup {
         }
 
         Add-EmptyLine
-        Write-NCMessage "Groups found: $($groups.Count) for '$SearchText'." -Level VERBOSE
+        Write-Verbose "Groups found: $($groups.Count) for '$SearchText'."
 
         if (-not $groups -or $groups.Count -eq 0) {
             Write-NCMessage "No groups found for '$SearchText'." -Level WARNING
@@ -1525,6 +1527,117 @@ function Search-EntraGroup {
     }
 }
 
+function Export-EmptyEntraGroups {
+    <#
+    .SYNOPSIS
+        Exports Entra groups that have no members.
+    .DESCRIPTION
+        Connects to Microsoft Graph, enumerates groups, checks membership for each one, and exports
+        the groups with zero members to CSV by default.
+    .PARAMETER CsvFolder
+        Destination folder for the CSV file when exporting the report.
+    .PARAMETER Csv
+        When present, export the report to CSV. Defaults to on.
+    .EXAMPLE
+        Export-EmptyEntraGroups
+    .EXAMPLE
+        Export-EmptyEntraGroups -CsvFolder 'C:\Reports\Groups'
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$CsvFolder,
+        [bool]$Csv = $true
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $report = [System.Collections.Generic.List[object]]::new()
+    }
+
+    process {
+        try {
+            if (-not (Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false)) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+                return
+            }
+
+            $groups = @(Get-MgGroup -All -ErrorAction Stop)
+            if (-not $groups -or $groups.Count -eq 0) {
+                Write-NCMessage "No Entra groups found." -Level WARNING
+                return
+            }
+
+            $totalGroups = $groups.Count
+            $processedCount = 0
+
+            foreach ($group in $groups) {
+                $processedCount++
+                $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalGroups, 1)) * 100, 2)
+                Write-Progress -Activity "Checking $($group.DisplayName)" -Status "$processedCount of $totalGroups - $Percentage%" -PercentComplete $Percentage
+
+                try {
+                    $members = @(Get-MgGroupMember -GroupId $group.Id -All -ErrorAction Stop)
+                }
+                catch {
+                    Write-NCMessage "Unable to read members for group '$($group.DisplayName)'. $($_.Exception.Message)" -Level WARNING
+                    continue
+                }
+
+                if ($members.Count -gt 0) {
+                    continue
+                }
+
+                $groupType = if ($group.GroupTypes -contains 'Unified' -and $group.SecurityEnabled) {
+                    'Microsoft 365 (security-enabled)'
+                }
+                elseif ($group.GroupTypes -contains 'Unified' -and -not $group.SecurityEnabled) {
+                    'Microsoft 365'
+                }
+                elseif (-not ($group.GroupTypes -contains 'Unified') -and $group.SecurityEnabled -and $group.MailEnabled) {
+                    'Mail-enabled security'
+                }
+                elseif (-not ($group.GroupTypes -contains 'Unified') -and $group.SecurityEnabled) {
+                    'Security'
+                }
+                elseif (-not ($group.GroupTypes -contains 'Unified') -and $group.MailEnabled) {
+                    'Distribution'
+                }
+                else {
+                    'N/A'
+                }
+
+                $report.Add([pscustomobject][ordered]@{
+                        DisplayName     = $group.DisplayName
+                        Id              = $group.Id
+                        GroupType       = $groupType
+                        MemberCount     = 0
+                        MailEnabled     = $group.MailEnabled
+                        SecurityEnabled = $group.SecurityEnabled
+                    }) | Out-Null
+            }
+
+            if ($Csv) {
+                $folder = if ($CsvFolder) { Test-Folder $CsvFolder } else { Test-Folder $null }
+                $csvPath = New-File "$folder\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-EmptyGroups.csv"
+                $report | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+                Write-NCMessage "Empty groups report exported to $csvPath." -Level SUCCESS
+                $csvPath
+            }
+            else {
+                $report | Sort-Object DisplayName
+            }
+        }
+        catch {
+            Write-NCMessage "Unable to export empty Entra groups. $($_.Exception.Message)" -Level ERROR
+        }
+        finally {
+            Write-Progress -Activity "Checking empty Entra groups" -Completed
+            Restore-ProgressAndInfoPreferences
+        }
+    }
+}
+
 function Get-EntraGroupUser {
     <#
     .SYNOPSIS
@@ -1545,7 +1658,7 @@ function Get-EntraGroupUser {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('User', 'UPN', 'Mail', 'Id', 'UserId', 'DisplayName', 'Identity')]
         [string]$UserIdentifier,
         [switch]$TreatInputAsId,
@@ -1636,7 +1749,7 @@ function Get-EntraGroupUser {
         }
 
         Add-EmptyLine
-        Write-NCMessage "User ($userLabel) - Groups found: $($memberships.Count)" -Level VERBOSE
+        Write-Verbose "User ($userLabel) - Groups found: $($memberships.Count)"
 
         if (-not $memberships -or $memberships.Count -eq 0) {
             Write-NCMessage "No groups found for $userLabel." -Level WARNING
@@ -1753,7 +1866,7 @@ function Get-EntraGroupMembers {
     }
 
     Add-EmptyLine
-    Write-NCMessage "Group ($($resolvedGroup.DisplayName)) - Members found: $($members.Count)" -Level VERBOSE
+    Write-Verbose "Group ($($resolvedGroup.DisplayName)) - Members found: $($members.Count)"
 
     if (-not $members -or $members.Count -eq 0) {
         Write-NCMessage "No members found for $($resolvedGroup.DisplayName)." -Level WARNING
@@ -1893,8 +2006,8 @@ function Remove-EntraGroupDevice {
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Device', 'DeviceName', 'Id', 'DeviceId', 'Name')]
         [string[]]$DeviceIdentifier,
 
@@ -1930,7 +2043,7 @@ function Remove-EntraGroupDevice {
     end {
         if (-not $graphConnected) { return }
         if (-not $ClearAll.IsPresent -and $devices.Count -eq 0) {
-            Write-NCMessage "No devices specified" -Level WARNING
+            Write-NCMessage "No devices were specified." -Level WARNING
             return
         }
 
@@ -2149,8 +2262,8 @@ function Remove-EntraGroupUser {
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('User', 'UPN', 'Mail', 'Id', 'UserId')]
         [string[]]$UserIdentifier,
 
@@ -2186,7 +2299,7 @@ function Remove-EntraGroupUser {
     end {
         if (-not $graphConnected) { return }
         if (-not $ClearAll.IsPresent -and $users.Count -eq 0) {
-            Write-NCMessage "No users specified" -Level WARNING
+            Write-NCMessage "No users were specified." -Level WARNING
             return
         }
 

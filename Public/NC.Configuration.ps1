@@ -1,5 +1,7 @@
 #Requires -Version 5.0
 
+# Nebula.Core: Configuration helpers ================================================================================================================
+
 function Get-NebulaConfig {
     <#
     .SYNOPSIS
@@ -21,15 +23,6 @@ function Get-NebulaConfig {
         MachineConfigExists= $info.MachineConfigExists
         MachineConfigLoaded= $info.MachineConfigLoaded
     }
-
-    # $envRows = foreach ($key in $info.EnvironmentOverrideKeys) {
-    #     $envVar = "NEBULA_{0}" -f ($key.ToUpperInvariant())
-    #     [pscustomobject]@{
-    #         Key    = $key
-    #         EnvVar = $envVar
-    #         Value  = [Environment]::GetEnvironmentVariable($envVar)
-    #     }
-    # }
 
     $configRows = foreach ($key in ($script:NC_Config.Keys | Sort-Object)) {
         [pscustomobject]@{
@@ -74,13 +67,6 @@ function Get-NebulaConfig {
         }
         Show-Table -Rows $userRows -AsTable
     }
-
-    # return [pscustomobject]@{
-    #     Summary              = $summary
-    #     EnvironmentOverrides = $envRows
-    #     ActiveConfiguration  = $configRows
-    #     LicenseSources       = $licenseRows
-    # }
 }
 
 function Sync-NebulaConfig {

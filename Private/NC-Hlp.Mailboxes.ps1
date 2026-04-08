@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: (Private) Mailboxes's utilities ======================================================================================================
+# Nebula.Core: (Private) Mailboxes helpers ==========================================================================================================
 
 function Resolve-MbxQuotaValue {
     <#

@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: Quarantine ===========================================================================================================================
+# Nebula.Core: Quarantine helpers ===================================================================================================================
 
 function Export-QuarantineEml {
     <#
@@ -469,7 +469,8 @@ function Get-QuarantineToRelease {
             }
         }
 
-        Write-NCMessage ("Retrieved {0} quarantined items from {1:d} to {2:d}." -f $items.Count, $startDate, $endDate) -Level INFO
+        $itemLabel = if ($items.Count -eq 1) { 'item' } else { 'items' }
+        Write-NCMessage ("Retrieved {0} quarantined {1} from {2:d} to {3:d}." -f $items.Count, $itemLabel, $startDate, $endDate) -Level INFO
 
         if ($Csv.IsPresent) {
             try {
@@ -503,7 +504,8 @@ function Get-QuarantineToRelease {
 
         $selection = $items
         if ($GridView.IsPresent) {
-            $title = "{0} to {1} - {2} items" -f $startDate.Date, $endDate.Date, $items.Count
+            $itemLabel = if ($items.Count -eq 1) { 'item' } else { 'items' }
+            $title = "{0} to {1} - {2} {3}" -f $startDate.Date, $endDate.Date, $items.Count, $itemLabel
             $selection = $items | Sort-Object -Descending ReceivedTime | Out-GridView -Title $title -PassThru
             if (-not $selection) {
                 Write-NCMessage "No items selected." -Level WARNING
@@ -519,8 +521,8 @@ function Get-QuarantineToRelease {
         $counter = 0
         foreach ($item in $selection) {
             $counter++
-            $percentComplete = (($counter / $selection.Count) * 100)
-            Write-Progress -Activity "Processing $($item.Subject)" -Status "$counter of $($selection.Count) ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+            $Percentage = [Math]::Round(($counter / [Math]::Max($selection.Count, 1)) * 100, 2)
+            Write-Progress -Activity "Processing $($item.Subject)" -Status "$counter of $($selection.Count) - $Percentage%" -PercentComplete $Percentage
 
             if ($ReleaseSelected.IsPresent) {
                 if ($PSCmdlet.ShouldProcess($item.Subject, "Release quarantined message")) {
@@ -613,7 +615,7 @@ function Unlock-QuarantineFrom {
 
             try {
                 $messages = Get-QuarantineMessage -SenderAddress $currentSender -ErrorAction Stop | Where-Object { $_.ReleaseStatus -ne "Released" -and $null -ne $_.QuarantinedUser }
-                Write-NCMessage "Found $($messages.Count) message(s) from $currentSender not yet released." -Level VERBOSE
+                Write-Verbose "Found $($messages.Count) message(s) from $currentSender not yet released."
             }
             catch {
                 Write-NCMessage "Unable to retrieve messages for '$currentSender'. $($_.Exception.Message)" -Level ERROR
@@ -623,7 +625,7 @@ function Unlock-QuarantineFrom {
             foreach ($msg in $messages) {
                 if ($PSCmdlet.ShouldProcess($msg.Identity, "Release quarantined message")) {
                     try {
-                        Write-NCMessage "Trying to release $($msg.Identity) to $($msg.RecipientAddress)  ..." -Level VERBOSE
+                        Write-Verbose "Trying to release $($msg.Identity) to $($msg.RecipientAddress)  ..."
                         $releaseParams = @{
                             Identity            = $msg.Identity
                             ReleaseToAll        = $true
@@ -732,9 +734,9 @@ function Unlock-QuarantineMessageId {
 
             $processed++
             if ($targetCount -gt 1) {
-                $percentComplete = (($processed / $targetCount) * 100)
+                $Percentage = [Math]::Round(($processed / [Math]::Max($targetCount, 1)) * 100, 2)
                 $statusMessage = "$processed of $targetCount ($($msg.Identity))"
-                Write-Progress -Activity "Releasing quarantined messages" -Status $statusMessage -PercentComplete $percentComplete
+                Write-Progress -Activity "Releasing quarantined messages" -Status $statusMessage -PercentComplete $Percentage
             }
 
             if ($PSCmdlet.ShouldProcess($msg.Identity, "Release quarantined message")) {

@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: Module update checks =================================================================================================================
+# Nebula.Core: (Private) Module update helpers ======================================================================================================
 
 function Test-NebulaModuleUpdates {
     <#
@@ -133,6 +133,12 @@ function Test-NebulaModuleUpdates {
 }
 
 function Get-NCModuleUpdateLastCheck {
+    <#
+    .SYNOPSIS
+        Returns the timestamp of the last module update check.
+    .DESCRIPTION
+        Reads the cached update-check file and returns the stored UTC timestamp when available.
+    #>
     [CmdletBinding()]
     param()
 
@@ -156,6 +162,12 @@ function Get-NCModuleUpdateLastCheck {
 }
 
 function Save-NCModuleUpdateLastCheck {
+    <#
+    .SYNOPSIS
+        Persists the module update check timestamp.
+    .DESCRIPTION
+        Writes the current UTC time to the update-check file under the Nebula.Core user configuration root.
+    #>
     [CmdletBinding()]
     param()
 
@@ -173,6 +185,12 @@ function Save-NCModuleUpdateLastCheck {
 }
 
 function Get-NCModuleUpdateCheckPath {
+    <#
+    .SYNOPSIS
+        Returns the module update check file path.
+    .DESCRIPTION
+        Builds the path to the local JSON file used to store the last update check timestamp.
+    #>
     [CmdletBinding()]
     param()
 

@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: Statistics ===========================================================================================================================
+# Nebula.Core: Statistics helpers ===================================================================================================================
 
 function Export-MboxStatistics {
     <#
@@ -56,7 +56,7 @@ function Export-MboxStatistics {
         }
 
         if (-not $mailboxes -or $mailboxes.Count -eq 0) {
-            Write-NCMessage "No mailboxes found matching the provided criteria." -Level WARNING
+            Write-NCMessage "No mailboxes matched the provided criteria." -Level WARNING
             return
         }
 
@@ -75,8 +75,8 @@ function Export-MboxStatistics {
 
         foreach ($mailbox in $mailboxes) {
             $processedCount++
-            $percentComplete = (($processedCount / $totalMailboxes) * 100)
-            Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+            $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
+            Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes - $Percentage%" -PercentComplete $Percentage
 
             $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
             $mailboxSizeGb = if ($stats) { Convert-MbxSizeToGB -SizeObject $stats.TotalItemSize } else { "Error" }
@@ -122,7 +122,7 @@ function Export-MboxStatistics {
                     $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter)
                     $csvInitialized = $true
                 }
-                Write-NCMessage "Processed $processedCount / $totalMailboxes mailboxes, flushed batch to CSV." -Level VERBOSE
+                Write-Verbose "Processed $processedCount / $totalMailboxes mailboxes, flushed batch to CSV."
                 $statsBuffer.Clear()
             }
         }
@@ -147,6 +147,110 @@ function Export-MboxStatistics {
     }
     finally {
         Restore-ProgressAndInfoPreferences
+    }
+}
+
+function Export-MboxDeletedItemSize {
+    <#
+    .SYNOPSIS
+        Exports mailbox deleted item store usage.
+    .DESCRIPTION
+        Ensures an Exchange Online session, retrieves all user mailboxes or a selected subset,
+        calculates the deleted item size for each mailbox, and exports the report to CSV by default.
+    .PARAMETER UserPrincipalName
+        Optional mailbox identity or identities. Accepts pipeline input.
+    .PARAMETER CsvFolder
+        Destination folder for the CSV file when exporting the report.
+    .PARAMETER Csv
+        When present, export the report to CSV. Defaults to on.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('User', 'Identity', 'Mailbox', 'SourceMailbox')]
+        [string[]]$UserPrincipalName,
+        [string]$CsvFolder,
+        [bool]$Csv = $true
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $requestedMailboxes = [System.Collections.Generic.List[string]]::new()
+        $report = [System.Collections.Generic.List[object]]::new()
+    }
+
+    process {
+        foreach ($entry in $UserPrincipalName) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                $requestedMailboxes.Add($entry.Trim()) | Out-Null
+            }
+        }
+    }
+
+    end {
+        try {
+            if (-not (Test-EOLConnection)) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
+                return
+            }
+
+            $mailboxes = @()
+            if ($requestedMailboxes.Count -gt 0) {
+                foreach ($mailboxId in ($requestedMailboxes | Select-Object -Unique)) {
+                    try {
+                        $mailboxes += @(Get-Mailbox -Identity $mailboxId -ErrorAction Stop)
+                    }
+                    catch {
+                        Write-NCMessage "Mailbox '$mailboxId' not found. $($_.Exception.Message)" -Level WARNING
+                    }
+                }
+            }
+            else {
+                $mailboxes = @(Get-Mailbox -ResultSize Unlimited -WarningAction SilentlyContinue |
+                    Where-Object { $_.RecipientTypeDetails -eq 'UserMailbox' })
+            }
+
+            if (-not $mailboxes -or $mailboxes.Count -eq 0) {
+                Write-NCMessage "No user mailboxes matched the provided criteria." -Level WARNING
+                return
+            }
+
+            $totalMailboxes = $mailboxes.Count
+            $processedCount = 0
+
+            foreach ($mailbox in $mailboxes) {
+                $processedCount++
+                $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
+                Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes - $Percentage%" -PercentComplete $Percentage
+
+                $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
+                if (-not $stats) {
+                    continue
+                }
+
+                $report.Add([pscustomobject][ordered]@{
+                        DisplayName            = $mailbox.DisplayName
+                        PrimarySmtpAddress     = $mailbox.PrimarySmtpAddress
+                        TotalDeletedItemSizeGB = Convert-MbxSizeToGB -SizeObject $stats.TotalDeletedItemSize
+                    }) | Out-Null
+            }
+
+            if ($Csv) {
+                $folder = if ($CsvFolder) { Test-Folder $CsvFolder } else { Test-Folder $null }
+                $csvPath = New-File "$folder\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-DeletedItemSize.csv"
+                $report | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+                Write-NCMessage "Deleted item size report exported to $csvPath." -Level SUCCESS
+                $csvPath
+            }
+            else {
+                $report
+            }
+        }
+        finally {
+            Write-Progress -Activity "Processing deleted item size" -Completed
+            Restore-ProgressAndInfoPreferences
+        }
     }
 }
 
@@ -219,7 +323,7 @@ function Get-MboxStatistics {
             }
 
             if (-not $mailboxes -or $mailboxes.Count -eq 0) {
-                Write-NCMessage "No mailboxes found matching the provided criteria." -Level WARNING
+                Write-NCMessage "No mailboxes matched the provided criteria." -Level WARNING
                 return
             }
 
@@ -228,8 +332,8 @@ function Get-MboxStatistics {
 
             foreach ($mailbox in $mailboxes) {
                 $processedCount++
-                $percentComplete = (($processedCount / $totalMailboxes) * 100)
-                Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes ($($percentComplete.ToString('0.00'))%)" -PercentComplete $percentComplete
+                $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
+                Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes - $Percentage%" -PercentComplete $Percentage
 
                 $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
                 if (-not $stats) {
@@ -247,7 +351,7 @@ function Get-MboxStatistics {
 
                     try {
                         $oldestItem = Get-MailboxFolderStatistics -Identity $mailbox.UserPrincipalName -IncludeOldestAndNewestItems -ErrorAction Stop |
-                            Where-Object { $_.OldestItemReceivedDate -ne $null } |
+                            Where-Object { $null -ne $_.OldestItemReceivedDate } |
                             Sort-Object -Property OldestItemReceivedDate |
                             Select-Object -First 1
 

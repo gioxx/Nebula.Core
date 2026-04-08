@@ -1,7 +1,7 @@
 #Requires -Version 5.0
 using namespace System.Management.Automation
 
-# Nebula.Core: (Private) Custom Write Information ===================================================================================================
+# Nebula.Core: (Private) Core message helpers =======================================================================================================
 
 # Script-scoped color map so it can be overridden at runtime
 # Foreground and Background are [ConsoleColor] values.
@@ -29,7 +29,11 @@ function Add-EmptyLine {
     )
 
     try {
-        Write-Output ""
+        $hostMsg = [HostInformationMessage]@{
+            Message   = ''
+            NoNewline = $false
+        }
+        Write-Information -MessageData $hostMsg -InformationAction Continue
     }
     catch {
         # Ignore
