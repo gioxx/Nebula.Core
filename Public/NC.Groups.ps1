@@ -457,7 +457,7 @@ function Export-DistributionGroups {
 
             foreach ($group in $groups) {
                 $counter++
-                $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $total
                 Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
                 try {
@@ -640,7 +640,7 @@ function Export-DynamicDistributionGroups {
 
             foreach ($group in $groups) {
                 $counter++
-                $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $total
                 Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
                 try {
@@ -823,7 +823,7 @@ function Export-M365Group {
 
             foreach ($group in $groups) {
                 $counter++
-                $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $total
                 Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
                 try {
@@ -1097,7 +1097,7 @@ function Get-RoleGroupsMembers {
 
         foreach ($group in $roleGroups) {
             $counter++
-            $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
+            $Percentage = Get-NCProgressPercent -Current $counter -Total $total
             Write-Progress -Activity "Processing $($group.Name)" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
             try {
@@ -1573,7 +1573,7 @@ function Export-EmptyEntraGroups {
 
             foreach ($group in $groups) {
                 $processedCount++
-                $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalGroups, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $totalGroups
                 Write-Progress -Activity "Checking $($group.DisplayName)" -Status "$processedCount of $totalGroups - $Percentage%" -PercentComplete $Percentage
 
                 try {
@@ -1622,7 +1622,6 @@ function Export-EmptyEntraGroups {
                 $csvPath = New-File "$folder\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-EmptyGroups.csv"
                 $report | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
                 Write-NCMessage "Empty groups report exported to $csvPath." -Level SUCCESS
-                $csvPath
             }
             else {
                 $report | Sort-Object DisplayName
@@ -2487,3 +2486,5 @@ function Remove-EntraGroupUser {
         }
     }
 }
+
+

@@ -59,7 +59,7 @@ function Disable-UserDevices {
 
             foreach ($upn in $queue) {
                 $counter++
-                $Percentage = [Math]::Round(($counter / [Math]::Max($queue.Count, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
                 Write-Progress -Activity "Resolving user $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
 
                 try {
@@ -186,7 +186,7 @@ function Disable-UserSignIn {
 
             foreach ($upn in $queue) {
                 $counter++
-                $Percentage = [Math]::Round(($counter / [Math]::Max($queue.Count, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
                 Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
 
                 try {
@@ -348,7 +348,7 @@ function Revoke-UserSessions {
 
             foreach ($user in $queue) {
                 $counter++
-                $Percentage = [Math]::Round(($counter / [Math]::Max($queue.Count, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
                 Write-Progress -Activity "Revoking sessions" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
 
                 if ($exclusions.Contains($user.UserPrincipalName)) {
@@ -387,3 +387,5 @@ function Revoke-UserSessions {
         }
     }
 }
+
+

@@ -222,7 +222,7 @@ function Export-CalendarPermission {
 
             foreach ($mailbox in $targets) {
                 $counter++
-                $Percentage = [Math]::Round(($counter / [Math]::Max($targets.Count, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $targets.Count
                 Write-Progress -Activity "Processing $($mailbox.PrimarySmtpAddress)" -Status "$counter of $($targets.Count) - $Percentage%" -PercentComplete $Percentage
 
                 try {
@@ -283,9 +283,6 @@ function Export-CalendarPermission {
 
             if ($PassThru.IsPresent) {
                 $results
-            }
-            else {
-                $csvPath
             }
         }
         finally {
@@ -359,7 +356,7 @@ function Get-RoomDetails {
             $counter = 0
             foreach ($group in $roomGroups) {
                 $counter++
-                $Percentage = [Math]::Round(($counter / [Math]::Max($roomGroups.Count, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $roomGroups.Count
                 Write-Progress -Activity "Processing $($group.DisplayName)" -Status "$counter of $($roomGroups.Count) - $Percentage%" -PercentComplete $Percentage
 
                 try {
@@ -636,3 +633,5 @@ function Set-OoO {
 
     end { Restore-ProgressAndInfoPreferences }
 }
+
+

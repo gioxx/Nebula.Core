@@ -240,121 +240,6 @@ function Add-MboxPermission {
     end { Restore-ProgressAndInfoPreferences }
 }
 
-function Export-MboxAlias {
-    <#
-    .SYNOPSIS
-        Exports aliases for one or more recipients.
-    .DESCRIPTION
-        Enumerates aliases for specified mailboxes, all mailboxes, or recipients filtered by domain,
-        and optionally writes them to a CSV file.
-    .PARAMETER SourceMailbox
-        Mailbox identities to analyze.
-    .PARAMETER Csv
-        Export the results to CSV.
-    .PARAMETER CsvFolder
-        Destination folder for the CSV file. Defaults to current directory.
-    .PARAMETER All
-        Export aliases for every non-guest recipient.
-    .PARAMETER Domain
-        Export aliases for recipients whose addresses match the provided domain.
-    .EXAMPLE
-        Export-MboxAlias -SourceMailbox user@contoso.com
-    .EXAMPLE
-        Export-MboxAlias -All -CsvFolder C:\Temp
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Alias('Identity')]
-        [string[]]$SourceMailbox,
-        [switch]$Csv,
-        [string]$CsvFolder,
-        [switch]$All,
-        [string]$Domain
-    )
-
-    begin {
-        Set-ProgressAndInfoPreferences
-        $aliases = [System.Collections.Generic.List[object]]::new()
-    }
-
-    process {
-        if (-not (Test-EOLConnection)) {
-            Add-EmptyLine
-            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
-            return
-        }
-
-        if ((-not $SourceMailbox -or $SourceMailbox.Count -eq 0) -and -not $All -and [string]::IsNullOrWhiteSpace($Domain)) {
-            $All = $true
-        }
-
-        if (-not [string]::IsNullOrWhiteSpace($Domain)) {
-            $SourceMailbox = Get-Recipient -ResultSize Unlimited | Where-Object { $_.RecipientTypeDetails -ne 'GuestMailUser' -and $_.EmailAddresses -like "*@$Domain" }
-            $Csv = $true
-        }
-
-        if ($All) {
-            Write-NCMessage "No mailbox specified; scanning all recipients. This may take a while." -Level WARNING
-            $SourceMailbox = Get-Recipient -ResultSize Unlimited | Where-Object { $_.RecipientTypeDetails -ne 'GuestMailUser' }
-            $Csv = $true
-        }
-
-        if ($Csv -and -not $script:ExportMboxAliasFolder) {
-            try {
-                $script:ExportMboxAliasFolder = Test-Folder $CsvFolder
-            }
-            catch {
-                Write-NCMessage "Invalid CSV folder. $($_.Exception.Message)" -Level ERROR
-                return
-            }
-        }
-
-        $counter = 0
-        $total = $SourceMailbox.Count
-        foreach ($entry in $SourceMailbox) {
-            try {
-                $recipient = Get-Recipient -Identity $entry -ErrorAction Stop
-            }
-            catch {
-                Write-NCMessage "Recipient '$entry' not found. $($_.Exception.Message)" -Level WARNING
-                continue
-            }
-
-            $counter++
-            $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
-            Write-Progress -Activity "Processing $($recipient.PrimarySmtpAddress)" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
-
-            $primary = $recipient.PrimarySmtpAddress
-            foreach ($address in $recipient.EmailAddresses | Where-Object { $_ -clike 'smtp*' }) {
-                $aliases.Add([pscustomobject]@{
-                        PrimarySmtpAddress = $primary
-                        Alias              = $address.ToString().Substring(5)
-                    }) | Out-Null
-            }
-        }
-    }
-
-    end {
-        try {
-            if ($Csv) {
-                $folder = if ($script:ExportMboxAliasFolder) { $script:ExportMboxAliasFolder } else { Test-Folder $CsvFolder }
-                $csvPath = New-File "$folder\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-Alias-Report.csv"
-                $aliases | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
-                Write-NCMessage "Alias report exported to $csvPath" -Level SUCCESS
-                $csvPath
-            }
-            else {
-                $aliases
-            }
-        }
-        finally {
-            Write-Progress -Activity "Processing aliases" -Completed
-            Restore-ProgressAndInfoPreferences
-        }
-    }
-}
-
 function Export-MboxPermission {
     <#
     .SYNOPSIS
@@ -402,7 +287,7 @@ function Export-MboxPermission {
         $counter = 0
         foreach ($mailbox in $mailboxes) {
             $counter++
-            $Percentage = [Math]::Round(($counter / [Math]::Max($mailboxes.Count, 1)) * 100, 2)
+            $Percentage = Get-NCProgressPercent -Current $counter -Total $mailboxes.Count
             Write-Progress -Activity "Processing $($mailbox.PrimarySmtpAddress)" -Status "$counter of $($mailboxes.Count) - $Percentage%" -PercentComplete $Percentage
 
             $exoMailbox = Get-EXOMailbox -Identity $mailbox.Identity
@@ -426,7 +311,6 @@ function Export-MboxPermission {
             $csvPath = New-File "$folder\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-MboxPermissions-Report.csv"
             $permissions | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
             Write-NCMessage "Mailbox permissions exported to $csvPath" -Level SUCCESS
-            $csvPath
         }
         finally {
             Write-Progress -Activity "Processing mailbox permissions" -Completed
@@ -441,19 +325,65 @@ function Get-MboxAlias {
         Lists primary and secondary SMTP addresses for a recipient.
     .DESCRIPTION
         Ensures Exchange Online connectivity and returns aliases with a flag for the primary address.
+        Use -Csv for single mailbox exports.
+        Use -All or -Domain to export a tenant-wide or domain-scoped CSV report with one row per alias.
+        CSV exports include DisplayName and Name, omit recipients that have only the primary address unless -IncludePrimaryOnly is used,
+        and hide MOERA addresses unless -IncludeMoera is used.
     .PARAMETER SourceMailbox
         Mailbox or recipient identity. Accepts pipeline input.
+    .PARAMETER Csv
+        Export a single mailbox result set to CSV.
+    .PARAMETER CsvFolder
+        Destination folder for the CSV file. Defaults to current directory.
+    .PARAMETER All
+        Enumerate every non-guest recipient and export the aliases to CSV.
+    .PARAMETER Domain
+        Enumerate recipients whose addresses match the provided domain and export the aliases to CSV.
+    .PARAMETER IncludePrimaryOnly
+        Include recipients that have no secondary aliases in CSV exports.
+    .PARAMETER IncludeMoera
+        Include MOERA addresses in CSV exports.
     .EXAMPLE
         Get-MboxAlias -SourceMailbox user@contoso.com
+    .EXAMPLE
+        Get-MboxAlias user@contoso.com
+    .EXAMPLE
+        Get-MboxAlias -All -CsvFolder C:\Temp
+    .EXAMPLE
+        Get-MboxAlias -SourceMailbox user@contoso.com -Csv -IncludeMoera -CsvFolder C:\Temp
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, ParameterSetName = 'Single')]
         [Alias('Identity')]
-        [string]$SourceMailbox
+        [string]$SourceMailbox,
+        [Parameter(ParameterSetName = 'Single')]
+        [Parameter(ParameterSetName = 'All')]
+        [Parameter(ParameterSetName = 'Domain')]
+        [switch]$Csv,
+        [Parameter(ParameterSetName = 'Single')]
+        [Parameter(ParameterSetName = 'All')]
+        [Parameter(ParameterSetName = 'Domain')]
+        [string]$CsvFolder,
+        [Parameter(ParameterSetName = 'Single')]
+        [Parameter(ParameterSetName = 'All')]
+        [Parameter(ParameterSetName = 'Domain')]
+        [switch]$IncludePrimaryOnly,
+        [Parameter(ParameterSetName = 'Single')]
+        [Parameter(ParameterSetName = 'All')]
+        [Parameter(ParameterSetName = 'Domain')]
+        [switch]$IncludeMoera,
+        [Parameter(Mandatory, ParameterSetName = 'All')]
+        [switch]$All,
+        [Parameter(Mandatory, ParameterSetName = 'Domain')]
+        [string]$Domain
     )
 
-    begin { Set-ProgressAndInfoPreferences }
+    begin {
+        Set-ProgressAndInfoPreferences
+        $aliasRows = [System.Collections.Generic.List[object]]::new()
+        $resolvedCsvFolder = $null
+    }
 
     process {
         if (-not (Test-EOLConnection)) {
@@ -462,41 +392,184 @@ function Get-MboxAlias {
             return
         }
 
-        try {
-            $recipient = Get-Recipient -Identity $SourceMailbox -ErrorAction Stop
+        if ($PSCmdlet.ParameterSetName -eq 'Single') {
+            try {
+                $recipient = Get-Recipient -Identity $SourceMailbox -ErrorAction Stop
+            }
+            catch {
+                Write-NCMessage "Recipient '$SourceMailbox' not available or not found." -Level ERROR
+                return
+            }
+
+            $recipients = @($recipient)
         }
-        catch {
-            Write-NCMessage "Recipient '$SourceMailbox' not available or not found." -Level ERROR
+        else {
+            if ($All) {
+                Write-NCMessage "No mailbox specified; scanning all recipients. This may take a while." -Level WARNING
+                Write-Progress -Activity "Processing aliases" -Status "Retrieving recipient list ..." -PercentComplete 0
+                $recipients = Get-Recipient -ResultSize Unlimited | Where-Object { $_.RecipientTypeDetails -ne 'GuestMailUser' }
+                Write-Progress -Activity "Processing aliases" -Status "Recipient list loaded." -PercentComplete 5
+            }
+            else {
+                $normalizedDomain = $Domain.Trim().ToLowerInvariant().TrimStart('@')
+                if ([string]::IsNullOrWhiteSpace($normalizedDomain)) {
+                    Write-NCMessage "Domain filter cannot be empty." -Level ERROR
+                    return
+                }
+
+                Write-Progress -Activity "Processing aliases" -Status "Retrieving recipient list for domain '$normalizedDomain' ..." -PercentComplete 0
+                $recipients = Get-Recipient -ResultSize Unlimited | Where-Object {
+                    $_.RecipientTypeDetails -ne 'GuestMailUser' -and $_.EmailAddresses -like "*@$normalizedDomain"
+                }
+                Write-Progress -Activity "Processing aliases" -Status "Recipient list loaded." -PercentComplete 5
+            }
+        }
+
+        $willExport = $Csv -or $PSCmdlet.ParameterSetName -ne 'Single'
+
+        if ($willExport -and -not $resolvedCsvFolder) {
+            try {
+                $resolvedCsvFolder = Test-Folder $CsvFolder
+            }
+            catch {
+                Write-NCMessage "Invalid CSV folder. $($_.Exception.Message)" -Level ERROR
+                return
+            }
+        }
+
+        $recipientCount = @($recipients).Count
+        $addressCount = 0
+        foreach ($recipient in $recipients) {
+            $addressCount += @($recipient.EmailAddresses).Count
+        }
+
+        $baseProgress = if ($PSCmdlet.ParameterSetName -eq 'Single') { 0 } else { 5 }
+        $progressSpan = if ($willExport) { 94 } else { 95 }
+        $totalWorkUnits = [Math]::Max($recipientCount + $addressCount, 1)
+        $completedWorkUnits = 0
+        $recipientIndex = 0
+        $updateAliasProgress = {
+            param(
+                [string]$Status,
+                [switch]$Advance
+            )
+
+            if ($Advance) {
+                $completedWorkUnits++
+            }
+
+            $percentage = [Math]::Min(99, [Math]::Round($baseProgress + (($completedWorkUnits / $totalWorkUnits) * $progressSpan), 2))
+            Write-Progress -Activity "Processing aliases" -Status $Status -PercentComplete $percentage
+        }
+
+        foreach ($recipient in $recipients) {
+            $recipientIndex++
+            & $updateAliasProgress -Status "Recipient $recipientIndex of $recipientCount" -Advance
+
+            $rows = [System.Collections.Generic.List[object]]::new()
+            foreach ($address in $recipient.EmailAddresses) {
+                & $updateAliasProgress -Status "Recipient $recipientIndex of $recipientCount" -Advance
+
+                if ($address -clike 'SMTP:*') {
+                    if ($willExport) {
+                        $rows.Add([pscustomobject]@{
+                                DisplayName        = $recipient.DisplayName
+                                Name               = $recipient.Name
+                                PrimarySmtpAddress = $recipient.PrimarySmtpAddress
+                                Alias              = $address.Replace('SMTP:', '')
+                                IsPrimary          = $true
+                                IsMoera            = $address.Replace('SMTP:', '') -match '@[^@]+\.onmicrosoft\.com$'
+                            }) | Out-Null
+                    }
+                    else {
+                        $rows.Add([pscustomobject]@{
+                                PrimarySmtpAddress = $recipient.PrimarySmtpAddress
+                                Alias              = $address.Replace('SMTP:', '')
+                                IsPrimary          = $true
+                            }) | Out-Null
+                    }
+                }
+                elseif ($address -clike 'smtp:*') {
+                    if ($willExport) {
+                        $rows.Add([pscustomobject]@{
+                                DisplayName        = $recipient.DisplayName
+                                Name               = $recipient.Name
+                                PrimarySmtpAddress = $recipient.PrimarySmtpAddress
+                                Alias              = $address.Replace('smtp:', '')
+                                IsPrimary          = $false
+                                IsMoera            = $address.Replace('smtp:', '') -match '@[^@]+\.onmicrosoft\.com$'
+                            }) | Out-Null
+                    }
+                    else {
+                        $rows.Add([pscustomobject]@{
+                                PrimarySmtpAddress = $recipient.PrimarySmtpAddress
+                                Alias              = $address.Replace('smtp:', '')
+                                IsPrimary          = $false
+                            }) | Out-Null
+                    }
+                }
+            }
+
+            if ($rows.Count -eq 0) {
+                Write-NCMessage "No aliases found for '$($recipient.PrimarySmtpAddress)'." -Level WARNING
+                continue
+            }
+
+            if ($willExport) {
+                $exportRows = $rows
+                if (-not $IncludeMoera) {
+                    $exportRows = @($exportRows | Where-Object { -not $_.IsMoera })
+                }
+
+                if ($exportRows.Count -eq 0) {
+                    continue
+                }
+
+                if (-not $IncludePrimaryOnly -and $exportRows.Count -eq 1 -and $exportRows[0].IsPrimary -and $exportRows[0].Alias -eq $exportRows[0].PrimarySmtpAddress) {
+                    continue
+                }
+
+                $aliasRows.AddRange($exportRows)
+            }
+            else {
+                $aliasRows.AddRange($rows)
+            }
+        }
+
+        if ($aliasRows.Count -eq 0) {
+            if ($willExport -and -not $IncludePrimaryOnly) {
+                Write-NCMessage "No secondary aliases found. Use -IncludePrimaryOnly to include recipients that only have a primary SMTP address." -Level WARNING
+            }
             return
         }
 
-        $aliases = [System.Collections.Generic.List[object]]::new()
-        foreach ($address in $recipient.EmailAddresses) {
-            if ($address -clike 'SMTP:*') {
-                $aliases.Add([pscustomobject]@{
-                        PrimarySmtpAddress = $recipient.PrimarySmtpAddress
-                        Alias              = $address.Replace('SMTP:', '')
-                        IsPrimary          = $true
-                    }) | Out-Null
-            }
-            elseif ($address -clike 'smtp:*') {
-                $aliases.Add([pscustomobject]@{
-                        PrimarySmtpAddress = $recipient.PrimarySmtpAddress
-                        Alias              = $address.Replace('smtp:', '')
-                        IsPrimary          = $false
-                    }) | Out-Null
-            }
-        }
+        $sortedAliases = $aliasRows | Sort-Object -Property PrimarySmtpAddress, @{ Expression = 'IsPrimary'; Descending = $true }, Alias
 
-        if ($aliases.Count -eq 0) {
-            Write-NCMessage "No aliases found for '$($recipient.PrimarySmtpAddress)'." -Level WARNING
+        if ($willExport) {
+            & $updateAliasProgress -Status "Writing CSV export ..." -Advance
+            $exportAliases = $sortedAliases
+
+            if ($exportAliases.Count -eq 0) {
+                Write-NCMessage "No exportable aliases found. Use -IncludeMoera to include MOERA addresses or -IncludePrimaryOnly to include recipients with only a primary SMTP address." -Level WARNING
+                return
+            }
+
+            $folder = if ($resolvedCsvFolder) { $resolvedCsvFolder } else { Test-Folder $CsvFolder }
+            $csvPath = New-File "$folder\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-Alias-Report.csv"
+            $exportAliases |
+                Select-Object DisplayName, Name, PrimarySmtpAddress, Alias, IsPrimary |
+                Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+            Write-NCMessage "Alias report exported to $csvPath" -Level SUCCESS
         }
         else {
-            $aliases | Sort-Object -Property @{ Expression = 'IsPrimary'; Descending = $true }, Alias
+            $sortedAliases
         }
     }
 
-    end { Restore-ProgressAndInfoPreferences }
+    end {
+        Write-Progress -Activity "Processing aliases" -Completed
+        Restore-ProgressAndInfoPreferences
+    }
 }
 
 function Get-MboxPrimarySmtpAddress {
@@ -1212,7 +1285,7 @@ function Set-MboxLanguage {
             if (-not $address) { continue }
 
             $counter++
-            $Percentage = [Math]::Round(($counter / [Math]::Max($total, 1)) * 100, 2)
+            $Percentage = Get-NCProgressPercent -Current $counter -Total $total
             Write-Progress -Activity "Changing language to $Language" -Status "$counter of $total - $Percentage%" -PercentComplete $Percentage
 
             try {
@@ -1277,7 +1350,7 @@ function Set-MboxRulesQuota {
             }
 
             $counter++
-            $Percentage = [Math]::Round(($counter / [Math]::Max($SourceMailbox.Count, 1)) * 100, 2)
+            $Percentage = Get-NCProgressPercent -Current $counter -Total $SourceMailbox.Count
             Write-Progress -Activity "Processing $($recipient.PrimarySmtpAddress)" -Status "$counter of $($SourceMailbox.Count) - $Percentage%" -PercentComplete $Percentage
 
             try {
@@ -1342,7 +1415,7 @@ function Set-SharedMboxCopyForSent {
                 }
 
                 $counter++
-                $Percentage = [Math]::Round(($counter / [Math]::Max($SourceMailbox.Count, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $SourceMailbox.Count
                 Write-Progress -Activity "Processing $($recipient.PrimarySmtpAddress)" -Status "$counter of $($SourceMailbox.Count) - $Percentage%" -PercentComplete $Percentage
 
                 Set-Mailbox -Identity $recipient.PrimarySmtpAddress -MessageCopyForSentAsEnabled $true
@@ -1421,7 +1494,7 @@ function Test-SharedMailboxCompliance {
 
         foreach ($mbx in $mailboxes) {
             $counter++
-            $Percentage = [Math]::Round(($counter / [Math]::Max($mailboxes.Count, 1)) * 100, 2)
+            $Percentage = Get-NCProgressPercent -Current $counter -Total $mailboxes.Count
             Write-Progress -Activity "Checking $($mbx.DisplayName)" -Status "$counter of $($mailboxes.Count) - $Percentage%" -PercentComplete $Percentage
 
             $logsFound = $false
@@ -1481,3 +1554,5 @@ function Test-SharedMailboxCompliance {
 
     end { Restore-ProgressAndInfoPreferences }
 }
+
+

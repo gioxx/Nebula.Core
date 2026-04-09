@@ -75,7 +75,7 @@ function Export-MboxStatistics {
 
         foreach ($mailbox in $mailboxes) {
             $processedCount++
-            $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
+            $Percentage = Get-NCProgressPercent -Current $processedCount -Total $totalMailboxes
             Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes - $Percentage%" -PercentComplete $Percentage
 
             $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
@@ -221,7 +221,7 @@ function Export-MboxDeletedItemSize {
 
             foreach ($mailbox in $mailboxes) {
                 $processedCount++
-                $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $processedCount -Total $totalMailboxes
                 Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes - $Percentage%" -PercentComplete $Percentage
 
                 $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
@@ -241,7 +241,6 @@ function Export-MboxDeletedItemSize {
                 $csvPath = New-File "$folder\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-DeletedItemSize.csv"
                 $report | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
                 Write-NCMessage "Deleted item size report exported to $csvPath." -Level SUCCESS
-                $csvPath
             }
             else {
                 $report
@@ -332,7 +331,7 @@ function Get-MboxStatistics {
 
             foreach ($mailbox in $mailboxes) {
                 $processedCount++
-                $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $processedCount -Total $totalMailboxes
                 Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes - $Percentage%" -PercentComplete $Percentage
 
                 $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
@@ -448,3 +447,5 @@ function Get-MboxStatistics {
         }
     }
 }
+
+

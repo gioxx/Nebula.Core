@@ -172,6 +172,30 @@ function Set-ProgressAndInfoPreferences {
     Set-Variable -Name ProgressPreference -Value Continue -Scope Global
 }
 
+function Get-NCProgressPercent {
+    <#
+    .SYNOPSIS
+        Calculates a percentage for progress reporting.
+    .DESCRIPTION
+        Returns a rounded percentage for the current work item against a total.
+        The total is clamped to at least 1 to avoid divide-by-zero errors.
+    .PARAMETER Current
+        Current work item count.
+    .PARAMETER Total
+        Total number of work items.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [double]$Current,
+        [Parameter(Mandatory)]
+        [double]$Total
+    )
+
+    $safeTotal = [Math]::Max($Total, 1)
+    return [Math]::Round(($Current / $safeTotal) * 100, 2)
+}
+
 function Show-Table {
     <#
     .SYNOPSIS

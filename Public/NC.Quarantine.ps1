@@ -521,7 +521,7 @@ function Get-QuarantineToRelease {
         $counter = 0
         foreach ($item in $selection) {
             $counter++
-            $Percentage = [Math]::Round(($counter / [Math]::Max($selection.Count, 1)) * 100, 2)
+            $Percentage = Get-NCProgressPercent -Current $counter -Total $selection.Count
             Write-Progress -Activity "Processing $($item.Subject)" -Status "$counter of $($selection.Count) - $Percentage%" -PercentComplete $Percentage
 
             if ($ReleaseSelected.IsPresent) {
@@ -734,7 +734,7 @@ function Unlock-QuarantineMessageId {
 
             $processed++
             if ($targetCount -gt 1) {
-                $Percentage = [Math]::Round(($processed / [Math]::Max($targetCount, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $targetCount
                 $statusMessage = "$processed of $targetCount ($($msg.Identity))"
                 Write-Progress -Activity "Releasing quarantined messages" -Status $statusMessage -PercentComplete $Percentage
             }
@@ -775,3 +775,5 @@ function Unlock-QuarantineMessageId {
 }
 
 Set-Alias -Name qrel -Value Unlock-QuarantineMessageId -Description "Releases quarantined messages by MessageId (function)"
+
+

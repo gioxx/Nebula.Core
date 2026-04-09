@@ -746,7 +746,7 @@ function Export-MsolAccountSku {
 
         foreach ($User in $Users) {
             $ProcessedCount++
-            $Percentage = [Math]::Round(($ProcessedCount / [Math]::Max($totalUsers, 1)) * 100, 2)
+            $Percentage = Get-NCProgressPercent -Current $ProcessedCount -Total $totalUsers
             Write-Progress -Activity "Processing $($User.DisplayName)" -Status "$ProcessedCount out of $totalUsers - $Percentage%" -PercentComplete $Percentage
 
             if ($ProcessedUsers -contains $User.UserPrincipalName) {
@@ -852,6 +852,7 @@ function Export-MsolAccountSku {
         }
 
         $arr_MsolAccountSku | Export-CSV $CSV -NoTypeInformation -Delimiter $($NCVars.CSV_DefaultLimiter) -Encoding $($NCVars.CSV_Encoding)
+        Write-NCMessage "User license report exported to $CSV." -Level SUCCESS
 
         if ($resolvedViaCustom.Count -gt 0) {
             Write-NCMessage "Licenses not found, but resolved via custom catalog:" -Level WARNING
@@ -888,6 +889,9 @@ function Get-TenantMsolAccountSku {
         Force a fresh download of the cached license catalog before processing.
     .PARAMETER Filter
         Filters the output to licenses whose name or SkuPartNumber contains the provided text.
+    .PARAMETER Domain
+        Optional domain filter for sample users. When specified, sample users are limited to
+        accounts whose Mail, UserPrincipalName, or ProxyAddresses belong to the selected domain.
     .PARAMETER SampleUsers
         Returns up to N sample users for each matching SKU (requires -Filter).
     .PARAMETER IncludeSampleUsers
@@ -906,11 +910,14 @@ function Get-TenantMsolAccountSku {
         Get-TenantMsolAccountSku -Filter "E3" -SampleUsers 5
     .EXAMPLE
         Get-TenantMsolAccountSku -Filter "E3" -IncludeSampleUsers
+    .EXAMPLE
+        Get-TenantMsolAccountSku -Filter "E3" -SampleUsers 5 -Domain "contoso.com"
     #>
     [CmdletBinding()]
     param(
         [switch]$ForceLicenseCatalogRefresh,
         [string]$Filter,
+        [string]$Domain,
         [int]$SampleUsers = 5,
         [switch]$IncludeSampleUsers,
         [switch]$AsTable,
@@ -964,6 +971,65 @@ function Get-TenantMsolAccountSku {
         if ($useSampleUsers -and -not $Filter) {
             Write-NCMessage "SampleUsers requires -Filter to limit the query scope. Example: Get-TenantMsolAccountSku -Filter \"E3\" -SampleUsers 5" -Level ERROR
             return
+        }
+
+        $normalizedDomain = $null
+        if (-not [string]::IsNullOrWhiteSpace($Domain)) {
+            $normalizedDomain = $Domain.Trim().ToLowerInvariant().TrimStart('@')
+            if ([string]::IsNullOrWhiteSpace($normalizedDomain)) {
+                Write-NCMessage "Domain filter cannot be empty." -Level ERROR
+                return
+            }
+            else {
+                Write-Verbose "Filtering sample users for domain '$normalizedDomain'."
+            }
+        }
+
+        $getAddressDomain = {
+            param($value)
+
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                return $null
+            }
+
+            $address = [string]$value
+            if ($address.Contains(':')) {
+                $address = $address.Substring($address.IndexOf(':') + 1)
+            }
+
+            $atIndex = $address.LastIndexOf('@')
+            if ($atIndex -lt 0 -or $atIndex -eq ($address.Length - 1)) {
+                return $null
+            }
+
+            return $address.Substring($atIndex + 1).Trim().ToLowerInvariant()
+        }
+
+        $matchesDomain = {
+            param($user)
+
+            if (-not $normalizedDomain) {
+                return $true
+            }
+
+            $domains = @()
+            foreach ($candidate in @($user.Mail, $user.UserPrincipalName)) {
+                $candidateDomain = & $getAddressDomain $candidate
+                if ($candidateDomain) {
+                    $domains += $candidateDomain
+                }
+            }
+
+            if ($user.PSObject.Properties['ProxyAddresses'] -and $user.ProxyAddresses) {
+                foreach ($proxy in $user.ProxyAddresses) {
+                    $proxyDomain = & $getAddressDomain $proxy
+                    if ($proxyDomain) {
+                        $domains += $proxyDomain
+                    }
+                }
+            }
+
+            return ($domains | Select-Object -Unique) -contains $normalizedDomain
         }
 
         $results = foreach ($sku in $skus) {
@@ -1022,11 +1088,23 @@ function Get-TenantMsolAccountSku {
                 $sampleUserList = @()
                 try {
                     $examples = Invoke-NCRetry -Action {
-                        Get-MgUser -Filter "assignedLicenses/any(x:x/skuId eq $($sku.SkuId))" `
-                            -Top $sampleUserLimit `
-                            -ConsistencyLevel eventual `
-                            -Property Id,UserPrincipalName,DisplayName `
-                            -ErrorAction Stop
+                        if ($normalizedDomain) {
+                            Get-MgUser -Filter "assignedLicenses/any(x:x/skuId eq $($sku.SkuId))" `
+                                -All `
+                                -ConsistencyLevel eventual `
+                                -Property Id,UserPrincipalName,DisplayName,Mail,ProxyAddresses `
+                                -ErrorAction Stop |
+                                Where-Object { & $matchesDomain $_ } |
+                                Select-Object -First $sampleUserLimit
+                        }
+                        else {
+                            Get-MgUser -Filter "assignedLicenses/any(x:x/skuId eq $($sku.SkuId))" `
+                                -Top $sampleUserLimit `
+                                -ConsistencyLevel eventual `
+                                -Property Id,UserPrincipalName,DisplayName `
+                                -ErrorAction Stop |
+                                Select-Object -First $sampleUserLimit
+                        }
                     } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve sample users for $($sku.SkuPartNumber)" -OnError {
                         param($attempt, $max, $err)
                         $currentAttempt = if ($attempt) { $attempt } else { '?' }
@@ -1860,3 +1938,5 @@ function Update-LicenseCatalog {
         throw
     }
 }
+
+

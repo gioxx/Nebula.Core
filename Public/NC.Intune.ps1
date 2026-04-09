@@ -295,7 +295,7 @@ function Export-IntuneAppInventory {
             foreach ($device in $devices) {
                 $processed++
 
-                $Percentage = [Math]::Round(($processed / [Math]::Max($devices.Count, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $processed -Total $devices.Count
                 Write-Progress -Activity "Reading Detected Apps" -Status "$($device.deviceName) - $processed / $($devices.Count) devices - $Percentage%" -PercentComplete $Percentage
 
                 try {
@@ -341,7 +341,7 @@ function Export-IntuneAppInventory {
                         Start-Sleep -Seconds 60
                         $processed--
 
-                        $Percentage = [Math]::Round(($processed / [Math]::Max($devices.Count, 1)) * 100, 2)
+                        $Percentage = Get-NCProgressPercent -Current $processed -Total $devices.Count
                         Write-Progress -Activity "Reading Detected Apps" -Status "Waiting after rate limit ... - $processed / $($devices.Count) devices - $Percentage%" -PercentComplete $Percentage
 
                         continue
@@ -599,7 +599,7 @@ function New-IntuneAppBasedGroup {
             foreach ($device in $devices) {
                 $processedDevices++
 
-                $Percentage = [Math]::Round(($processedDevices / [Math]::Max($devices.Count, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $processed -Total $devices.Count
                 Write-Progress -Activity 'Processing Devices' -Status "$($device.deviceName) - $processedDevices of $($devices.Count) devices - $Percentage%" -PercentComplete $Percentage
 
                 try {
@@ -842,7 +842,7 @@ function New-IntuneAppBasedGroup {
                     $processedMembers++
 
                     try {
-                        $Percentage = [Math]::Round(($processedMembers / [Math]::Max($uniqueDeviceIds.Count, 1)) * 100, 2)
+                        $Percentage = Get-NCProgressPercent -Current $processed -Total $uniqueDeviceIds.Count
                         $resolution = Resolve-NCIntuneManagedDeviceEntraMember -ManagedDevices $devices -DeviceId $deviceId
                         $deviceLabel = if ($resolution -and -not [string]::IsNullOrWhiteSpace($resolution.DeviceName)) { $resolution.DeviceName } else { [string]$deviceId }
                         Write-Progress -Activity 'Resolving Entra Devices' -Status "$deviceLabel - $processedMembers of $($uniqueDeviceIds.Count) devices - $Percentage%" -PercentComplete $Percentage
@@ -999,3 +999,5 @@ function New-IntuneAppBasedGroup {
         }
     }
 }
+
+
