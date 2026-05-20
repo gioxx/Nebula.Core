@@ -251,6 +251,14 @@ function Export-MboxPermission {
         Recipient type to analyze: User, Shared, Room, All.
     .PARAMETER CsvFolder
         Destination folder for the CSV file. Defaults to current directory.
+    .PARAMETER BatchSize
+        Number of processed mailboxes before flushing partial CSV output.
+    .PARAMETER Resume
+        Resume from the latest matching CSV in the target folder or from -CsvPath.
+    .PARAMETER CsvPath
+        Explicit CSV file to resume. When omitted, the most recent matching CSV in the target folder is used.
+    .PARAMETER MaxConsecutiveErrors
+        Stop after this many consecutive mailbox-level failures.
     .EXAMPLE
         Export-MboxPermission -RecipientType All -CsvFolder C:\Temp
     #>
@@ -259,12 +267,21 @@ function Export-MboxPermission {
         [Parameter(Mandatory)]
         [ValidateSet('User', 'Shared', 'Room', 'All')]
         [string]$RecipientType,
-        [string]$CsvFolder
+        [string]$CsvFolder,
+        [ValidateRange(1, 500)]
+        [int]$BatchSize = 25,
+        [switch]$Resume,
+        [string]$CsvPath,
+        [ValidateRange(1, 100)]
+        [int]$MaxConsecutiveErrors = 5
     )
 
     begin {
         Set-ProgressAndInfoPreferences
         $permissions = [System.Collections.Generic.List[object]]::new()
+        $processedSinceFlush = 0
+        $consecutiveErrors = 0
+        $aborted = $false
     }
 
     process {
@@ -284,33 +301,149 @@ function Export-MboxPermission {
             }
         }
 
+        $normalizeText = {
+            param($value)
+            return Get-NormalizedText -Value $value
+        }
+        $buildPermissionKey = {
+            param($row)
+
+            $mailbox = & $normalizeText $row.'Mailbox Address'
+            if (-not $mailbox) {
+                $mailbox = & $normalizeText $row.Mailbox
+            }
+            $recipientType = & $normalizeText $row.'Recipient Type'
+            return "{0}|{1}" -f $mailbox, $recipientType
+        }
+        $existingPermissionKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $csvPathResolved = $null
+        $folderForExport = Test-Folder $CsvFolder
+        $defaultCsvPath = New-File "$folderForExport\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-MboxPermissions-Report.csv"
+        $csvPathResolved = $defaultCsvPath
+
+        if ($Resume) {
+            $resumePath = $null
+            if (-not [string]::IsNullOrWhiteSpace($CsvPath)) {
+                $resumePath = $CsvPath
+            }
+            else {
+                $existingCsv = Get-ChildItem -LiteralPath $folderForExport -File -Filter "*_M365-MboxPermissions-Report.csv" |
+                    Sort-Object LastWriteTime -Descending |
+                    Select-Object -First 1
+                if ($existingCsv) {
+                    $resumePath = $existingCsv.FullName
+                }
+            }
+
+            if ($resumePath) {
+                $csvPathResolved = $resumePath
+                if (Test-Path -LiteralPath $csvPathResolved) {
+                    try {
+                        foreach ($row in (Import-CSV -LiteralPath $csvPathResolved -Delimiter $NCVars.CSV_DefaultLimiter -ErrorAction Stop)) {
+                            $null = $existingPermissionKeys.Add((& $buildPermissionKey $row))
+                        }
+                        Write-NCMessage ("Resuming mailbox permissions export from {0}; {1} row(s) already recorded." -f $csvPathResolved, $existingPermissionKeys.Count) -Level INFO
+                    }
+                    catch {
+                        Write-NCMessage ("Unable to read existing CSV '{0}' for resume. {1}" -f $csvPathResolved, $_.Exception.Message) -Level WARNING
+                        $existingPermissionKeys.Clear()
+                        $csvPathResolved = $defaultCsvPath
+                    }
+                }
+                else {
+                    Write-NCMessage ("Resume requested for '{0}', but the file does not exist. Starting a new report at that path." -f $csvPathResolved) -Level INFO
+                }
+            }
+            else {
+                Write-NCMessage ("Resume requested, but no existing CSV was found. Starting a new report at {0}." -f $csvPathResolved) -Level INFO
+            }
+        }
+
+        Write-NCMessage ("Mailbox permission export will flush every {0} mailbox(es). Resume: {1}. Stop after {2} consecutive error(s)." -f $BatchSize, $Resume.IsPresent, $MaxConsecutiveErrors) -Level INFO
+        Write-NCMessage "Saving report to $csvPathResolved" -Level DEBUG
+
+        $writeBuffer = {
+            param([System.Collections.Generic.List[object]]$buffer)
+
+            if ($buffer.Count -eq 0) {
+                return
+            }
+
+            $exportRows = $buffer
+            if ((Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                $exportRows | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter -Append
+            }
+            else {
+                $exportRows | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+            }
+            $buffer.Clear()
+        }
+
         $counter = 0
         foreach ($mailbox in $mailboxes) {
             $counter++
             $Percentage = Get-NCProgressPercent -Current $counter -Total $mailboxes.Count
             Write-Progress -Activity "Processing $($mailbox.PrimarySmtpAddress)" -Status "$counter of $($mailboxes.Count) - $Percentage%" -PercentComplete $Percentage
 
-            $exoMailbox = Get-EXOMailbox -Identity $mailbox.Identity
-            $sendAs = Get-RecipientPermission -Identity $exoMailbox.PrimarySmtpAddress -AccessRights SendAs | Where-Object { $_.Trustee.ToString() -ne 'NT AUTHORITY\SELF' -and $_.Trustee.ToString() -notlike 'S-1-5*' } | ForEach-Object { $_.Trustee.ToString() }
-            $fullAccess = Get-MailboxPermission -Identity $exoMailbox.PrimarySmtpAddress | Where-Object { $_.AccessRights -eq 'FullAccess' -and -not $_.IsInherited } | ForEach-Object { $_.User.ToString() }
+            try {
+                $exoMailbox = Get-EXOMailbox -Identity $mailbox.Identity -ErrorAction Stop
+                $sendAs = Get-RecipientPermission -Identity $exoMailbox.PrimarySmtpAddress -AccessRights SendAs -ErrorAction Stop | Where-Object { $_.Trustee.ToString() -ne 'NT AUTHORITY\SELF' -and $_.Trustee.ToString() -notlike 'S-1-5*' } | ForEach-Object { $_.Trustee.ToString() }
+                $fullAccess = Get-MailboxPermission -Identity $exoMailbox.PrimarySmtpAddress -ErrorAction Stop | Where-Object { $_.AccessRights -eq 'FullAccess' -and -not $_.IsInherited } | ForEach-Object { $_.User.ToString() }
 
-            $permissions.Add([pscustomobject]@{
+                $row = [pscustomobject]@{
                     Mailbox           = $exoMailbox.DisplayName
                     'Mailbox Address' = $exoMailbox.PrimarySmtpAddress
                     'Recipient Type'  = $exoMailbox.RecipientTypeDetails
                     FullAccess        = ($fullAccess -join ', ')
                     SendAs            = ($sendAs -join ', ')
                     SendOnBehalfTo    = $exoMailbox.GrantSendOnBehalfTo -join ', '
-                }) | Out-Null
+                }
+            }
+            catch {
+                Write-NCMessage "Failed to process mailbox '$($mailbox.PrimarySmtpAddress)': $($_.Exception.Message)" -Level ERROR
+                $consecutiveErrors++
+                if ($MaxConsecutiveErrors -gt 0 -and $consecutiveErrors -ge $MaxConsecutiveErrors) {
+                    $aborted = $true
+                    break
+                }
+                continue
+            }
+
+            if ($Resume -and $existingPermissionKeys.Contains((& $buildPermissionKey $row))) {
+                continue
+            }
+
+            $null = $existingPermissionKeys.Add((& $buildPermissionKey $row))
+            $permissions.Add($row) | Out-Null
+            $consecutiveErrors = 0
+
+            $processedSinceFlush++
+            if ($BatchSize -gt 0 -and $permissions.Count -gt 0 -and $processedSinceFlush -ge $BatchSize) {
+                & $writeBuffer $permissions
+                $processedSinceFlush = 0
+            }
         }
     }
 
     end {
         try {
-            $folder = Test-Folder $CsvFolder
-            $csvPath = New-File "$folder\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-MboxPermissions-Report.csv"
-            $permissions | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
-            Write-NCMessage "Mailbox permissions exported to $csvPath" -Level SUCCESS
+            if ($permissions.Count -eq 0) {
+                if ($Resume -and (Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                    Write-NCMessage "No new mailbox permissions found. Existing CSV at $csvPathResolved already contains the requested rows." -Level INFO
+                }
+                else {
+                    Write-NCMessage "No mailbox permissions were collected." -Level WARNING
+                }
+                return
+            }
+
+            & $writeBuffer $permissions
+            if ($aborted) {
+                Write-NCMessage "Mailbox permissions export stopped early. Partial data kept at $csvPathResolved." -Level ERROR
+            }
+            else {
+                Write-NCMessage "Mailbox permissions exported to $csvPathResolved" -Level SUCCESS
+            }
         }
         finally {
             Write-Progress -Activity "Processing mailbox permissions" -Completed
@@ -343,6 +476,14 @@ function Get-MboxAlias {
         Include recipients that have no secondary aliases in CSV exports.
     .PARAMETER IncludeMoera
         Include MOERA addresses in CSV exports.
+    .PARAMETER BatchSize
+        Number of processed recipients before flushing partial CSV output.
+    .PARAMETER Resume
+        Resume from the latest matching CSV in the target folder or from -CsvPath.
+    .PARAMETER CsvPath
+        Explicit CSV file to resume. When omitted, the most recent matching CSV in the target folder is used.
+    .PARAMETER MaxConsecutiveErrors
+        Stop after this many consecutive recipient-level failures.
     .EXAMPLE
         Get-MboxAlias -SourceMailbox user@contoso.com
     .EXAMPLE
@@ -373,6 +514,24 @@ function Get-MboxAlias {
         [Parameter(ParameterSetName = 'All')]
         [Parameter(ParameterSetName = 'Domain')]
         [switch]$IncludeMoera,
+        [Parameter(ParameterSetName = 'Single')]
+        [Parameter(ParameterSetName = 'All')]
+        [Parameter(ParameterSetName = 'Domain')]
+        [ValidateRange(1, 500)]
+        [int]$BatchSize = 25,
+        [Parameter(ParameterSetName = 'Single')]
+        [Parameter(ParameterSetName = 'All')]
+        [Parameter(ParameterSetName = 'Domain')]
+        [switch]$Resume,
+        [Parameter(ParameterSetName = 'Single')]
+        [Parameter(ParameterSetName = 'All')]
+        [Parameter(ParameterSetName = 'Domain')]
+        [string]$CsvPath,
+        [Parameter(ParameterSetName = 'Single')]
+        [Parameter(ParameterSetName = 'All')]
+        [Parameter(ParameterSetName = 'Domain')]
+        [ValidateRange(1, 100)]
+        [int]$MaxConsecutiveErrors = 5,
         [Parameter(Mandatory, ParameterSetName = 'All')]
         [switch]$All,
         [Parameter(Mandatory, ParameterSetName = 'Domain')]
@@ -383,6 +542,9 @@ function Get-MboxAlias {
         Set-ProgressAndInfoPreferences
         $aliasRows = [System.Collections.Generic.List[object]]::new()
         $resolvedCsvFolder = $null
+        $processedSinceFlush = 0
+        $consecutiveErrors = 0
+        $aborted = $false
     }
 
     process {
@@ -398,6 +560,7 @@ function Get-MboxAlias {
             }
             catch {
                 Write-NCMessage "Recipient '$SourceMailbox' not available or not found." -Level ERROR
+                $consecutiveErrors++
                 return
             }
 
@@ -448,6 +611,68 @@ function Get-MboxAlias {
         $totalWorkUnits = [Math]::Max($recipientCount + $addressCount, 1)
         $completedWorkUnits = 0
         $recipientIndex = 0
+        $normalizeText = {
+            param($value)
+            return Get-NormalizedText -Value $value
+        }
+        $buildAliasKey = {
+            param($row)
+
+            $primary = & $normalizeText $row.PrimarySmtpAddress
+            $alias = & $normalizeText $row.Alias
+            $isPrimary = if ($null -ne $row.IsPrimary) { [string]$row.IsPrimary } else { $null }
+            $isMoera = if ($null -ne $row.IsMoera) { [string]$row.IsMoera } else { $null }
+            return "{0}|{1}|{2}|{3}" -f $primary, $alias, $isPrimary, $isMoera
+        }
+        $existingAliasKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $csvPathResolved = $null
+
+        if ($willExport) {
+            $folderForExport = if ($resolvedCsvFolder) { $resolvedCsvFolder } else { Test-Folder $CsvFolder }
+            $defaultCsvPath = New-File "$folderForExport\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-Alias-Report.csv"
+            $csvPathResolved = $defaultCsvPath
+
+            if ($Resume) {
+                $resumePath = $null
+                if (-not [string]::IsNullOrWhiteSpace($CsvPath)) {
+                    $resumePath = $CsvPath
+                }
+                else {
+                    $existingCsv = Get-ChildItem -LiteralPath $folderForExport -File -Filter "*_M365-Alias-Report.csv" |
+                        Sort-Object LastWriteTime -Descending |
+                        Select-Object -First 1
+                    if ($existingCsv) {
+                        $resumePath = $existingCsv.FullName
+                    }
+                }
+
+                if ($resumePath) {
+                    $csvPathResolved = $resumePath
+                    if (Test-Path -LiteralPath $csvPathResolved) {
+                        try {
+                        foreach ($row in (Import-CSV -LiteralPath $csvPathResolved -Delimiter $NCVars.CSV_DefaultLimiter -ErrorAction Stop)) {
+                                $null = $existingAliasKeys.Add((& $buildAliasKey $row))
+                            }
+                            Write-NCMessage ("Resuming alias export from {0}; {1} row(s) already recorded." -f $csvPathResolved, $existingAliasKeys.Count) -Level INFO
+                        }
+                        catch {
+                            Write-NCMessage ("Unable to read existing CSV '{0}' for resume. {1}" -f $csvPathResolved, $_.Exception.Message) -Level WARNING
+                            $existingAliasKeys.Clear()
+                            $csvPathResolved = $defaultCsvPath
+                        }
+                    }
+                    else {
+                        Write-NCMessage ("Resume requested for '{0}', but the file does not exist. Starting a new report at that path." -f $csvPathResolved) -Level INFO
+                    }
+                }
+                else {
+                    Write-NCMessage ("Resume requested, but no existing CSV was found. Starting a new report at {0}." -f $csvPathResolved) -Level INFO
+                }
+            }
+
+            Write-NCMessage ("Alias export will flush every {0} recipient(s). Resume: {1}. Stop after {2} consecutive error(s)." -f $BatchSize, $Resume.IsPresent, $MaxConsecutiveErrors) -Level INFO
+            Write-NCMessage "Saving report to $csvPathResolved" -Level DEBUG
+        }
         $updateAliasProgress = {
             param(
                 [string]$Status,
@@ -475,6 +700,7 @@ function Get-MboxAlias {
                         $rows.Add([pscustomobject]@{
                                 DisplayName        = $recipient.DisplayName
                                 Name               = $recipient.Name
+                                UserPrincipalName  = $recipient.PrimarySmtpAddress
                                 PrimarySmtpAddress = $recipient.PrimarySmtpAddress
                                 Alias              = $address.Replace('SMTP:', '')
                                 IsPrimary          = $true
@@ -494,6 +720,7 @@ function Get-MboxAlias {
                         $rows.Add([pscustomobject]@{
                                 DisplayName        = $recipient.DisplayName
                                 Name               = $recipient.Name
+                                UserPrincipalName  = $recipient.PrimarySmtpAddress
                                 PrimarySmtpAddress = $recipient.PrimarySmtpAddress
                                 Alias              = $address.Replace('smtp:', '')
                                 IsPrimary          = $false
@@ -517,9 +744,9 @@ function Get-MboxAlias {
 
             if ($willExport) {
                 $exportRows = $rows
-                if (-not $IncludeMoera) {
-                    $exportRows = @($exportRows | Where-Object { -not $_.IsMoera })
-                }
+                    if (-not $IncludeMoera) {
+                        $exportRows = @($exportRows | Where-Object { -not $_.IsMoera })
+                    }
 
                 if ($exportRows.Count -eq 0) {
                     continue
@@ -529,40 +756,71 @@ function Get-MboxAlias {
                     continue
                 }
 
-                $aliasRows.AddRange($exportRows)
+                foreach ($row in $exportRows) {
+                    $rowKey = & $buildAliasKey $row
+                    if ($Resume -and $existingAliasKeys.Contains($rowKey)) {
+                        continue
+                    }
+
+                    $aliasRows.Add($row) | Out-Null
+                }
+
+                $processedSinceFlush++
+                if ($aliasRows.Count -gt 0 -and $processedSinceFlush -ge $BatchSize) {
+                    $aliasRows |
+                        Select-Object DisplayName, Name, UserPrincipalName, PrimarySmtpAddress, Alias, IsPrimary, IsMoera |
+                        Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter -Append
+                    $aliasRows.Clear()
+                    $processedSinceFlush = 0
+                }
             }
             else {
                 $aliasRows.AddRange($rows)
+            }
+
+            if ($MaxConsecutiveErrors -gt 0 -and $consecutiveErrors -ge $MaxConsecutiveErrors) {
+                $aborted = $true
+                break
             }
         }
 
         if ($aliasRows.Count -eq 0) {
             if ($willExport -and -not $IncludePrimaryOnly) {
-                Write-NCMessage "No secondary aliases found. Use -IncludePrimaryOnly to include recipients that only have a primary SMTP address." -Level WARNING
+                if ((Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                    Write-NCMessage "No new aliases found. Existing CSV at $csvPathResolved already contains the requested rows." -Level INFO
+                }
+                else {
+                    Write-NCMessage "No secondary aliases found. Use -IncludePrimaryOnly to include recipients that only have a primary SMTP address." -Level WARNING
+                }
             }
             return
         }
 
-        $sortedAliases = $aliasRows | Sort-Object -Property PrimarySmtpAddress, @{ Expression = 'IsPrimary'; Descending = $true }, Alias
-
         if ($willExport) {
             & $updateAliasProgress -Status "Writing CSV export ..." -Advance
-            $exportAliases = $sortedAliases
+            $exportAliases = $aliasRows | Sort-Object -Property PrimarySmtpAddress, @{ Expression = 'IsPrimary'; Descending = $true }, Alias
 
             if ($exportAliases.Count -eq 0) {
                 Write-NCMessage "No exportable aliases found. Use -IncludeMoera to include MOERA addresses or -IncludePrimaryOnly to include recipients with only a primary SMTP address." -Level WARNING
                 return
             }
 
-            $folder = if ($resolvedCsvFolder) { $resolvedCsvFolder } else { Test-Folder $CsvFolder }
-            $csvPath = New-File "$folder\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-Alias-Report.csv"
-            $exportAliases |
-                Select-Object DisplayName, Name, PrimarySmtpAddress, Alias, IsPrimary |
-                Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
-            Write-NCMessage "Alias report exported to $csvPath" -Level SUCCESS
+            $finalExport = $exportAliases | Select-Object DisplayName, Name, UserPrincipalName, PrimarySmtpAddress, Alias, IsPrimary, IsMoera
+            if ((Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                $finalExport | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter -Append
+            }
+            else {
+                $finalExport | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+            }
+            if ($aborted) {
+                Write-NCMessage "Alias report export stopped early. Partial data kept at $csvPathResolved." -Level ERROR
+            }
+            else {
+                Write-NCMessage "Alias report exported to $csvPathResolved" -Level SUCCESS
+            }
         }
         else {
-            $sortedAliases
+            $aliasRows | Sort-Object -Property PrimarySmtpAddress, @{ Expression = 'IsPrimary'; Descending = $true }, Alias
         }
     }
 
@@ -1267,7 +1525,7 @@ function Set-MboxLanguage {
             }
 
             try {
-                $mailboxes = (Import-Csv -LiteralPath $Csv) | Where-Object { $_.EmailAddress }
+                $mailboxes = (Import-Csv -LiteralPath $Csv -Delimiter $NCVars.CSV_DefaultLimiter) | Where-Object { $_.EmailAddress }
             }
             catch {
                 Write-NCMessage "Unable to read CSV file '$Csv'. $($_.Exception.Message)" -Level ERROR

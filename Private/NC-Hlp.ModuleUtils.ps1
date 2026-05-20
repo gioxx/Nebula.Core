@@ -33,6 +33,72 @@ function Format-OutputString {
     return $Value.Substring(0, $length - 3) + '...'
 }
 
+function Get-NormalizedText {
+    <#
+    .SYNOPSIS
+        Returns a lower-cased, trimmed string from a value or object.
+    .DESCRIPTION
+        Accepts plain strings, deserialized Exchange objects, and other objects with useful identity
+        properties. Falls back to the object's string representation and returns $null for blank values.
+    .PARAMETER Value
+        Value to normalize.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Value
+    )
+
+    $text = $null
+
+    if ($Value -is [string]) {
+        $text = $Value
+    }
+    elseif ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
+        $items = foreach ($item in $Value) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$item)) {
+                [string]$item
+            }
+        }
+
+        if ($items) {
+            $text = $items -join ', '
+        }
+    }
+    else {
+        foreach ($propertyName in @(
+            'PrimarySmtpAddress',
+            'UserPrincipalName',
+            'WindowsEmailAddress',
+            'SmtpAddress',
+            'EmailAddress',
+            'Value',
+            'Name',
+            'DisplayName',
+            'Identity',
+            'RawIdentity'
+        )) {
+            if ($Value.PSObject.Properties.Match($propertyName).Count -gt 0) {
+                $candidate = $Value.$propertyName
+                if (-not [string]::IsNullOrWhiteSpace([string]$candidate)) {
+                    $text = [string]$candidate
+                    break
+                }
+            }
+        }
+    }
+
+    if (-not $text) {
+        $text = [string]$Value
+    }
+
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    return $text.Trim().ToLowerInvariant()
+}
+
 function Invoke-NCRetry {
     <#
     .SYNOPSIS

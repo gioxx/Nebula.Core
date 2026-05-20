@@ -372,6 +372,22 @@ function Export-DistributionGroups {
         Export every distribution group in the tenant.
     .PARAMETER GridView
         Show the result in Out-GridView instead of returning objects.
+    .PARAMETER BatchSize
+        Number of processed groups before flushing partial CSV output.
+    .PARAMETER Resume
+        Resume from the latest matching CSV in the target folder or from -CsvPath.
+    .PARAMETER CsvPath
+        Explicit CSV file to resume. When omitted, the most recent matching CSV in the target folder is used.
+    .PARAMETER MaxConsecutiveErrors
+        Stop after this many consecutive group-member retrieval failures.
+    .PARAMETER BatchSize
+        Number of processed groups before flushing partial CSV output.
+    .PARAMETER Resume
+        Resume from the latest matching CSV in the target folder or from -CsvPath.
+    .PARAMETER CsvPath
+        Explicit CSV file to resume. When omitted, the most recent matching CSV in the target folder is used.
+    .PARAMETER MaxConsecutiveErrors
+        Stop after this many consecutive group-member retrieval failures.
     .EXAMPLE
         Export-DistributionGroups -DistributionGroup "Support Team"
     .EXAMPLE
@@ -385,7 +401,13 @@ function Export-DistributionGroups {
         [switch]$Csv,
         [string]$CsvFolder,
         [switch]$All,
-        [switch]$GridView
+        [switch]$GridView,
+        [ValidateRange(1, 500)]
+        [int]$BatchSize = 25,
+        [switch]$Resume,
+        [string]$CsvPath,
+        [ValidateRange(1, 100)]
+        [int]$MaxConsecutiveErrors = 5
     )
 
     begin {
@@ -412,7 +434,7 @@ function Export-DistributionGroups {
             }
 
             $exportAll = $All.IsPresent -or $requestedGroups.Count -eq 0
-            $emitCsv = $Csv.IsPresent -or -not [string]::IsNullOrWhiteSpace($CsvFolder) -or $exportAll
+            $emitCsv = $Csv.IsPresent -or -not [string]::IsNullOrWhiteSpace($CsvFolder) -or $exportAll -or $Resume.IsPresent -or -not [string]::IsNullOrWhiteSpace($CsvPath)
             $folder = $null
 
             if ($emitCsv) {
@@ -451,9 +473,97 @@ function Export-DistributionGroups {
                 return
             }
 
+            $normalizeText = {
+                param($value)
+                return Get-NormalizedText -Value $value
+            }
+            $buildMemberKey = {
+                param($row)
+
+                $groupIdentity = & $normalizeText $row.'Group Identity'
+                if (-not $groupIdentity) {
+                    $groupIdentity = & $normalizeText $row.'Group Name'
+                }
+                if (-not $groupIdentity) {
+                    $groupIdentity = & $normalizeText $row.'Group Primary Smtp Address'
+                }
+
+                $memberPrimary = & $normalizeText $row.'Member Primary Smtp Address'
+                $memberDisplay = & $normalizeText $row.'Member Display Name'
+                return "{0}|{1}|{2}" -f $groupIdentity, $memberPrimary, $memberDisplay
+            }
+            $existingMemberKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             $results = [System.Collections.Generic.List[object]]::new()
+            $processedSinceFlush = 0
+            $consecutiveErrors = 0
+            $aborted = $false
+            $csvPathResolved = $null
             $counter = 0
             $total = $groups.Count
+
+            if ($emitCsv) {
+                $folderForExport = $folder
+                $defaultCsvPath = New-File (Join-Path -Path $folderForExport -ChildPath "$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-DistributionGroups-Report.csv")
+                $csvPathResolved = $defaultCsvPath
+
+                if ($Resume) {
+                    $resumePath = $null
+                    if (-not [string]::IsNullOrWhiteSpace($CsvPath)) {
+                        $resumePath = $CsvPath
+                    }
+                    else {
+                        $existingCsv = Get-ChildItem -LiteralPath $folderForExport -File -Filter "*_M365-DistributionGroups-Report.csv" |
+                            Sort-Object LastWriteTime -Descending |
+                            Select-Object -First 1
+                        if ($existingCsv) {
+                            $resumePath = $existingCsv.FullName
+                        }
+                    }
+
+                    if ($resumePath) {
+                        $csvPathResolved = $resumePath
+                        if (Test-Path -LiteralPath $csvPathResolved) {
+                            try {
+                                foreach ($row in (Import-CSV -LiteralPath $csvPathResolved -Delimiter $NCVars.CSV_DefaultLimiter -ErrorAction Stop)) {
+                                    $null = $existingMemberKeys.Add((& $buildMemberKey $row))
+                                }
+                                Write-NCMessage ("Resuming distribution group export from {0}; {1} row(s) already recorded." -f $csvPathResolved, $existingMemberKeys.Count) -Level INFO
+                            }
+                            catch {
+                                Write-NCMessage ("Unable to read existing CSV '{0}' for resume. {1}" -f $csvPathResolved, $_.Exception.Message) -Level WARNING
+                                $existingMemberKeys.Clear()
+                                $csvPathResolved = $defaultCsvPath
+                            }
+                        }
+                        else {
+                            Write-NCMessage ("Resume requested for '{0}', but the file does not exist. Starting a new report at that path." -f $csvPathResolved) -Level INFO
+                        }
+                    }
+                    else {
+                        Write-NCMessage ("Resume requested, but no existing CSV was found. Starting a new report at {0}." -f $csvPathResolved) -Level INFO
+                    }
+                }
+
+                Write-NCMessage ("Distribution group export will flush every {0} group(s). Resume: {1}. Stop after {2} consecutive error(s)." -f $BatchSize, $Resume.IsPresent, $MaxConsecutiveErrors) -Level INFO
+                Write-NCMessage "Saving report to $csvPathResolved" -Level DEBUG
+            }
+
+            $writeBuffer = {
+                param([System.Collections.Generic.List[object]]$buffer)
+
+                if ($buffer.Count -eq 0) {
+                    return
+                }
+
+                $exportRows = $buffer | Select-Object 'Group Name', 'Group Identity', 'Group Primary Smtp Address', 'Member Display Name', 'Member FirstName', 'Member LastName', 'Member Primary Smtp Address', 'Member Company', 'Member City'
+                if ((Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                    $exportRows | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter -Append
+                }
+                else {
+                    $exportRows | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+                }
+                $buffer.Clear()
+            }
 
             foreach ($group in $groups) {
                 $counter++
@@ -465,55 +575,137 @@ function Export-DistributionGroups {
                 }
                 catch {
                     Write-NCMessage "Failed to retrieve members for '$($group.DisplayName)': $($_.Exception.Message)" -Level WARNING
+                    $consecutiveErrors++
+                    if ($MaxConsecutiveErrors -gt 0 -and $consecutiveErrors -ge $MaxConsecutiveErrors) {
+                        $aborted = $true
+                        break
+                    }
                     continue
                 }
 
                 if (-not $members -or $members.Count -eq 0) {
                     if ($exportAll) {
-                        $results.Add([pscustomobject][ordered]@{
-                                'Group Name'                  = $group.DisplayName
-                                'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
-                                'Member Display Name'         = $null
-                                'Member FirstName'            = $null
-                                'Member LastName'             = $null
-                                'Member Primary Smtp Address' = $null
-                                'Member Company'              = $null
-                                'Member City'                 = $null
-                            }) | Out-Null
+                        if ($emitCsv) {
+                            $results.Add([pscustomobject][ordered]@{
+                                    'Group Name'                  = $group.DisplayName
+                                    'Group Identity'              = $group.Identity
+                                    'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                    'Member Display Name'         = $null
+                                    'Member FirstName'            = $null
+                                    'Member LastName'             = $null
+                                    'Member Primary Smtp Address' = $null
+                                    'Member Company'              = $null
+                                    'Member City'                 = $null
+                                }) | Out-Null
+                        }
+                        else {
+                            $results.Add([pscustomobject][ordered]@{
+                                    'Group Name'                  = $group.DisplayName
+                                    'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                    'Member Display Name'         = $null
+                                    'Member FirstName'            = $null
+                                    'Member LastName'             = $null
+                                    'Member Primary Smtp Address' = $null
+                                    'Member Company'              = $null
+                                    'Member City'                 = $null
+                                }) | Out-Null
+                        }
                     }
+                    $consecutiveErrors = 0
                     continue
                 }
 
                 foreach ($member in $members) {
                     if ($exportAll) {
-                        $row = [ordered]@{
-                            'Group Name'                  = $group.DisplayName
-                            'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
-                            'Member Display Name'         = $member.DisplayName
-                            'Member FirstName'            = $member.FirstName
-                            'Member LastName'             = $member.LastName
-                            'Member Primary Smtp Address' = $member.PrimarySmtpAddress
-                            'Member Company'              = $member.Company
-                            'Member City'                 = $member.City
+                        if ($emitCsv) {
+                            $row = [ordered]@{
+                                'Group Name'                  = $group.DisplayName
+                                'Group Identity'              = $group.Identity
+                                'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                'Member Display Name'         = $member.DisplayName
+                                'Member FirstName'            = $member.FirstName
+                                'Member LastName'             = $member.LastName
+                                'Member Primary Smtp Address' = $member.PrimarySmtpAddress
+                                'Member Company'              = $member.Company
+                                'Member City'                 = $member.City
+                            }
+                        }
+                        else {
+                            $row = [ordered]@{
+                                'Group Name'                  = $group.DisplayName
+                                'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                'Member Display Name'         = $member.DisplayName
+                                'Member FirstName'            = $member.FirstName
+                                'Member LastName'             = $member.LastName
+                                'Member Primary Smtp Address' = $member.PrimarySmtpAddress
+                                'Member Company'              = $member.Company
+                                'Member City'                 = $member.City
+                            }
                         }
                     }
                     else {
-                        $row = [ordered]@{
-                            'Member Display Name'         = $member.DisplayName
-                            'Member FirstName'            = $member.FirstName
-                            'Member LastName'             = $member.LastName
-                            'Member Primary Smtp Address' = $member.PrimarySmtpAddress
-                            'Member Company'              = $member.Company
-                            'Member City'                 = $member.City
+                        if ($emitCsv) {
+                            $row = [ordered]@{
+                                'Group Name'                  = $group.DisplayName
+                                'Group Identity'              = $group.Identity
+                                'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                'Member Display Name'         = $member.DisplayName
+                                'Member FirstName'            = $member.FirstName
+                                'Member LastName'             = $member.LastName
+                                'Member Primary Smtp Address' = $member.PrimarySmtpAddress
+                                'Member Company'              = $member.Company
+                                'Member City'                 = $member.City
+                            }
+                        }
+                        else {
+                            $row = [ordered]@{
+                                'Member Display Name'         = $member.DisplayName
+                                'Member FirstName'            = $member.FirstName
+                                'Member LastName'             = $member.LastName
+                                'Member Primary Smtp Address' = $member.PrimarySmtpAddress
+                                'Member Company'              = $member.Company
+                                'Member City'                 = $member.City
+                            }
                         }
                     }
 
-                    $results.Add([pscustomobject]$row) | Out-Null
+                    $rowObject = [pscustomobject]$row
+                    if ($emitCsv) {
+                        $rowKey = & $buildMemberKey $rowObject
+                        if ($Resume -and $existingMemberKeys.Contains($rowKey)) {
+                            continue
+                        }
+                        $null = $existingMemberKeys.Add($rowKey)
+                    }
+
+                    $results.Add($rowObject) | Out-Null
+                }
+
+                $consecutiveErrors = 0
+                if ($emitCsv) {
+                    $processedSinceFlush++
+                    if ($BatchSize -gt 0 -and $results.Count -gt 0 -and $processedSinceFlush -ge $BatchSize) {
+                        & $writeBuffer $results
+                        $processedSinceFlush = 0
+                    }
+                }
+
+                if ($aborted) {
+                    break
                 }
             }
 
+            if ($aborted -and $emitCsv -and $results.Count -gt 0) {
+                & $writeBuffer $results
+            }
+
             if (-not $results -or $results.Count -eq 0) {
-                Write-NCMessage "No members found for the specified distribution groups." -Level WARNING
+                if ($emitCsv -and (Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                    Write-NCMessage "No new distribution group members found. Existing CSV at $csvPathResolved already contains the requested rows." -Level INFO
+                }
+                else {
+                    Write-NCMessage "No members found for the specified distribution groups." -Level WARNING
+                }
                 return
             }
 
@@ -521,9 +713,13 @@ function Export-DistributionGroups {
                 $results | Out-GridView -Title "M365 Distribution Groups"
             }
             elseif ($emitCsv) {
-                $csvPath = New-File("$($folder)\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-DistributionGroups-Report.csv")
-                $results | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter)
-                Write-NCMessage "Distribution group membership exported to $csvPath." -Level SUCCESS
+                & $writeBuffer $results
+                if ($aborted) {
+                    Write-NCMessage "Distribution group export stopped early. Partial data kept at $csvPathResolved." -Level ERROR
+                }
+                else {
+                    Write-NCMessage "Distribution group membership exported to $csvPathResolved." -Level SUCCESS
+                }
             }
             else {
                 $results
@@ -568,7 +764,13 @@ function Export-DynamicDistributionGroups {
         [switch]$Csv,
         [string]$CsvFolder,
         [switch]$All,
-        [switch]$GridView
+        [switch]$GridView,
+        [ValidateRange(1, 500)]
+        [int]$BatchSize = 25,
+        [switch]$Resume,
+        [string]$CsvPath,
+        [ValidateRange(1, 100)]
+        [int]$MaxConsecutiveErrors = 5
     )
 
     begin {
@@ -595,7 +797,7 @@ function Export-DynamicDistributionGroups {
             }
 
             $exportAll = $All.IsPresent -or $requestedGroups.Count -eq 0
-            $emitCsv = $Csv.IsPresent -or -not [string]::IsNullOrWhiteSpace($CsvFolder) -or $exportAll
+            $emitCsv = $Csv.IsPresent -or -not [string]::IsNullOrWhiteSpace($CsvFolder) -or $exportAll -or $Resume.IsPresent -or -not [string]::IsNullOrWhiteSpace($CsvPath)
             $folder = $null
 
             if ($emitCsv) {
@@ -634,9 +836,97 @@ function Export-DynamicDistributionGroups {
                 return
             }
 
+            $normalizeText = {
+                param($value)
+                return Get-NormalizedText -Value $value
+            }
+            $buildMemberKey = {
+                param($row)
+
+                $groupIdentity = & $normalizeText $row.'Group Identity'
+                if (-not $groupIdentity) {
+                    $groupIdentity = & $normalizeText $row.'Group Name'
+                }
+                if (-not $groupIdentity) {
+                    $groupIdentity = & $normalizeText $row.'Group Primary Smtp Address'
+                }
+
+                $memberPrimary = & $normalizeText $row.'Member Primary Smtp Address'
+                $memberDisplay = & $normalizeText $row.'Member Display Name'
+                return "{0}|{1}|{2}" -f $groupIdentity, $memberPrimary, $memberDisplay
+            }
+            $existingMemberKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             $results = [System.Collections.Generic.List[object]]::new()
+            $processedSinceFlush = 0
+            $consecutiveErrors = 0
+            $aborted = $false
+            $csvPathResolved = $null
             $counter = 0
             $total = $groups.Count
+
+            if ($emitCsv) {
+                $folderForExport = $folder
+                $defaultCsvPath = New-File (Join-Path -Path $folderForExport -ChildPath "$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-DynamicDistributionGroups-Report.csv")
+                $csvPathResolved = $defaultCsvPath
+
+                if ($Resume) {
+                    $resumePath = $null
+                    if (-not [string]::IsNullOrWhiteSpace($CsvPath)) {
+                        $resumePath = $CsvPath
+                    }
+                    else {
+                        $existingCsv = Get-ChildItem -LiteralPath $folderForExport -File -Filter "*_M365-DynamicDistributionGroups-Report.csv" |
+                            Sort-Object LastWriteTime -Descending |
+                            Select-Object -First 1
+                        if ($existingCsv) {
+                            $resumePath = $existingCsv.FullName
+                        }
+                    }
+
+                    if ($resumePath) {
+                        $csvPathResolved = $resumePath
+                        if (Test-Path -LiteralPath $csvPathResolved) {
+                            try {
+                                foreach ($row in (Import-CSV -LiteralPath $csvPathResolved -Delimiter $NCVars.CSV_DefaultLimiter -ErrorAction Stop)) {
+                                    $null = $existingMemberKeys.Add((& $buildMemberKey $row))
+                                }
+                                Write-NCMessage ("Resuming dynamic distribution group export from {0}; {1} row(s) already recorded." -f $csvPathResolved, $existingMemberKeys.Count) -Level INFO
+                            }
+                            catch {
+                                Write-NCMessage ("Unable to read existing CSV '{0}' for resume. {1}" -f $csvPathResolved, $_.Exception.Message) -Level WARNING
+                                $existingMemberKeys.Clear()
+                                $csvPathResolved = $defaultCsvPath
+                            }
+                        }
+                        else {
+                            Write-NCMessage ("Resume requested for '{0}', but the file does not exist. Starting a new report at that path." -f $csvPathResolved) -Level INFO
+                        }
+                    }
+                    else {
+                        Write-NCMessage ("Resume requested, but no existing CSV was found. Starting a new report at {0}." -f $csvPathResolved) -Level INFO
+                    }
+                }
+
+                Write-NCMessage ("Dynamic distribution group export will flush every {0} group(s). Resume: {1}. Stop after {2} consecutive error(s)." -f $BatchSize, $Resume.IsPresent, $MaxConsecutiveErrors) -Level INFO
+                Write-NCMessage "Saving report to $csvPathResolved" -Level DEBUG
+            }
+
+            $writeBuffer = {
+                param([System.Collections.Generic.List[object]]$buffer)
+
+                if ($buffer.Count -eq 0) {
+                    return
+                }
+
+                $exportRows = $buffer | Select-Object 'Group Name', 'Group Identity', 'Group Primary Smtp Address', 'Member Display Name', 'Member FirstName', 'Member LastName', 'Member Primary Smtp Address', 'Member Company', 'Member City'
+                if ((Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                    $exportRows | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter -Append
+                }
+                else {
+                    $exportRows | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+                }
+                $buffer.Clear()
+            }
 
             foreach ($group in $groups) {
                 $counter++
@@ -648,55 +938,137 @@ function Export-DynamicDistributionGroups {
                 }
                 catch {
                     Write-NCMessage "Failed to retrieve members for '$($group.DisplayName)': $($_.Exception.Message)" -Level WARNING
+                    $consecutiveErrors++
+                    if ($MaxConsecutiveErrors -gt 0 -and $consecutiveErrors -ge $MaxConsecutiveErrors) {
+                        $aborted = $true
+                        break
+                    }
                     continue
                 }
 
                 if (-not $members -or $members.Count -eq 0) {
                     if ($exportAll) {
-                        $results.Add([pscustomobject][ordered]@{
-                                'Group Name'                  = $group.DisplayName
-                                'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
-                                'Member Display Name'         = $null
-                                'Member FirstName'            = $null
-                                'Member LastName'             = $null
-                                'Member Primary Smtp Address' = $null
-                                'Member Company'              = $null
-                                'Member City'                 = $null
-                            }) | Out-Null
+                        if ($emitCsv) {
+                            $results.Add([pscustomobject][ordered]@{
+                                    'Group Name'                  = $group.DisplayName
+                                    'Group Identity'              = $group.Identity
+                                    'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                    'Member Display Name'         = $null
+                                    'Member FirstName'            = $null
+                                    'Member LastName'             = $null
+                                    'Member Primary Smtp Address' = $null
+                                    'Member Company'              = $null
+                                    'Member City'                 = $null
+                                }) | Out-Null
+                        }
+                        else {
+                            $results.Add([pscustomobject][ordered]@{
+                                    'Group Name'                  = $group.DisplayName
+                                    'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                    'Member Display Name'         = $null
+                                    'Member FirstName'            = $null
+                                    'Member LastName'             = $null
+                                    'Member Primary Smtp Address' = $null
+                                    'Member Company'              = $null
+                                    'Member City'                 = $null
+                                }) | Out-Null
+                        }
                     }
+                    $consecutiveErrors = 0
                     continue
                 }
 
                 foreach ($member in $members) {
                     if ($exportAll) {
-                        $row = [ordered]@{
-                            'Group Name'                  = $group.DisplayName
-                            'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
-                            'Member Display Name'         = $member.DisplayName
-                            'Member FirstName'            = $member.FirstName
-                            'Member LastName'             = $member.LastName
-                            'Member Primary Smtp Address' = $member.PrimarySmtpAddress
-                            'Member Company'              = $member.Company
-                            'Member City'                 = $member.City
+                        if ($emitCsv) {
+                            $row = [ordered]@{
+                                'Group Name'                  = $group.DisplayName
+                                'Group Identity'              = $group.Identity
+                                'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                'Member Display Name'         = $member.DisplayName
+                                'Member FirstName'            = $member.FirstName
+                                'Member LastName'             = $member.LastName
+                                'Member Primary Smtp Address' = $member.PrimarySmtpAddress
+                                'Member Company'              = $member.Company
+                                'Member City'                 = $member.City
+                            }
+                        }
+                        else {
+                            $row = [ordered]@{
+                                'Group Name'                  = $group.DisplayName
+                                'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                'Member Display Name'         = $member.DisplayName
+                                'Member FirstName'            = $member.FirstName
+                                'Member LastName'             = $member.LastName
+                                'Member Primary Smtp Address' = $member.PrimarySmtpAddress
+                                'Member Company'              = $member.Company
+                                'Member City'                 = $member.City
+                            }
                         }
                     }
                     else {
-                        $row = [ordered]@{
-                            'Member Display Name'         = $member.DisplayName
-                            'Member FirstName'            = $member.FirstName
-                            'Member LastName'             = $member.LastName
-                            'Member Primary Smtp Address' = $member.PrimarySmtpAddress
-                            'Member Company'              = $member.Company
-                            'Member City'                 = $member.City
+                        if ($emitCsv) {
+                            $row = [ordered]@{
+                                'Group Name'                  = $group.DisplayName
+                                'Group Identity'              = $group.Identity
+                                'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                'Member Display Name'         = $member.DisplayName
+                                'Member FirstName'            = $member.FirstName
+                                'Member LastName'             = $member.LastName
+                                'Member Primary Smtp Address' = $member.PrimarySmtpAddress
+                                'Member Company'              = $member.Company
+                                'Member City'                 = $member.City
+                            }
+                        }
+                        else {
+                            $row = [ordered]@{
+                                'Member Display Name'         = $member.DisplayName
+                                'Member FirstName'            = $member.FirstName
+                                'Member LastName'             = $member.LastName
+                                'Member Primary Smtp Address' = $member.PrimarySmtpAddress
+                                'Member Company'              = $member.Company
+                                'Member City'                 = $member.City
+                            }
                         }
                     }
 
-                    $results.Add([pscustomobject]$row) | Out-Null
+                    $rowObject = [pscustomobject]$row
+                    if ($emitCsv) {
+                        $rowKey = & $buildMemberKey $rowObject
+                        if ($Resume -and $existingMemberKeys.Contains($rowKey)) {
+                            continue
+                        }
+                        $null = $existingMemberKeys.Add($rowKey)
+                    }
+
+                    $results.Add($rowObject) | Out-Null
+                }
+
+                $consecutiveErrors = 0
+                if ($emitCsv) {
+                    $processedSinceFlush++
+                    if ($BatchSize -gt 0 -and $results.Count -gt 0 -and $processedSinceFlush -ge $BatchSize) {
+                        & $writeBuffer $results
+                        $processedSinceFlush = 0
+                    }
+                }
+
+                if ($aborted) {
+                    break
                 }
             }
 
+            if ($aborted -and $emitCsv -and $results.Count -gt 0) {
+                & $writeBuffer $results
+            }
+
             if (-not $results -or $results.Count -eq 0) {
-                Write-NCMessage "No members found for the specified dynamic distribution groups." -Level WARNING
+                if ($emitCsv -and (Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                    Write-NCMessage "No new dynamic distribution group members found. Existing CSV at $csvPathResolved already contains the requested rows." -Level INFO
+                }
+                else {
+                    Write-NCMessage "No members found for the specified dynamic distribution groups." -Level WARNING
+                }
                 return
             }
 
@@ -704,9 +1076,13 @@ function Export-DynamicDistributionGroups {
                 $results | Out-GridView -Title "M365 Dynamic Distribution Groups"
             }
             elseif ($emitCsv) {
-                $csvPath = New-File("$($folder)\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-DynamicDistributionGroups-Report.csv")
-                $results | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter)
-                Write-NCMessage "Dynamic distribution group membership exported to $csvPath." -Level SUCCESS
+                & $writeBuffer $results
+                if ($aborted) {
+                    Write-NCMessage "Dynamic distribution group export stopped early. Partial data kept at $csvPathResolved." -Level ERROR
+                }
+                else {
+                    Write-NCMessage "Dynamic distribution group membership exported to $csvPathResolved." -Level SUCCESS
+                }
             }
             else {
                 $results
@@ -778,7 +1154,7 @@ function Export-M365Group {
             }
 
             $exportAll = $All.IsPresent -or $requestedGroups.Count -eq 0
-            $emitCsv = $Csv.IsPresent -or -not [string]::IsNullOrWhiteSpace($CsvFolder) -or $exportAll
+            $emitCsv = $Csv.IsPresent -or -not [string]::IsNullOrWhiteSpace($CsvFolder) -or $exportAll -or $Resume.IsPresent -or -not [string]::IsNullOrWhiteSpace($CsvPath)
             $folder = $null
 
             if ($emitCsv) {
@@ -817,9 +1193,97 @@ function Export-M365Group {
                 return
             }
 
+            $normalizeText = {
+                param($value)
+                return Get-NormalizedText -Value $value
+            }
+            $buildMemberKey = {
+                param($row)
+
+                $groupIdentity = & $normalizeText $row.'Group Identity'
+                if (-not $groupIdentity) {
+                    $groupIdentity = & $normalizeText $row.'Group Name'
+                }
+                if (-not $groupIdentity) {
+                    $groupIdentity = & $normalizeText $row.'Group Primary Smtp Address'
+                }
+
+                $memberPrimary = & $normalizeText $row.'Member Primary Smtp Address'
+                $memberDisplay = & $normalizeText $row.'Member Display Name'
+                return "{0}|{1}|{2}" -f $groupIdentity, $memberPrimary, $memberDisplay
+            }
+            $existingMemberKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             $results = [System.Collections.Generic.List[object]]::new()
+            $processedSinceFlush = 0
+            $consecutiveErrors = 0
+            $aborted = $false
+            $csvPathResolved = $null
             $counter = 0
             $total = $groups.Count
+
+            if ($emitCsv) {
+                $folderForExport = $folder
+                $defaultCsvPath = New-File (Join-Path -Path $folderForExport -ChildPath "$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-UnifiedGroups-Report.csv")
+                $csvPathResolved = $defaultCsvPath
+
+                if ($Resume) {
+                    $resumePath = $null
+                    if (-not [string]::IsNullOrWhiteSpace($CsvPath)) {
+                        $resumePath = $CsvPath
+                    }
+                    else {
+                        $existingCsv = Get-ChildItem -LiteralPath $folderForExport -File -Filter "*_M365-UnifiedGroups-Report.csv" |
+                            Sort-Object LastWriteTime -Descending |
+                            Select-Object -First 1
+                        if ($existingCsv) {
+                            $resumePath = $existingCsv.FullName
+                        }
+                    }
+
+                    if ($resumePath) {
+                        $csvPathResolved = $resumePath
+                        if (Test-Path -LiteralPath $csvPathResolved) {
+                            try {
+                                foreach ($row in (Import-CSV -LiteralPath $csvPathResolved -Delimiter $NCVars.CSV_DefaultLimiter -ErrorAction Stop)) {
+                                    $null = $existingMemberKeys.Add((& $buildMemberKey $row))
+                                }
+                                Write-NCMessage ("Resuming Microsoft 365 group export from {0}; {1} row(s) already recorded." -f $csvPathResolved, $existingMemberKeys.Count) -Level INFO
+                            }
+                            catch {
+                                Write-NCMessage ("Unable to read existing CSV '{0}' for resume. {1}" -f $csvPathResolved, $_.Exception.Message) -Level WARNING
+                                $existingMemberKeys.Clear()
+                                $csvPathResolved = $defaultCsvPath
+                            }
+                        }
+                        else {
+                            Write-NCMessage ("Resume requested for '{0}', but the file does not exist. Starting a new report at that path." -f $csvPathResolved) -Level INFO
+                        }
+                    }
+                    else {
+                        Write-NCMessage ("Resume requested, but no existing CSV was found. Starting a new report at {0}." -f $csvPathResolved) -Level INFO
+                    }
+                }
+
+                Write-NCMessage ("Microsoft 365 group export will flush every {0} group(s). Resume: {1}. Stop after {2} consecutive error(s)." -f $BatchSize, $Resume.IsPresent, $MaxConsecutiveErrors) -Level INFO
+                Write-NCMessage "Saving report to $csvPathResolved" -Level DEBUG
+            }
+
+            $writeBuffer = {
+                param([System.Collections.Generic.List[object]]$buffer)
+
+                if ($buffer.Count -eq 0) {
+                    return
+                }
+
+                $exportRows = $buffer | Select-Object 'Group Name', 'Group Identity', 'Group Primary Smtp Address', 'Member Display Name', 'Member FirstName', 'Member LastName', 'Member Primary Smtp Address', 'Member Company', 'Member City'
+                if ((Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                    $exportRows | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter -Append
+                }
+                else {
+                    $exportRows | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+                }
+                $buffer.Clear()
+            }
 
             foreach ($group in $groups) {
                 $counter++
@@ -831,55 +1295,137 @@ function Export-M365Group {
                 }
                 catch {
                     Write-NCMessage "Failed to retrieve members for '$($group.DisplayName)': $($_.Exception.Message)" -Level WARNING
+                    $consecutiveErrors++
+                    if ($MaxConsecutiveErrors -gt 0 -and $consecutiveErrors -ge $MaxConsecutiveErrors) {
+                        $aborted = $true
+                        break
+                    }
                     continue
                 }
 
                 if (-not $members -or $members.Count -eq 0) {
                     if ($exportAll) {
-                        $results.Add([pscustomobject][ordered]@{
-                                'Group Name'                  = $group.DisplayName
-                                'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
-                                'Member Display Name'         = $null
-                                'Member FirstName'            = $null
-                                'Member LastName'             = $null
-                                'Member Primary Smtp Address' = $null
-                                'Member Company'              = $null
-                                'Member City'                 = $null
-                            }) | Out-Null
+                        if ($emitCsv) {
+                            $results.Add([pscustomobject][ordered]@{
+                                    'Group Name'                  = $group.DisplayName
+                                    'Group Identity'              = $group.Identity
+                                    'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                    'Member Display Name'         = $null
+                                    'Member FirstName'            = $null
+                                    'Member LastName'             = $null
+                                    'Member Primary Smtp Address' = $null
+                                    'Member Company'              = $null
+                                    'Member City'                 = $null
+                                }) | Out-Null
+                        }
+                        else {
+                            $results.Add([pscustomobject][ordered]@{
+                                    'Group Name'                  = $group.DisplayName
+                                    'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                    'Member Display Name'         = $null
+                                    'Member FirstName'            = $null
+                                    'Member LastName'             = $null
+                                    'Member Primary Smtp Address' = $null
+                                    'Member Company'              = $null
+                                    'Member City'                 = $null
+                                }) | Out-Null
+                        }
                     }
+                    $consecutiveErrors = 0
                     continue
                 }
 
                 foreach ($member in $members) {
                     if ($exportAll) {
-                        $row = [ordered]@{
-                            'Group Name'                  = $group.DisplayName
-                            'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
-                            'Member Display Name'         = $member.DisplayName
-                            'Member FirstName'            = $member.FirstName
-                            'Member LastName'             = $member.LastName
-                            'Member Primary Smtp Address' = $member.PrimarySmtpAddress
-                            'Member Company'              = $member.Company
-                            'Member City'                 = $member.City
+                        if ($emitCsv) {
+                            $row = [ordered]@{
+                                'Group Name'                  = $group.DisplayName
+                                'Group Identity'              = $group.Identity
+                                'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                'Member Display Name'         = $member.DisplayName
+                                'Member FirstName'            = $member.FirstName
+                                'Member LastName'             = $member.LastName
+                                'Member Primary Smtp Address' = $member.PrimarySmtpAddress
+                                'Member Company'              = $member.Company
+                                'Member City'                 = $member.City
+                            }
+                        }
+                        else {
+                            $row = [ordered]@{
+                                'Group Name'                  = $group.DisplayName
+                                'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                'Member Display Name'         = $member.DisplayName
+                                'Member FirstName'            = $member.FirstName
+                                'Member LastName'             = $member.LastName
+                                'Member Primary Smtp Address' = $member.PrimarySmtpAddress
+                                'Member Company'              = $member.Company
+                                'Member City'                 = $member.City
+                            }
                         }
                     }
                     else {
-                        $row = [ordered]@{
-                            'Member Display Name'         = $member.DisplayName
-                            'Member FirstName'            = $member.FirstName
-                            'Member LastName'             = $member.LastName
-                            'Member Primary Smtp Address' = $member.PrimarySmtpAddress
-                            'Member Company'              = $member.Company
-                            'Member City'                 = $member.City
+                        if ($emitCsv) {
+                            $row = [ordered]@{
+                                'Group Name'                  = $group.DisplayName
+                                'Group Identity'              = $group.Identity
+                                'Group Primary Smtp Address'  = $group.PrimarySmtpAddress
+                                'Member Display Name'         = $member.DisplayName
+                                'Member FirstName'            = $member.FirstName
+                                'Member LastName'             = $member.LastName
+                                'Member Primary Smtp Address' = $member.PrimarySmtpAddress
+                                'Member Company'              = $member.Company
+                                'Member City'                 = $member.City
+                            }
+                        }
+                        else {
+                            $row = [ordered]@{
+                                'Member Display Name'         = $member.DisplayName
+                                'Member FirstName'            = $member.FirstName
+                                'Member LastName'             = $member.LastName
+                                'Member Primary Smtp Address' = $member.PrimarySmtpAddress
+                                'Member Company'              = $member.Company
+                                'Member City'                 = $member.City
+                            }
                         }
                     }
 
-                    $results.Add([pscustomobject]$row) | Out-Null
+                    $rowObject = [pscustomobject]$row
+                    if ($emitCsv) {
+                        $rowKey = & $buildMemberKey $rowObject
+                        if ($Resume -and $existingMemberKeys.Contains($rowKey)) {
+                            continue
+                        }
+                        $null = $existingMemberKeys.Add($rowKey)
+                    }
+
+                    $results.Add($rowObject) | Out-Null
+                }
+
+                $consecutiveErrors = 0
+                if ($emitCsv) {
+                    $processedSinceFlush++
+                    if ($BatchSize -gt 0 -and $results.Count -gt 0 -and $processedSinceFlush -ge $BatchSize) {
+                        & $writeBuffer $results
+                        $processedSinceFlush = 0
+                    }
+                }
+
+                if ($aborted) {
+                    break
                 }
             }
 
+            if ($aborted -and $emitCsv -and $results.Count -gt 0) {
+                & $writeBuffer $results
+            }
+
             if (-not $results -or $results.Count -eq 0) {
-                Write-NCMessage "No members found for the specified Microsoft 365 groups." -Level WARNING
+                if ($emitCsv -and (Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                    Write-NCMessage "No new Microsoft 365 group members found. Existing CSV at $csvPathResolved already contains the requested rows." -Level INFO
+                }
+                else {
+                    Write-NCMessage "No members found for the specified Microsoft 365 groups." -Level WARNING
+                }
                 return
             }
 
@@ -887,9 +1433,13 @@ function Export-M365Group {
                 $results | Out-GridView -Title "M365 Unified Groups"
             }
             elseif ($emitCsv) {
-                $csvPath = New-File("$($folder)\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-UnifiedGroups-Report.csv")
-                $results | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter)
-                Write-NCMessage "Microsoft 365 group membership exported to $csvPath." -Level SUCCESS
+                & $writeBuffer $results
+                if ($aborted) {
+                    Write-NCMessage "Microsoft 365 group export stopped early. Partial data kept at $csvPathResolved." -Level ERROR
+                }
+                else {
+                    Write-NCMessage "Microsoft 365 group membership exported to $csvPathResolved." -Level SUCCESS
+                }
             }
             else {
                 $results

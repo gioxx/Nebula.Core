@@ -119,6 +119,14 @@ function Export-CalendarPermission {
         Scan every mailbox in the tenant (excluding GuestMailUser). Implies CSV export.
     .PARAMETER PassThru
         Emit the collected permission objects in addition to writing the CSV report.
+    .PARAMETER BatchSize
+        Number of processed mailboxes before flushing partial CSV output.
+    .PARAMETER Resume
+        Resume from the latest matching CSV in the target folder or from -CsvPath.
+    .PARAMETER CsvPath
+        Explicit CSV file to resume. When omitted, the most recent matching CSV in the target folder is used.
+    .PARAMETER MaxConsecutiveErrors
+        Stop after this many consecutive mailbox-level failures.
     .EXAMPLE
         Export-CalendarPermission -SourceMailbox user@contoso.com -OutputFolder C:\Temp
     .EXAMPLE
@@ -132,13 +140,23 @@ function Export-CalendarPermission {
         [string[]]$SourceDomain,
         [string]$OutputFolder,
         [switch]$All,
-        [switch]$PassThru
+        [switch]$PassThru,
+        [ValidateRange(1, 500)]
+        [int]$BatchSize = 25,
+        [switch]$Resume,
+        [string]$CsvPath,
+        [ValidateRange(1, 100)]
+        [int]$MaxConsecutiveErrors = 5
     )
 
     begin {
         Set-ProgressAndInfoPreferences
         $mailboxInputs = [System.Collections.Generic.List[string]]::new()
         $domainInputs = [System.Collections.Generic.List[string]]::new()
+        $results = [System.Collections.Generic.List[object]]::new()
+        $processedSinceFlush = 0
+        $consecutiveErrors = 0
+        $aborted = $false
     }
 
     process {
@@ -217,6 +235,69 @@ function Export-CalendarPermission {
                 return
             }
 
+            $normalizeText = {
+                param($value)
+                return Get-NormalizedText -Value $value
+            }
+            $buildPermissionKey = {
+                param($row)
+
+                $mailboxId = & $normalizeText $row.MailboxIdentity
+                if (-not $mailboxId) {
+                    $mailboxId = & $normalizeText $row.PrimarySmtpAddress
+                }
+                $user = & $normalizeText $row.User
+                $permissions = & $normalizeText $row.Permissions
+                return "{0}|{1}|{2}" -f $mailboxId, $user, $permissions
+            }
+            $existingPermissionKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $csvPathResolved = $null
+            $folderForExport = $reportFolder
+
+            $defaultCsvPath = New-File (Join-Path -Path $folderForExport -ChildPath "$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-CalendarPermissions-Report.csv")
+            $csvPathResolved = $defaultCsvPath
+
+            if ($Resume) {
+                $resumePath = $null
+                if (-not [string]::IsNullOrWhiteSpace($CsvPath)) {
+                    $resumePath = $CsvPath
+                }
+                else {
+                    $existingCsv = Get-ChildItem -LiteralPath $folderForExport -File -Filter "*_M365-CalendarPermissions-Report.csv" |
+                        Sort-Object LastWriteTime -Descending |
+                        Select-Object -First 1
+                    if ($existingCsv) {
+                        $resumePath = $existingCsv.FullName
+                    }
+                }
+
+                if ($resumePath) {
+                    $csvPathResolved = $resumePath
+                    if (Test-Path -LiteralPath $csvPathResolved) {
+                        try {
+                            foreach ($row in (Import-CSV -LiteralPath $csvPathResolved -Delimiter $NCVars.CSV_DefaultLimiter -ErrorAction Stop)) {
+                                $null = $existingPermissionKeys.Add((& $buildPermissionKey $row))
+                            }
+                            Write-NCMessage ("Resuming calendar permission export from {0}; {1} row(s) already recorded." -f $csvPathResolved, $existingPermissionKeys.Count) -Level INFO
+                        }
+                        catch {
+                            Write-NCMessage ("Unable to read existing CSV '{0}' for resume. {1}" -f $csvPathResolved, $_.Exception.Message) -Level WARNING
+                            $existingPermissionKeys.Clear()
+                            $csvPathResolved = $defaultCsvPath
+                        }
+                    }
+                    else {
+                        Write-NCMessage ("Resume requested for '{0}', but the file does not exist. Starting a new report at that path." -f $csvPathResolved) -Level INFO
+                    }
+                }
+                else {
+                    Write-NCMessage ("Resume requested, but no existing CSV was found. Starting a new report at {0}." -f $csvPathResolved) -Level INFO
+                }
+            }
+
+            Write-NCMessage ("Calendar permission export will flush every {0} mailbox(es). Resume: {1}. Stop after {2} consecutive error(s)." -f $BatchSize, $Resume.IsPresent, $MaxConsecutiveErrors) -Level INFO
+            Write-NCMessage "Saving report to $csvPathResolved" -Level DEBUG
+
             $results = [System.Collections.Generic.List[object]]::new()
             $counter = 0
 
@@ -230,6 +311,11 @@ function Export-CalendarPermission {
                 }
                 catch {
                     Write-NCMessage "Unable to load mailbox '$($mailbox.Identity)'. $($_.Exception.Message)" -Level ERROR
+                    $consecutiveErrors++
+                    if ($MaxConsecutiveErrors -gt 0 -and $consecutiveErrors -ge $MaxConsecutiveErrors) {
+                        $aborted = $true
+                        break
+                    }
                     continue
                 }
 
@@ -238,6 +324,11 @@ function Export-CalendarPermission {
                 }
                 catch {
                     Write-NCMessage "Unable to read calendar folder for '$($exoMailbox.PrimarySmtpAddress)'. $($_.Exception.Message)" -Level ERROR
+                    $consecutiveErrors++
+                    if ($MaxConsecutiveErrors -gt 0 -and $consecutiveErrors -ge $MaxConsecutiveErrors) {
+                        $aborted = $true
+                        break
+                    }
                     continue
                 }
 
@@ -254,27 +345,72 @@ function Export-CalendarPermission {
                 }
                 catch {
                     Write-NCMessage "Unable to retrieve calendar permissions for '$($exoMailbox.PrimarySmtpAddress)'. $($_.Exception.Message)" -Level ERROR
+                    $consecutiveErrors++
+                    if ($MaxConsecutiveErrors -gt 0 -and $consecutiveErrors -ge $MaxConsecutiveErrors) {
+                        $aborted = $true
+                        break
+                    }
                     continue
                 }
 
                 foreach ($perm in $folderPerms) {
-                    $results.Add([pscustomobject]@{
-                            PrimarySmtpAddress = $exoMailbox.PrimarySmtpAddress
-                            User               = $perm.User
-                            Permissions        = ($perm.AccessRights -join ', ')
-                        }) | Out-Null
+                    $row = [pscustomobject]@{
+                        MailboxIdentity     = $exoMailbox.Identity
+                        PrimarySmtpAddress  = $exoMailbox.PrimarySmtpAddress
+                        User                = $perm.User
+                        Permissions         = ($perm.AccessRights -join ', ')
+                    }
+                    $rowKey = & $buildPermissionKey $row
+                    if ($Resume -and $existingPermissionKeys.Contains($rowKey)) {
+                        continue
+                    }
+                    $results.Add($row) | Out-Null
+                }
+
+                $consecutiveErrors = 0
+                $processedSinceFlush++
+                if ($BatchSize -gt 0 -and $results.Count -gt 0 -and ($processedSinceFlush -ge $BatchSize)) {
+                    if ((Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                        $results | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter -Append
+                    }
+                    else {
+                        $results | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+                    }
+                    $results.Clear()
+                    $processedSinceFlush = 0
                 }
             }
 
-            if ($results.Count -eq 0) {
+            if ($aborted -and $results.Count -gt 0) {
+                if ((Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                    $results | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter -Append
+                }
+                else {
+                    $results | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+                }
+                $results.Clear()
+            }
+
+            if ($results.Count -eq 0 -and (-not (Test-Path -LiteralPath $csvPathResolved) -or (Get-Item -LiteralPath $csvPathResolved).Length -eq 0)) {
                 Write-NCMessage "No calendar permissions found for the selected scope." -Level WARNING
                 return
             }
 
-            $csvPath = New-File (Join-Path -Path $reportFolder -ChildPath "$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-CalendarPermissions-Report.csv")
             try {
-                $results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
-                Write-NCMessage ("Calendar permission report exported to {0}" -f $csvPath) -Level SUCCESS
+                if ($results.Count -gt 0) {
+                    if ((Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                        $results | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter -Append
+                    }
+                    else {
+                        $results | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+                    }
+                }
+                if ($aborted) {
+                    Write-NCMessage ("Calendar permission export stopped early. Partial data kept at {0}" -f $csvPathResolved) -Level ERROR
+                }
+                else {
+                    Write-NCMessage ("Calendar permission report exported to {0}" -f $csvPathResolved) -Level SUCCESS
+                }
             }
             catch {
                 Write-NCMessage "Unable to write CSV report. $($_.Exception.Message)" -Level ERROR
