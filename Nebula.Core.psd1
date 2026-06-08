@@ -14,17 +14,21 @@
     )
     FunctionsToExport    = @(
         'Add-EntraGroupDevice',
+        'Add-EntraGroupOwner',
         'Add-EntraGroupUser',
         'Add-MboxAlias',
         'Add-MboxPermission',
         'Add-UserMsolAccountSku',
         'Connect-EOL',
         'Connect-Nebula',
+        'Copy-EntraGroup',
+        'Copy-EntraGroupOwner',
         'Copy-OoOMessage',
         'Copy-UserMsolAccountSku',
         'Disable-UserDevices',
         'Disable-UserSignIn',
         'Disconnect-Nebula',
+        'Edit-ContentFilterPolicy',
         'Export-CalendarPermission',
         'Export-DistributionGroups',
         'Export-DynamicDistributionGroups',
@@ -39,14 +43,15 @@
         'Format-MessageIDsFromClipboard',
         'Format-QuotedListFromClipboard',
         'Format-SortedEmailsFromClipboard',
+        'Get-ContentFilterPolicy',
         'Get-DynamicDistributionGroupFilter',
         'Get-EntraGroupDevice',
         'Get-EntraGroupMembers',
         'Get-EntraGroupUser',
         'Get-IntuneProfileAssignmentsByGroup',
-        'Get-ContentFilterPolicy',
         'Get-MboxAlias',
         'Get-MboxLastMessageTrace',
+        'Get-MboxMrmCleanup',
         'Get-MboxPermission',
         'Get-MboxPrimarySmtpAddress',
         'Get-MboxStatistics',
@@ -61,27 +66,31 @@
         'Get-TenantMsolAccountSku',
         'Get-UserGroups',
         'Get-UserLastSeen',
-        'Get-UserUsageLocation',
         'Get-UserMsolAccountSku',
+        'Get-UserUsageLocation',
         'Move-UserMsolAccountSku',
-        'New-SharedMailbox',
+        'New-EntraSecurityGroup',
         'New-IntuneAppBasedGroup',
+        'New-SharedMailbox',
         'Remove-EntraGroupDevice',
+        'Remove-EntraGroupOwner',
         'Remove-EntraGroupUser',
         'Remove-MboxAlias',
+        'Remove-MboxMrmCleanup',
         'Remove-MboxPermission',
         'Remove-UserMsolAccountSku',
         'Revoke-UserSessions',
-        'Edit-ContentFilterPolicy',
         'Search-EntraGroup',
         'Search-IntuneProfileLocation',
         'Search-MboxCutoffWindow',
+        'Set-EntraGroupDescription',
+        'Set-EntraGroupDisplayName',
         'Set-MboxLanguage',
         'Set-MboxMrmCleanup',
         'Set-MboxRulesQuota',
-        'Set-UserUsageLocation',
         'Set-OoO',
         'Set-SharedMboxCopyForSent',
+        'Set-UserUsageLocation',
         'Sync-NebulaConfig',
         'Test-SharedMailboxCompliance',
         'Unlock-QuarantineFrom',
@@ -132,14 +141,20 @@
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/icon.png'
         ReleaseNotes = @'
-- Add: `Get-ContentFilterPolicy` to list hosted content filter policies and inspect their current allow/block lists before editing.
+- Add: `Add/Remove/Copy-EntraGroupOwner` plus `Copy-EntraGroup` and `New-EntraSecurityGroup` to create, clone, and manage Entra security groups with the same workflow style used for licenses.
 - Add: `Edit-ContentFilterPolicy` to manage hosted content filter allow/block lists, allowed-sender contacts, and matching transport-rule domain exceptions from a single cmdlet.
 - Add: `Format-QuotedListFromClipboard` to convert clipboard text from Excel-style columns or similar lists into a quoted, comma-separated value list.
+- Add: `Get-ContentFilterPolicy` to list hosted content filter policies and inspect their current allow/block lists before editing.
+- Add: `Get-MboxMrmCleanup` to inventory retention tags, policies, and mailbox assignments for one-shot MRM cleanup workflows.
 - Add: `Get-UserUsageLocation` to read current Microsoft Graph `UsageLocation` values and compare them with the configured default.
+- Add: `Remove-MboxMrmCleanup` to restore mailboxes back to a standard retention policy or default before deleting temporary MRM cleanup objects.
+- Add: `Set-EntraGroupDescription` to update an Entra group description without recreating the group.
+- Add: `Set-EntraGroupDisplayName` to rename an Entra group without recreating it.
 - Add: `Set-UserUsageLocation` to update Microsoft Graph `UsageLocation` values from the pipeline, using the configured default when `-UsageLocation` is omitted.
 - Change: Removed `Export-MboxAlias`. Use `Get-MboxAlias` for single mailbox queries and CSV reports, including positional single-mailbox input.
 - Fix: `Export-CalendarPermission` now handles deserialized Exchange permission objects correctly when resuming or deduplicating CSV rows.
 - Fix: Consolidated alias export behavior under `Get-MboxAlias` and fixed CSV filtering so primary-only recipients are excluded after MOERA filtering.
+- Improve: `Add-EntraGroupUser` now detects groups synchronized from on-premises AD and reports a clearer error when membership cannot be changed directly in Entra.
 - Improve: `Export-CalendarPermission` now supports batch flushing, optional resume from the latest CSV or a specific `-CsvPath`, and a `-MaxConsecutiveErrors` guard for repeated mailbox failures.
 - Improve: `Export-DistributionGroups`, `Export-DynamicDistributionGroups`, and `Export-M365Group` now support batch flushing, optional resume from the latest CSV or a specific `-CsvPath`, and a `-MaxConsecutiveErrors` guard for repeated group-member retrieval failures.
 - Improve: `Export-IntuneAppInventory` now supports batch-flushed CSV export with optional resume from the latest CSV or a specific `-CsvPath`, plus a `-MaxConsecutiveErrors` guard for repeated device-level failures.

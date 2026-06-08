@@ -243,288 +243,6 @@ function Add-UserMsolAccountSku {
     }
 }
 
-function Set-UserUsageLocation {
-    <#
-    .SYNOPSIS
-        Updates usage location for one or more users.
-    .DESCRIPTION
-        Resolves users from pipeline or explicit input, connects to Microsoft Graph, and updates
-        their UsageLocation value. If -UsageLocation is omitted, Nebula.Core uses the configured
-        UsageLocation default (or US when no override exists).
-    .PARAMETER UserPrincipalName
-        User principal name, object ID, or short identifier. Accepts pipeline input.
-    .PARAMETER UsageLocation
-        Two-letter country code to set. When omitted, the configured default is used.
-    .PARAMETER PassThru
-        Emit the processed users as objects.
-    .EXAMPLE
-        Set-UserUsageLocation -UserPrincipalName user@contoso.com -UsageLocation IT
-    .EXAMPLE
-        'user1@contoso.com','user2@contoso.com' | Set-UserUsageLocation -UsageLocation DE
-    .EXAMPLE
-        Get-MgUser -Filter "endsWith(userPrincipalName,'@contoso.com')" | Set-UserUsageLocation -UsageLocation FR
-    #>
-    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
-    param(
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Alias('User', 'UPN', 'Identity')]
-        [string[]]$UserPrincipalName,
-        [string]$UsageLocation,
-        [switch]$PassThru
-    )
-
-    begin {
-        Set-ProgressAndInfoPreferences
-        $targets = [System.Collections.Generic.List[string]]::new()
-    }
-
-    process {
-        foreach ($entry in $UserPrincipalName) {
-            if (-not [string]::IsNullOrWhiteSpace($entry)) {
-                $targets.Add($entry.Trim()) | Out-Null
-            }
-        }
-    }
-
-    end {
-        try {
-            if ($targets.Count -eq 0) {
-                Write-NCMessage "No user principal names provided." -Level WARNING
-                return
-            }
-
-            $GraphConnection = Test-MgGraphConnection -Scopes @('Directory.ReadWrite.All') -EnsureExchangeOnline:$false
-            if (-not $GraphConnection) {
-                Add-EmptyLine
-                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
-                return
-            }
-
-            $defaultUsageLocation = if (-not [string]::IsNullOrWhiteSpace($UsageLocation)) {
-                $UsageLocation.Trim()
-            }
-            elseif (($NCVars -is [System.Collections.IDictionary]) -and $NCVars.Contains('UsageLocation') -and $NCVars.UsageLocation) {
-                [string]$NCVars.UsageLocation
-            }
-            else {
-                'US'
-            }
-
-            $targetUsage = $defaultUsageLocation.Trim().ToUpperInvariant()
-            if ($targetUsage.Length -ne 2) {
-                Write-NCMessage "UsageLocation must be a two-letter country code." -Level ERROR
-                return
-            }
-
-            $normalizeUsageLocation = {
-                param($value)
-                if ([string]::IsNullOrWhiteSpace($value)) { return $null }
-                return $value.Trim().ToUpperInvariant()
-            }
-
-            $queue = [System.Collections.Generic.List[string]]::new()
-            $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($entry in $targets) {
-                if ($dedup.Add($entry)) {
-                    $queue.Add($entry) | Out-Null
-                }
-            }
-
-            $results = [System.Collections.Generic.List[object]]::new()
-            $updatedCount = 0
-            $skippedCount = 0
-            $counter = 0
-
-            foreach ($upn in $queue) {
-                $counter++
-                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
-                Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
-
-                $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $upn -PreferGraphIdentity
-                if (-not $resolvedPrincipal) {
-                    Write-NCMessage "Unable to resolve user recipient for $upn" -Level ERROR
-                    continue
-                }
-
-                try {
-                    $user = Get-MgUser -UserId $resolvedPrincipal -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
-                }
-                catch {
-                    Write-NCMessage "Unable to retrieve user '$upn'. $($_.Exception.Message)" -Level ERROR
-                    continue
-                }
-
-                $currentUsage = & $normalizeUsageLocation $user.UsageLocation
-                if ($currentUsage -eq $targetUsage) {
-                    $skippedCount++
-                    if ($PassThru.IsPresent) {
-                        $results.Add([pscustomobject]@{
-                                UserPrincipalName     = $user.UserPrincipalName
-                                DisplayName           = $user.DisplayName
-                                PreviousUsageLocation = $user.UsageLocation
-                                UsageLocation         = $user.UsageLocation
-                                Action                = 'Skipped'
-                            }) | Out-Null
-                    }
-                    Write-Verbose "Usage location already set to $targetUsage for $($user.UserPrincipalName)."
-                    continue
-                }
-
-                if (-not $PSCmdlet.ShouldProcess($user.UserPrincipalName, "Set usage location to $targetUsage")) {
-                    continue
-                }
-
-                try {
-                    Update-MgUser -UserId $user.Id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
-                    $updatedCount++
-                    if ($PassThru.IsPresent) {
-                        $results.Add([pscustomobject]@{
-                                UserPrincipalName     = $user.UserPrincipalName
-                                DisplayName           = $user.DisplayName
-                                PreviousUsageLocation = $user.UsageLocation
-                                UsageLocation         = $targetUsage
-                                Action                = 'Updated'
-                            }) | Out-Null
-                    }
-                    Write-Verbose "Usage location set to $targetUsage for $($user.UserPrincipalName)."
-                }
-                catch {
-                    Write-NCMessage "Unable to set usage location ($targetUsage) for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
-                }
-            }
-
-            if ($PassThru.IsPresent) {
-                $results
-            }
-            elseif ($updatedCount -gt 0) {
-                $summary = "Usage location updated for {0} user(s) to {1}." -f $updatedCount, $targetUsage
-                if ($skippedCount -gt 0) {
-                    $summary = $summary + (" {0} user(s) already had that value." -f $skippedCount)
-                }
-                Write-NCMessage $summary -Level SUCCESS
-            }
-            elseif ($skippedCount -gt 0) {
-                Write-NCMessage ("Usage location already set to {0} for {1} user(s)." -f $targetUsage, $skippedCount) -Level INFO
-            }
-            else {
-                Write-NCMessage "No usage location changes were applied." -Level WARNING
-            }
-        }
-        finally {
-            Write-Progress -Activity "Processing users" -Completed
-            Restore-ProgressAndInfoPreferences
-        }
-    }
-}
-
-function Get-UserUsageLocation {
-    <#
-    .SYNOPSIS
-        Reads the current usage location for one or more users.
-    .DESCRIPTION
-        Resolves users from pipeline or explicit input and returns their current UsageLocation
-        from Microsoft Graph. The output also includes the configured NebulaCore default so the
-        current value can be compared against the environment setting at a glance.
-    .PARAMETER UserPrincipalName
-        User principal name, object ID, or short identifier. Accepts pipeline input.
-    .EXAMPLE
-        Get-UserUsageLocation -UserPrincipalName user@contoso.com
-    .EXAMPLE
-        'user1@contoso.com','user2@contoso.com' | Get-UserUsageLocation
-    .EXAMPLE
-        Get-MgUser -Filter "endsWith(userPrincipalName,'@contoso.com')" | Get-UserUsageLocation
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Alias('User', 'UPN', 'Identity')]
-        [string[]]$UserPrincipalName
-    )
-
-    begin {
-        Set-ProgressAndInfoPreferences
-        $targets = [System.Collections.Generic.List[string]]::new()
-    }
-
-    process {
-        foreach ($entry in $UserPrincipalName) {
-            if (-not [string]::IsNullOrWhiteSpace($entry)) {
-                $targets.Add($entry.Trim()) | Out-Null
-            }
-        }
-    }
-
-    end {
-        try {
-            if ($targets.Count -eq 0) {
-                Write-NCMessage "No user principal names provided." -Level WARNING
-                return
-            }
-
-            $GraphConnection = Test-MgGraphConnection -Scopes @('User.Read.All') -EnsureExchangeOnline:$false
-            if (-not $GraphConnection) {
-                Add-EmptyLine
-                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
-                return
-            }
-
-            $defaultUsageLocation = if (($NCVars -is [System.Collections.IDictionary]) -and $NCVars.Contains('UsageLocation') -and $NCVars.UsageLocation) {
-                [string]$NCVars.UsageLocation
-            }
-            else {
-                'US'
-            }
-
-            $normalizeUsageLocation = {
-                param($value)
-                if ([string]::IsNullOrWhiteSpace($value)) { return $null }
-                return $value.Trim().ToUpperInvariant()
-            }
-
-            $queue = [System.Collections.Generic.List[string]]::new()
-            $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($entry in $targets) {
-                if ($dedup.Add($entry)) {
-                    $queue.Add($entry) | Out-Null
-                }
-            }
-
-            $counter = 0
-            foreach ($upn in $queue) {
-                $counter++
-                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
-                Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
-
-                $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $upn -PreferGraphIdentity
-                if (-not $resolvedPrincipal) {
-                    Write-NCMessage "Unable to resolve user recipient for $upn" -Level ERROR
-                    continue
-                }
-
-                try {
-                    $user = Get-MgUser -UserId $resolvedPrincipal -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
-                }
-                catch {
-                    Write-NCMessage "Unable to retrieve user '$upn'. $($_.Exception.Message)" -Level ERROR
-                    continue
-                }
-
-                [pscustomobject]@{
-                    UserPrincipalName                = $user.UserPrincipalName
-                    DisplayName                      = $user.DisplayName
-                    UsageLocation                    = $user.UsageLocation
-                    ConfiguredDefaultUsageLocation   = $defaultUsageLocation
-                    MatchesConfiguredDefault         = (& $normalizeUsageLocation $user.UsageLocation) -eq (& $normalizeUsageLocation $defaultUsageLocation)
-                }
-            }
-        }
-        finally {
-            Write-Progress -Activity "Processing users" -Completed
-            Restore-ProgressAndInfoPreferences
-        }
-    }
-}
-
 function Copy-UserMsolAccountSku {
     <#
     .SYNOPSIS
@@ -1191,14 +909,14 @@ function Export-MsolAccountSku {
 
             if ($License -and $userMatchedLicenseNames.Count -gt 0) {
                 $matchedNames = $userMatchedLicenseNames | Select-Object -Unique
-                $userRows = $userRows | ForEach-Object {
+                $userRows = @($userRows | ForEach-Object {
                     $_ | Add-Member -NotePropertyName MatchedLicenses -NotePropertyValue ($matchedNames -join ', ') -PassThru
-                }
+                })
             }
             elseif ($License) {
-                $userRows = $userRows | ForEach-Object {
+                $userRows = @($userRows | ForEach-Object {
                     $_ | Add-Member -NotePropertyName MatchedLicenses -NotePropertyValue $null -PassThru
-                }
+                })
             }
 
             if ($userRows.Count -gt 0) {
@@ -1476,18 +1194,18 @@ function Get-TenantMsolAccountSku {
                             Get-MgUser -Filter "assignedLicenses/any(x:x/skuId eq $($sku.SkuId))" `
                                 -All `
                                 -ConsistencyLevel eventual `
-                                -Property Id,UserPrincipalName,DisplayName,Mail,ProxyAddresses `
+                                -Property Id, UserPrincipalName, DisplayName, Mail, ProxyAddresses `
                                 -ErrorAction Stop |
-                                Where-Object { & $matchesDomain $_ } |
-                                Select-Object -First $sampleUserLimit
+                            Where-Object { & $matchesDomain $_ } |
+                            Select-Object -First $sampleUserLimit
                         }
                         else {
                             Get-MgUser -Filter "assignedLicenses/any(x:x/skuId eq $($sku.SkuId))" `
                                 -Top $sampleUserLimit `
                                 -ConsistencyLevel eventual `
-                                -Property Id,UserPrincipalName,DisplayName `
+                                -Property Id, UserPrincipalName, DisplayName `
                                 -ErrorAction Stop |
-                                Select-Object -First $sampleUserLimit
+                            Select-Object -First $sampleUserLimit
                         }
                     } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve sample users for $($sku.SkuPartNumber)" -OnError {
                         param($attempt, $max, $err)
@@ -1515,18 +1233,18 @@ function Get-TenantMsolAccountSku {
                 }
 
                 [pscustomobject][ordered]@{
-                    Name          = $sku.Name
-                    SkuPartNumber = $sku.SkuPartNumber
-                    SkuId         = $sku.SkuId
-                    Total         = $sku.Total
-                    TotalCount    = $sku.TotalCount
-                    Consumed      = $sku.Consumed
-                    Available     = $sku.Available
-                    Enabled       = $sku.Enabled
-                    Suspended     = $sku.Suspended
-                    Warning       = $sku.Warning
-                    Source        = $sku.Source
-                    SampleUsers   = $sampleUserList
+                    Name            = $sku.Name
+                    SkuPartNumber   = $sku.SkuPartNumber
+                    SkuId           = $sku.SkuId
+                    Total           = $sku.Total
+                    TotalCount      = $sku.TotalCount
+                    Consumed        = $sku.Consumed
+                    Available       = $sku.Available
+                    Enabled         = $sku.Enabled
+                    Suspended       = $sku.Suspended
+                    Warning         = $sku.Warning
+                    Source          = $sku.Source
+                    SampleUsers     = $sampleUserList
                     SampleUsersText = if ($sampleUserList.Count -gt 0) { $sampleUserList -join [Environment]::NewLine } else { $null }
                 }
             }
@@ -1556,9 +1274,9 @@ function Get-TenantMsolAccountSku {
         }
         elseif ($AsTable.IsPresent) {
             $limited = $sorted | Select-Object @{
-                    Name       = 'Name'
-                    Expression = { Format-OutputString -Value $_.Name -MaxLength $NCVars.MaxFieldLength }
-                }, SkuPartNumber, Total, Consumed, Available
+                Name       = 'Name'
+                Expression = { Format-OutputString -Value $_.Name -MaxLength $NCVars.MaxFieldLength }
+            }, SkuPartNumber, Total, Consumed, Available
             Show-Table -Rows $limited -AsTable
 
             if ($useSampleUsers) {
@@ -1812,6 +1530,114 @@ function Get-UserMsolAccountSku {
     }
 }
 
+function Get-UserUsageLocation {
+    <#
+    .SYNOPSIS
+        Reads the current usage location for one or more users.
+    .DESCRIPTION
+        Resolves users from pipeline or explicit input and returns their current UsageLocation
+        from Microsoft Graph. The output also includes the configured NebulaCore default so the
+        current value can be compared against the environment setting at a glance.
+    .PARAMETER UserPrincipalName
+        User principal name, object ID, or short identifier. Accepts pipeline input.
+    .EXAMPLE
+        Get-UserUsageLocation -UserPrincipalName user@contoso.com
+    .EXAMPLE
+        'user1@contoso.com','user2@contoso.com' | Get-UserUsageLocation
+    .EXAMPLE
+        Get-MgUser -Filter "endsWith(userPrincipalName,'@contoso.com')" | Get-UserUsageLocation
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('User', 'UPN', 'Identity')]
+        [string[]]$UserPrincipalName
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $targets = [System.Collections.Generic.List[string]]::new()
+    }
+
+    process {
+        foreach ($entry in $UserPrincipalName) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                $targets.Add($entry.Trim()) | Out-Null
+            }
+        }
+    }
+
+    end {
+        try {
+            if ($targets.Count -eq 0) {
+                Write-NCMessage "No user principal names provided." -Level WARNING
+                return
+            }
+
+            $GraphConnection = Test-MgGraphConnection -Scopes @('User.Read.All') -EnsureExchangeOnline:$false
+            if (-not $GraphConnection) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+                return
+            }
+
+            $defaultUsageLocation = if (($NCVars -is [System.Collections.IDictionary]) -and $NCVars.Contains('UsageLocation') -and $NCVars.UsageLocation) {
+                [string]$NCVars.UsageLocation
+            }
+            else {
+                'US'
+            }
+
+            $normalizeUsageLocation = {
+                param($value)
+                if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+                return $value.Trim().ToUpperInvariant()
+            }
+
+            $queue = [System.Collections.Generic.List[string]]::new()
+            $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($entry in $targets) {
+                if ($dedup.Add($entry)) {
+                    $queue.Add($entry) | Out-Null
+                }
+            }
+
+            $counter = 0
+            foreach ($upn in $queue) {
+                $counter++
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
+                Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
+
+                $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $upn -PreferGraphIdentity
+                if (-not $resolvedPrincipal) {
+                    Write-NCMessage "Unable to resolve user recipient for $upn" -Level ERROR
+                    continue
+                }
+
+                try {
+                    $user = Get-MgUser -UserId $resolvedPrincipal -Property Id, UserPrincipalName, DisplayName, UsageLocation -ErrorAction Stop
+                }
+                catch {
+                    Write-NCMessage "Unable to retrieve user '$upn'. $($_.Exception.Message)" -Level ERROR
+                    continue
+                }
+
+                [pscustomobject]@{
+                    UserPrincipalName              = $user.UserPrincipalName
+                    DisplayName                    = $user.DisplayName
+                    UsageLocation                  = $user.UsageLocation
+                    ConfiguredDefaultUsageLocation = $defaultUsageLocation
+                    MatchesConfiguredDefault       = (& $normalizeUsageLocation $user.UsageLocation) -eq (& $normalizeUsageLocation $defaultUsageLocation)
+                }
+            }
+        }
+        finally {
+            Write-Progress -Activity "Processing users" -Completed
+            Restore-ProgressAndInfoPreferences
+        }
+    }
+}
+
 function Move-UserMsolAccountSku {
     <#
     .SYNOPSIS
@@ -1862,8 +1688,8 @@ function Move-UserMsolAccountSku {
         }
 
         try {
-            $sourceUser = Get-MgUser -UserId $resolvedSource -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
-            $destinationUser = Get-MgUser -UserId $resolvedDestination -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
+            $sourceUser = Get-MgUser -UserId $resolvedSource -Property Id, UserPrincipalName, DisplayName, UsageLocation -ErrorAction Stop
+            $destinationUser = Get-MgUser -UserId $resolvedDestination -Property Id, UserPrincipalName, DisplayName, UsageLocation -ErrorAction Stop
         }
         catch {
             Write-NCMessage "Unable to retrieve users: $($_.Exception.Message)" -Level ERROR
@@ -2279,6 +2105,180 @@ function Remove-UserMsolAccountSku {
 
     end {
         Restore-ProgressAndInfoPreferences
+    }
+}
+
+function Set-UserUsageLocation {
+    <#
+    .SYNOPSIS
+        Updates usage location for one or more users.
+    .DESCRIPTION
+        Resolves users from pipeline or explicit input, connects to Microsoft Graph, and updates
+        their UsageLocation value. If -UsageLocation is omitted, Nebula.Core uses the configured
+        UsageLocation default (or US when no override exists).
+    .PARAMETER UserPrincipalName
+        User principal name, object ID, or short identifier. Accepts pipeline input.
+    .PARAMETER UsageLocation
+        Two-letter country code to set. When omitted, the configured default is used.
+    .PARAMETER PassThru
+        Emit the processed users as objects.
+    .EXAMPLE
+        Set-UserUsageLocation -UserPrincipalName user@contoso.com -UsageLocation IT
+    .EXAMPLE
+        'user1@contoso.com','user2@contoso.com' | Set-UserUsageLocation -UsageLocation DE
+    .EXAMPLE
+        Get-MgUser -Filter "endsWith(userPrincipalName,'@contoso.com')" | Set-UserUsageLocation -UsageLocation FR
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('User', 'UPN', 'Identity')]
+        [string[]]$UserPrincipalName,
+        [string]$UsageLocation,
+        [switch]$PassThru
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $targets = [System.Collections.Generic.List[string]]::new()
+    }
+
+    process {
+        foreach ($entry in $UserPrincipalName) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                $targets.Add($entry.Trim()) | Out-Null
+            }
+        }
+    }
+
+    end {
+        try {
+            if ($targets.Count -eq 0) {
+                Write-NCMessage "No user principal names provided." -Level WARNING
+                return
+            }
+
+            $GraphConnection = Test-MgGraphConnection -Scopes @('Directory.ReadWrite.All') -EnsureExchangeOnline:$false
+            if (-not $GraphConnection) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+                return
+            }
+
+            $defaultUsageLocation = if (-not [string]::IsNullOrWhiteSpace($UsageLocation)) {
+                $UsageLocation.Trim()
+            }
+            elseif (($NCVars -is [System.Collections.IDictionary]) -and $NCVars.Contains('UsageLocation') -and $NCVars.UsageLocation) {
+                [string]$NCVars.UsageLocation
+            }
+            else {
+                'US'
+            }
+
+            $targetUsage = $defaultUsageLocation.Trim().ToUpperInvariant()
+            if ($targetUsage.Length -ne 2) {
+                Write-NCMessage "UsageLocation must be a two-letter country code." -Level ERROR
+                return
+            }
+
+            $normalizeUsageLocation = {
+                param($value)
+                if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+                return $value.Trim().ToUpperInvariant()
+            }
+
+            $queue = [System.Collections.Generic.List[string]]::new()
+            $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($entry in $targets) {
+                if ($dedup.Add($entry)) {
+                    $queue.Add($entry) | Out-Null
+                }
+            }
+
+            $results = [System.Collections.Generic.List[object]]::new()
+            $updatedCount = 0
+            $skippedCount = 0
+            $counter = 0
+
+            foreach ($upn in $queue) {
+                $counter++
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
+                Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
+
+                $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $upn -PreferGraphIdentity
+                if (-not $resolvedPrincipal) {
+                    Write-NCMessage "Unable to resolve user recipient for $upn" -Level ERROR
+                    continue
+                }
+
+                try {
+                    $user = Get-MgUser -UserId $resolvedPrincipal -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
+                }
+                catch {
+                    Write-NCMessage "Unable to retrieve user '$upn'. $($_.Exception.Message)" -Level ERROR
+                    continue
+                }
+
+                $currentUsage = & $normalizeUsageLocation $user.UsageLocation
+                if ($currentUsage -eq $targetUsage) {
+                    $skippedCount++
+                    if ($PassThru.IsPresent) {
+                        $results.Add([pscustomobject]@{
+                                UserPrincipalName     = $user.UserPrincipalName
+                                DisplayName           = $user.DisplayName
+                                PreviousUsageLocation = $user.UsageLocation
+                                UsageLocation         = $user.UsageLocation
+                                Action                = 'Skipped'
+                            }) | Out-Null
+                    }
+                    Write-Verbose "Usage location already set to $targetUsage for $($user.UserPrincipalName)."
+                    continue
+                }
+
+                if (-not $PSCmdlet.ShouldProcess($user.UserPrincipalName, "Set usage location to $targetUsage")) {
+                    continue
+                }
+
+                try {
+                    Update-MgUser -UserId $user.Id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
+                    $updatedCount++
+                    if ($PassThru.IsPresent) {
+                        $results.Add([pscustomobject]@{
+                                UserPrincipalName     = $user.UserPrincipalName
+                                DisplayName           = $user.DisplayName
+                                PreviousUsageLocation = $user.UsageLocation
+                                UsageLocation         = $targetUsage
+                                Action                = 'Updated'
+                            }) | Out-Null
+                    }
+                    Write-Verbose "Usage location set to $targetUsage for $($user.UserPrincipalName)."
+                }
+                catch {
+                    Write-NCMessage "Unable to set usage location ($targetUsage) for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
+                }
+            }
+
+            if ($PassThru.IsPresent) {
+                $results
+            }
+            elseif ($updatedCount -gt 0) {
+                $summary = "Usage location updated for {0} user(s) to {1}." -f $updatedCount, $targetUsage
+                if ($skippedCount -gt 0) {
+                    $summary = $summary + (" {0} user(s) already had that value." -f $skippedCount)
+                }
+                Write-NCMessage $summary -Level SUCCESS
+            }
+            elseif ($skippedCount -gt 0) {
+                Write-NCMessage ("Usage location already set to {0} for {1} user(s)." -f $targetUsage, $skippedCount) -Level INFO
+            }
+            else {
+                Write-NCMessage "No usage location changes were applied." -Level WARNING
+            }
+        }
+        finally {
+            Write-Progress -Activity "Processing users" -Completed
+            Restore-ProgressAndInfoPreferences
+        }
     }
 }
 
