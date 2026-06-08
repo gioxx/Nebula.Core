@@ -218,6 +218,14 @@ function Export-IntuneAppInventory {
         Optional CSV export path.
     .PARAMETER OutputJsonPath
         Optional JSON export path.
+    .PARAMETER BatchSize
+        Number of rows to flush at a time when writing CSV output.
+    .PARAMETER Resume
+        Resume CSV export from the latest matching CSV or from -CsvPath.
+    .PARAMETER CsvPath
+        Explicit CSV file to resume or export to. When omitted, a default file is used.
+    .PARAMETER MaxConsecutiveErrors
+        Stop after this many consecutive device-level failures.
     .PARAMETER PivotSummary
         Print a per-app summary after the report is built.
     .EXAMPLE
@@ -247,6 +255,12 @@ function Export-IntuneAppInventory {
 
         [string]$OutputCsvPath,
         [string]$OutputJsonPath,
+        [ValidateRange(1, 500)]
+        [int]$BatchSize = 25,
+        [switch]$Resume,
+        [string]$CsvPath,
+        [ValidateRange(1, 100)]
+        [int]$MaxConsecutiveErrors = 5,
         [switch]$PivotSummary
     )
 
@@ -275,6 +289,28 @@ function Export-IntuneAppInventory {
                 return
             }
 
+            $normalizeText = {
+                param($value)
+                return Get-NormalizedText -Value $value
+            }
+            $buildRowKey = {
+                param($row)
+
+                $app = & $normalizeText $row.AppName
+                $device = & $normalizeText $row.DeviceId
+                $source = & $normalizeText $row.Source
+                $installState = & $normalizeText $row.InstallState
+                $version = & $normalizeText $row.Version
+                $publisher = & $normalizeText $row.Publisher
+                return "{0}|{1}|{2}|{3}|{4}|{5}" -f $app, $device, $source, $installState, $version, $publisher
+            }
+            $existingRowKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $exportCsv = $false
+            $csvPathResolved = $null
+            $processedSinceFlush = 0
+            $consecutiveErrors = 0
+            $aborted = $false
+
             Write-NCMessage "Starting app inventory reporting ..." -Level INFO
 
             # Pull devices
@@ -295,7 +331,7 @@ function Export-IntuneAppInventory {
             foreach ($device in $devices) {
                 $processed++
 
-                $Percentage = [Math]::Round(($processed / [Math]::Max($devices.Count, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $processed -Total $devices.Count
                 Write-Progress -Activity "Reading Detected Apps" -Status "$($device.deviceName) - $processed / $($devices.Count) devices - $Percentage%" -PercentComplete $Percentage
 
                 try {
@@ -341,12 +377,21 @@ function Export-IntuneAppInventory {
                         Start-Sleep -Seconds 60
                         $processed--
 
-                        $Percentage = [Math]::Round(($processed / [Math]::Max($devices.Count, 1)) * 100, 2)
+                        $Percentage = Get-NCProgressPercent -Current $processed -Total $devices.Count
                         Write-Progress -Activity "Reading Detected Apps" -Status "Waiting after rate limit ... - $processed / $($devices.Count) devices - $Percentage%" -PercentComplete $Percentage
 
                         continue
                     }
                     Write-NCMessage "Error reading apps for $($device.deviceName): $($_.Exception.Message)" -Level WARNING
+                    $consecutiveErrors++
+                    if ($MaxConsecutiveErrors -gt 0 -and $consecutiveErrors -ge $MaxConsecutiveErrors) {
+                        $aborted = $true
+                        break
+                    }
+                }
+
+                if ($aborted) {
+                    break
                 }
             }
             Write-Progress -Activity "Reading Detected Apps" -Completed
@@ -424,8 +469,53 @@ function Export-IntuneAppInventory {
                 }
             }
 
+            if ($OutputCsvPath -or $Resume.IsPresent -or -not [string]::IsNullOrWhiteSpace($CsvPath)) {
+                if (-not [string]::IsNullOrWhiteSpace($CsvPath)) {
+                    $csvPathResolved = $CsvPath
+                }
+                elseif (-not [string]::IsNullOrWhiteSpace($OutputCsvPath)) {
+                    $csvPathResolved = $OutputCsvPath
+                }
+                elseif ($Resume) {
+                    $existingCsv = Get-ChildItem -Path (Get-Location).Path -File -Filter "*_M365-IntuneAppInventory-Report.csv" |
+                        Sort-Object LastWriteTime -Descending |
+                        Select-Object -First 1
+                    if ($existingCsv) {
+                        $csvPathResolved = $existingCsv.FullName
+                    }
+                    else {
+                        $csvPathResolved = New-File (Join-Path -Path (Get-Location).Path -ChildPath "$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-IntuneAppInventory-Report.csv")
+                    }
+                }
+
+                if ($Resume -and (Test-Path -LiteralPath $csvPathResolved)) {
+                    try {
+                        foreach ($row in (Import-CSV -LiteralPath $csvPathResolved -Delimiter $NCVars.CSV_DefaultLimiter -ErrorAction Stop)) {
+                            $null = $existingRowKeys.Add((& $buildRowKey $row))
+                        }
+                        Write-NCMessage ("Resuming Intune app inventory export from {0}; {1} row(s) already recorded." -f $csvPathResolved, $existingRowKeys.Count) -Level INFO
+                    }
+                    catch {
+                        Write-NCMessage ("Unable to read existing CSV '{0}' for resume. {1}" -f $csvPathResolved, $_.Exception.Message) -Level WARNING
+                        $existingRowKeys.Clear()
+                    }
+                }
+                elseif ($Resume -and -not (Test-Path -LiteralPath $csvPathResolved)) {
+                    Write-NCMessage ("Resume requested for '{0}', but the file does not exist. Starting a new report at that path." -f $csvPathResolved) -Level INFO
+                }
+
+                $exportCsv = $true
+                Write-NCMessage ("Intune app inventory CSV export will flush every {0} row(s). Resume: {1}. Stop after {2} consecutive error(s)." -f $BatchSize, $Resume.IsPresent, $MaxConsecutiveErrors) -Level INFO
+                Write-NCMessage "Saving report to $csvPathResolved" -Level DEBUG
+            }
+
             if (-not $rows -or $rows.Count -eq 0) {
-                Write-NCMessage "No applications matched '$ApplicationName' with the provided filters." -Level WARNING
+                if ($exportCsv -and (Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                    Write-NCMessage "No new Intune app inventory rows found. Existing CSV at $csvPathResolved already contains the requested rows." -Level INFO
+                }
+                else {
+                    Write-NCMessage "No applications matched '$ApplicationName' with the provided filters." -Level WARNING
+                }
                 return
             }
 
@@ -433,10 +523,32 @@ function Export-IntuneAppInventory {
             $rows | Sort-Object AppName, DeviceName | Format-Table -AutoSize AppName, Version, DeviceName, Platform, User, Source
 
             # Optional exports
-            if ($OutputCsvPath) {
+            if ($exportCsv) {
                 try {
-                    $rows | Sort-Object AppName, DeviceName | Export-Csv -Path $OutputCsvPath -NoTypeInformation -Encoding UTF8
-                    Write-NCMessage "CSV exported to $OutputCsvPath" -Level SUCCESS
+                    $sortedRows = $rows | Sort-Object AppName, DeviceName, DeviceId, Source
+                    $exportRows = if ($Resume) { @($sortedRows | Where-Object { -not $existingRowKeys.Contains((& $buildRowKey $_)) }) } else { @($sortedRows) }
+
+                    if ($exportRows.Count -eq 0) {
+                        Write-NCMessage "No new CSV rows needed to be written to $csvPathResolved." -Level INFO
+                    }
+                    else {
+                        $chunkSize = if ($BatchSize -gt 0) { $BatchSize } else { $exportRows.Count }
+                        for ($offset = 0; $offset -lt $exportRows.Count; $offset += $chunkSize) {
+                            $chunk = $exportRows[$offset..([Math]::Min($offset + $chunkSize - 1, $exportRows.Count - 1))]
+                            if ((Test-Path -LiteralPath $csvPathResolved) -and ((Get-Item -LiteralPath $csvPathResolved).Length -gt 0)) {
+                                $chunk | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding UTF8 -Delimiter $NCVars.CSV_DefaultLimiter -Append
+                            }
+                            else {
+                                $chunk | Export-Csv -LiteralPath $csvPathResolved -NoTypeInformation -Encoding UTF8 -Delimiter $NCVars.CSV_DefaultLimiter
+                            }
+                        }
+                        if ($aborted) {
+                            Write-NCMessage "Intune app inventory CSV export stopped early. Partial data kept at $csvPathResolved." -Level ERROR
+                        }
+                        else {
+                            Write-NCMessage "CSV exported to $csvPathResolved" -Level SUCCESS
+                        }
+                    }
                 }
                 catch {
                     Write-NCMessage "Failed to export CSV: $($_.Exception.Message)" -Level WARNING
@@ -599,7 +711,7 @@ function New-IntuneAppBasedGroup {
             foreach ($device in $devices) {
                 $processedDevices++
 
-                $Percentage = [Math]::Round(($processedDevices / [Math]::Max($devices.Count, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $processed -Total $devices.Count
                 Write-Progress -Activity 'Processing Devices' -Status "$($device.deviceName) - $processedDevices of $($devices.Count) devices - $Percentage%" -PercentComplete $Percentage
 
                 try {
@@ -842,7 +954,7 @@ function New-IntuneAppBasedGroup {
                     $processedMembers++
 
                     try {
-                        $Percentage = [Math]::Round(($processedMembers / [Math]::Max($uniqueDeviceIds.Count, 1)) * 100, 2)
+                        $Percentage = Get-NCProgressPercent -Current $processed -Total $uniqueDeviceIds.Count
                         $resolution = Resolve-NCIntuneManagedDeviceEntraMember -ManagedDevices $devices -DeviceId $deviceId
                         $deviceLabel = if ($resolution -and -not [string]::IsNullOrWhiteSpace($resolution.DeviceName)) { $resolution.DeviceName } else { [string]$deviceId }
                         Write-Progress -Activity 'Resolving Entra Devices' -Status "$deviceLabel - $processedMembers of $($uniqueDeviceIds.Count) devices - $Percentage%" -PercentComplete $Percentage
@@ -999,3 +1111,5 @@ function New-IntuneAppBasedGroup {
         }
     }
 }
+
+

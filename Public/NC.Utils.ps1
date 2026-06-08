@@ -98,3 +98,54 @@ function Format-SortedEmailsFromClipboard {
 }
 
 Set-Alias -Name fse -Value Format-SortedEmailsFromClipboard -Description "Format sorted e-mails from clipboard"
+
+function Format-QuotedListFromClipboard {
+    <#
+    .SYNOPSIS
+        Formats clipboard text as a quoted, comma-separated list.
+    .DESCRIPTION
+        Reads text from the clipboard, splits it on lines and tabs, trims each value, removes
+        duplicates while preserving the first occurrence, and copies the resulting quoted list
+        back to the clipboard.
+    .PARAMETER PassThru
+        Emit the formatted string to the pipeline in addition to copying it to the clipboard.
+    .EXAMPLE
+        Format-QuotedListFromClipboard -PassThru
+    #>
+    [CmdletBinding()]
+    param(
+        [switch]$PassThru
+    )
+
+    $clipboard = Get-Clipboard -Raw
+    if ([string]::IsNullOrWhiteSpace($clipboard)) {
+        Write-NCMessage "Clipboard is empty. Copy a list of values first." -Level WARNING
+        return
+    }
+
+    $items = $clipboard -split "\r?\n|\t" | ForEach-Object {
+        $_.Trim().Trim('"').Trim("'")
+    } | Where-Object { $_ }
+
+    if (-not $items -or $items.Count -eq 0) {
+        Write-NCMessage "No values found in clipboard content." -Level WARNING
+        return
+    }
+
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $normalized = [System.Collections.Generic.List[string]]::new()
+    foreach ($item in $items) {
+        if ($seen.Add($item)) {
+            $normalized.Add($item) | Out-Null
+        }
+    }
+
+    $quoted = $normalized | ForEach-Object { "`"$($_.Replace('"', '""'))`"" }
+    $output = $quoted -join ","
+
+    $output | Set-Clipboard
+    $label = if ($normalized.Count -eq 1) { 'value' } else { 'values' }
+    Write-NCMessage ("Copied {0} formatted {1} to clipboard." -f $normalized.Count, $label) -Level INFO
+
+    if ($PassThru.IsPresent) { $output }
+}

@@ -59,7 +59,7 @@ function Disable-UserDevices {
 
             foreach ($upn in $queue) {
                 $counter++
-                $Percentage = [Math]::Round(($counter / [Math]::Max($queue.Count, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
                 Write-Progress -Activity "Resolving user $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
 
                 try {
@@ -186,7 +186,7 @@ function Disable-UserSignIn {
 
             foreach ($upn in $queue) {
                 $counter++
-                $Percentage = [Math]::Round(($counter / [Math]::Max($queue.Count, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
                 Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
 
                 try {
@@ -236,6 +236,479 @@ function Disable-UserSignIn {
             Write-Progress -Activity "Processing users" -Completed
             Restore-ProgressAndInfoPreferences
         }
+    }
+}
+
+function Get-ContentFilterPolicy {
+    <#
+    .SYNOPSIS
+        Reads hosted content filter policy configuration.
+    .DESCRIPTION
+        Connects to Exchange Online and returns one or more hosted content filter policies. If no
+        policy name is provided, the function lists all available policies. The output includes the
+        current allow/block lists so you can inspect how each policy is configured before editing it.
+    .PARAMETER Identity
+        Hosted content filter policy name. If omitted, all policies are returned.
+    .PARAMETER Detailed
+        Include the resolved allow/block lists in the output.
+    .EXAMPLE
+        Get-ContentFilterPolicy
+    .EXAMPLE
+        Get-ContentFilterPolicy -Identity Contoso
+    .EXAMPLE
+        Get-ContentFilterPolicy -Detailed
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('SpamFilter', 'PolicyName')]
+        [string[]]$Identity,
+        [switch]$Detailed
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $targets = [System.Collections.Generic.List[string]]::new()
+    }
+
+    process {
+        foreach ($entry in $Identity) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                $targets.Add($entry.Trim()) | Out-Null
+            }
+        }
+    }
+
+    end {
+        try {
+            if (-not (Test-EOLConnection)) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
+                return
+            }
+
+            $policyObjects = [System.Collections.Generic.List[object]]::new()
+
+            if ($targets.Count -eq 0) {
+                try {
+                    $policyObjects.AddRange(@(Get-HostedContentFilterPolicy -ErrorAction Stop))
+                }
+                catch {
+                    Write-NCMessage "Unable to retrieve hosted content filter policies. $($_.Exception.Message)" -Level ERROR
+                    return
+                }
+
+                if ($policyObjects.Count -eq 0) {
+                    Write-NCMessage "No hosted content filter policies were found." -Level WARNING
+                    return
+                }
+            }
+            else {
+                $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($policyName in $targets) {
+                    if (-not $dedup.Add($policyName)) {
+                        continue
+                    }
+
+                    try {
+                        $policyObjects.Add((Get-HostedContentFilterPolicy -Identity $policyName -ErrorAction Stop)) | Out-Null
+                    }
+                    catch {
+                        Write-NCMessage "Unable to read hosted content filter policy '$policyName'. $($_.Exception.Message)" -Level ERROR
+                    }
+                }
+
+                if ($policyObjects.Count -eq 0) {
+                    Write-NCMessage "No hosted content filter policies matched the requested identity or identities." -Level WARNING
+                    return
+                }
+            }
+            $policyObjects |
+                Sort-Object Name |
+                ForEach-Object {
+                    $blockedSenders = @(Get-NCContentFilterPolicyValues -PolicyObject $_ -PropertyName 'BlockedSenders' -PreferredValueProperty 'Sender')
+                    $blockedSenderDomains = @(Get-NCContentFilterPolicyValues -PolicyObject $_ -PropertyName 'BlockedSenderDomains' -PreferredValueProperty 'Domain')
+                    $allowedSenders = @(Get-NCContentFilterPolicyValues -PolicyObject $_ -PropertyName 'AllowedSenders' -PreferredValueProperty 'Sender')
+                    $allowedSenderDomains = @(Get-NCContentFilterPolicyValues -PolicyObject $_ -PropertyName 'AllowedSenderDomains' -PreferredValueProperty 'Domain')
+
+                    $summary = [ordered]@{
+                        Identity            = $_.Identity
+                        Name                = $_.Name
+                        Enabled             = $_.Enabled
+                        Priority            = $_.Priority
+                        BlockedSenderCount  = $blockedSenders.Count
+                        BlockedDomainCount  = $blockedSenderDomains.Count
+                        AllowedSenderCount  = $allowedSenders.Count
+                        AllowedDomainCount  = $allowedSenderDomains.Count
+                    }
+
+                    if ($Detailed.IsPresent) {
+                        $summary.BlockedSenders = $blockedSenders
+                        $summary.BlockedSenderDomains = $blockedSenderDomains
+                        $summary.AllowedSenders = $allowedSenders
+                        $summary.AllowedSenderDomains = $allowedSenderDomains
+                    }
+
+                    [pscustomobject]$summary
+                }
+        }
+        finally {
+            Restore-ProgressAndInfoPreferences
+        }
+    }
+}
+
+function Edit-ContentFilterPolicy {
+    <#
+    .SYNOPSIS
+        Updates a hosted content filter policy allow/block list.
+    .DESCRIPTION
+        Connects to Exchange Online, loads a hosted content filter policy, and adds or removes
+        blocked senders, blocked domains, allowed senders, or allowed domains. When allowed senders
+        are updated, the helper also keeps the configured allowed-senders group in sync and creates
+        missing mail contacts. When allowed domains are updated, the helper also synchronizes the
+        sender-domain exceptions on the configured transport rules.
+    .PARAMETER Identity
+        Hosted content filter policy name. Accepts the legacy SpamFilter alias.
+    .PARAMETER BlockedSender
+        Sender address to add or remove from the blocked senders list.
+    .PARAMETER BlockedDomain
+        Domain to add or remove from the blocked sender domains list.
+    .PARAMETER AllowedSender
+        Sender address to add or remove from the allowed senders list.
+    .PARAMETER AllowedDomain
+        Domain to add or remove from the allowed sender domains list.
+    .PARAMETER AllowedSendersGroup
+        Distribution group used to keep the allowed senders group in sync.
+    .PARAMETER TransportRuleNames
+        Transport rules that should mirror allowed-domain exceptions.
+    .PARAMETER Remove
+        Remove the provided values instead of adding them.
+    .EXAMPLE
+        Edit-ContentFilterPolicy -Identity Contoso -BlockedSender user@contoso.com
+    .EXAMPLE
+        Edit-ContentFilterPolicy -Identity Contoso -AllowedDomain contoso.com -Remove
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Mandatory, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('SpamFilter', 'PolicyName')]
+        [string]$Identity,
+        [string[]]$BlockedSender,
+        [string[]]$BlockedDomain,
+        [string[]]$AllowedSender,
+        [string[]]$AllowedDomain,
+        [string]$AllowedSendersGroup,
+        [string[]]$TransportRuleNames,
+        [switch]$Remove
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+    }
+
+    process {
+        if (-not (Test-EOLConnection)) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
+            return
+        }
+
+        $blockedSendersQueue = @(
+            foreach ($entry in @($BlockedSender)) {
+                if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                    $entry.Trim()
+                }
+            }
+        ) | Sort-Object -Unique
+
+        $blockedDomainsQueue = @(
+            foreach ($entry in @($BlockedDomain)) {
+                if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                    $entry.Trim()
+                }
+            }
+        ) | Sort-Object -Unique
+
+        $allowedSendersQueue = @(
+            foreach ($entry in @($AllowedSender)) {
+                if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                    $entry.Trim()
+                }
+            }
+        ) | Sort-Object -Unique
+
+        $allowedDomainsQueue = @(
+            foreach ($entry in @($AllowedDomain)) {
+                if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                    $entry.Trim()
+                }
+            }
+        ) | Sort-Object -Unique
+
+        $modeLabel = if ($Remove.IsPresent) { 'Remove' } else { 'Add' }
+
+        if ($blockedSendersQueue.Count -eq 0 -and $blockedDomainsQueue.Count -eq 0 -and $allowedSendersQueue.Count -eq 0 -and $allowedDomainsQueue.Count -eq 0) {
+            Write-NCMessage "No changes requested. Returning the current policy state." -Level INFO
+        }
+
+        try {
+            $policy = Get-HostedContentFilterPolicy -Identity $Identity -ErrorAction Stop
+        }
+        catch {
+            Write-NCMessage "Unable to read hosted content filter policy '$Identity'. $($_.Exception.Message)" -Level ERROR
+            return
+        }
+
+        $transportRules = [System.Collections.Generic.List[object]]::new()
+        foreach ($ruleName in @($TransportRuleNames)) {
+            if ([string]::IsNullOrWhiteSpace($ruleName)) {
+                continue
+            }
+
+            try {
+                $rule = Get-TransportRule -Identity $ruleName -ErrorAction Stop
+                $transportRules.Add($rule) | Out-Null
+            }
+            catch {
+                Write-NCMessage "Transport rule '$ruleName' was not found or could not be read. $($_.Exception.Message)" -Level WARNING
+            }
+        }
+
+        $contactGroup = $null
+        if (-not [string]::IsNullOrWhiteSpace($AllowedSendersGroup)) {
+            try {
+                $contactGroup = Get-DistributionGroup -Identity $AllowedSendersGroup -ErrorAction Stop
+            }
+            catch {
+                Write-NCMessage "Allowed senders group '$AllowedSendersGroup' was not found or could not be read. $($_.Exception.Message)" -Level WARNING
+            }
+        }
+
+        if ($allowedSendersQueue.Count -gt 0 -and -not $contactGroup) {
+            Write-NCMessage "Allowed sender updates will skip group synchronization because -AllowedSendersGroup was not provided or could not be resolved." -Level INFO
+        }
+
+        if ($allowedDomainsQueue.Count -gt 0 -and $transportRules.Count -eq 0) {
+            Write-NCMessage "Allowed domain updates will skip transport-rule synchronization because -TransportRuleNames was not provided or no rules could be resolved." -Level INFO
+        }
+
+        $changes = [System.Collections.Generic.List[object]]::new()
+        $updateDomainList = {
+            param(
+                [object]$CurrentValues,
+                [string]$Entry,
+                [switch]$Remove
+            )
+
+            $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($value in @($CurrentValues)) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$value)) {
+                    [void]$set.Add(([string]$value).Trim())
+                }
+            }
+
+            if ($Remove) {
+                [void]$set.Remove($Entry)
+            }
+            else {
+                [void]$set.Add($Entry)
+            }
+
+            return @($set)
+        }
+
+        Write-NCMessage "Policy: $Identity" -Level INFO
+        Write-NCMessage ("Mode: {0}" -f $modeLabel) -Level INFO
+
+        foreach ($entry in $blockedSendersQueue) {
+            $actionText = if ($Remove.IsPresent) { "remove blocked sender '$entry'" } else { "add blocked sender '$entry'" }
+            if (-not $PSCmdlet.ShouldProcess($Identity, $actionText)) {
+                continue
+            }
+
+            try {
+                if ($Remove.IsPresent) {
+                    Set-HostedContentFilterPolicy -Identity $Identity -BlockedSenders @{ remove = $entry } -ErrorAction Stop | Out-Null
+                }
+                else {
+                    Set-HostedContentFilterPolicy -Identity $Identity -BlockedSenders @{ add = $entry } -ErrorAction Stop | Out-Null
+                }
+
+                $changes.Add([pscustomobject]@{
+                        Scope  = 'BlockedSenders'
+                        Value  = $entry
+                        Action = $(if ($Remove.IsPresent) { 'Removed' } else { 'Added' })
+                    }) | Out-Null
+            }
+            catch {
+                Write-NCMessage "Unable to update blocked sender '$entry' on '$Identity'. $($_.Exception.Message)" -Level ERROR
+            }
+        }
+
+        foreach ($entry in $blockedDomainsQueue) {
+            $actionText = if ($Remove.IsPresent) { "remove blocked domain '$entry'" } else { "add blocked domain '$entry'" }
+            if (-not $PSCmdlet.ShouldProcess($Identity, $actionText)) {
+                continue
+            }
+
+            try {
+                if ($Remove.IsPresent) {
+                    Set-HostedContentFilterPolicy -Identity $Identity -BlockedSenderDomains @{ remove = $entry } -ErrorAction Stop | Out-Null
+                }
+                else {
+                    Set-HostedContentFilterPolicy -Identity $Identity -BlockedSenderDomains @{ add = $entry } -ErrorAction Stop | Out-Null
+                }
+
+                $changes.Add([pscustomobject]@{
+                        Scope  = 'BlockedSenderDomains'
+                        Value  = $entry
+                        Action = $(if ($Remove.IsPresent) { 'Removed' } else { 'Added' })
+                    }) | Out-Null
+            }
+            catch {
+                Write-NCMessage "Unable to update blocked sender domain '$entry' on '$Identity'. $($_.Exception.Message)" -Level ERROR
+            }
+        }
+
+        foreach ($entry in $allowedSendersQueue) {
+            $actionText = if ($Remove.IsPresent) { "remove allowed sender '$entry'" } else { "add allowed sender '$entry'" }
+            if (-not $PSCmdlet.ShouldProcess($Identity, $actionText)) {
+                continue
+            }
+
+            try {
+                if (-not $Remove.IsPresent) {
+                    $contact = Get-MailContact -Identity $entry -ErrorAction SilentlyContinue
+                    if (-not $contact) {
+                        New-MailContact -DisplayName $entry -Name $entry -ExternalEmailAddress $entry -ErrorAction Stop | Out-Null
+                        Write-NCMessage "Created mail contact for '$entry'." -Level SUCCESS
+                    }
+
+                    Set-MailContact -Identity $entry -HiddenFromAddressListsEnabled $true -ErrorAction Stop | Out-Null
+
+                    if ($contactGroup) {
+                        try {
+                            Add-DistributionGroupMember -Identity $contactGroup.Identity -Member $entry -ErrorAction Stop | Out-Null
+                        }
+                        catch {
+                            Write-NCMessage "Unable to add '$entry' to allowed senders group '$AllowedSendersGroup'. $($_.Exception.Message)" -Level WARNING
+                        }
+                    }
+                }
+                else {
+                    if ($contactGroup) {
+                        try {
+                            Remove-DistributionGroupMember -Identity $contactGroup.Identity -Member $entry -Confirm:$false -ErrorAction Stop | Out-Null
+                        }
+                        catch {
+                            Write-NCMessage "Unable to remove '$entry' from allowed senders group '$AllowedSendersGroup'. $($_.Exception.Message)" -Level WARNING
+                        }
+                    }
+                }
+
+                if ($Remove.IsPresent) {
+                    Set-HostedContentFilterPolicy -Identity $Identity -AllowedSenders @{ remove = $entry } -ErrorAction Stop | Out-Null
+                }
+                else {
+                    Set-HostedContentFilterPolicy -Identity $Identity -AllowedSenders @{ add = $entry } -ErrorAction Stop | Out-Null
+                }
+
+                $changes.Add([pscustomobject]@{
+                        Scope  = 'AllowedSenders'
+                        Value  = $entry
+                        Action = $(if ($Remove.IsPresent) { 'Removed' } else { 'Added' })
+                    }) | Out-Null
+            }
+            catch {
+                Write-NCMessage "Unable to update allowed sender '$entry' on '$Identity'. $($_.Exception.Message)" -Level ERROR
+            }
+        }
+
+        foreach ($entry in $allowedDomainsQueue) {
+            $actionText = if ($Remove.IsPresent) { "remove allowed domain '$entry'" } else { "add allowed domain '$entry'" }
+            if (-not $PSCmdlet.ShouldProcess($Identity, $actionText)) {
+                continue
+            }
+
+            try {
+                if ($Remove.IsPresent) {
+                    Set-HostedContentFilterPolicy -Identity $Identity -AllowedSenderDomains @{ remove = $entry } -ErrorAction Stop | Out-Null
+                }
+                else {
+                    Set-HostedContentFilterPolicy -Identity $Identity -AllowedSenderDomains @{ add = $entry } -ErrorAction Stop | Out-Null
+                }
+
+                foreach ($rule in $transportRules) {
+                    $currentDomains = @($rule.ExceptIfSenderDomainIs)
+                    $updatedDomains = & $updateDomainList $currentDomains $entry -Remove:$Remove.IsPresent
+                    $ruleActionText = if ($Remove.IsPresent) {
+                        "remove sender-domain exception '$entry' from transport rule '$($rule.Name)'"
+                    }
+                    else {
+                        "add sender-domain exception '$entry' to transport rule '$($rule.Name)'"
+                    }
+
+                    if (-not $PSCmdlet.ShouldProcess($rule.Name, $ruleActionText)) {
+                        continue
+                    }
+
+                    try {
+                        if ($updatedDomains.Count -gt 0) {
+                            Set-TransportRule -Identity $rule.Identity -ExceptIfSenderDomainIs $updatedDomains -ErrorAction Stop | Out-Null
+                        }
+                        else {
+                            Set-TransportRule -Identity $rule.Identity -ExceptIfSenderDomainIs $null -ErrorAction Stop | Out-Null
+                        }
+                    }
+                    catch {
+                        Write-NCMessage "Unable to update transport rule '$($rule.Name)' for domain '$entry'. $($_.Exception.Message)" -Level WARNING
+                    }
+                }
+
+                $changes.Add([pscustomobject]@{
+                        Scope  = 'AllowedSenderDomains'
+                        Value  = $entry
+                        Action = $(if ($Remove.IsPresent) { 'Removed' } else { 'Added' })
+                    }) | Out-Null
+            }
+            catch {
+                Write-NCMessage "Unable to update allowed sender domain '$entry' on '$Identity'. $($_.Exception.Message)" -Level ERROR
+            }
+        }
+
+        try {
+            $updatedPolicy = Get-HostedContentFilterPolicy -Identity $Identity -ErrorAction Stop
+        }
+        catch {
+            Write-NCMessage "Policy '$Identity' was updated, but the refreshed policy could not be read back. $($_.Exception.Message)" -Level WARNING
+            $updatedPolicy = $policy
+        }
+
+        $summary = [pscustomobject]@{
+            Identity             = $updatedPolicy.Identity
+            DisplayName           = $updatedPolicy.Name
+            AllowedSenders        = @(Get-NCContentFilterPolicyValues -PolicyObject $updatedPolicy -PropertyName 'AllowedSenders' -PreferredValueProperty 'Sender')
+            AllowedSenderDomains  = @(Get-NCContentFilterPolicyValues -PolicyObject $updatedPolicy -PropertyName 'AllowedSenderDomains' -PreferredValueProperty 'Domain')
+            BlockedSenders        = @(Get-NCContentFilterPolicyValues -PolicyObject $updatedPolicy -PropertyName 'BlockedSenders' -PreferredValueProperty 'Sender')
+            BlockedSenderDomains  = @(Get-NCContentFilterPolicyValues -PolicyObject $updatedPolicy -PropertyName 'BlockedSenderDomains' -PreferredValueProperty 'Domain')
+            AllowedSendersGroup   = $AllowedSendersGroup
+            TransportRuleNames    = @($transportRules | Select-Object -ExpandProperty Name)
+            Changes               = @($changes)
+        }
+
+        if ($changes.Count -gt 0) {
+            Write-NCMessage ("Updated content filter policy '{0}' with {1} change(s)." -f $Identity, $changes.Count) -Level SUCCESS
+        }
+        else {
+            Write-NCMessage "No policy changes were applied." -Level INFO
+        }
+
+        return $summary
+    }
+
+    end {
+        Restore-ProgressAndInfoPreferences
     }
 }
 
@@ -348,7 +821,7 @@ function Revoke-UserSessions {
 
             foreach ($user in $queue) {
                 $counter++
-                $Percentage = [Math]::Round(($counter / [Math]::Max($queue.Count, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
                 Write-Progress -Activity "Revoking sessions" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
 
                 if ($exclusions.Contains($user.UserPrincipalName)) {
@@ -387,3 +860,6 @@ function Revoke-UserSessions {
         }
     }
 }
+
+
+

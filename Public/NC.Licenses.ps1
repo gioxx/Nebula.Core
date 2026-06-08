@@ -496,6 +496,14 @@ function Export-MsolAccountSku {
         Force a fresh download of the cached license catalog before processing.
     .PARAMETER ShowErrorDetails
         Include exception details in error messages.
+    .PARAMETER BatchSize
+        Number of processed users before flushing partial CSV output.
+    .PARAMETER Resume
+        Resume from the latest matching CSV in the target folder or from -CsvPath.
+    .PARAMETER CsvPath
+        Explicit CSV file to resume. When omitted, the most recent matching CSV in the target folder is used.
+    .PARAMETER MaxConsecutiveErrors
+        Stop after this many consecutive user-level failures.
     .EXAMPLE
         Export-MsolAccountSku
     .EXAMPLE
@@ -511,7 +519,13 @@ function Export-MsolAccountSku {
         [string]$CSVFolder,
         [string]$Domain,
         [string[]]$License,
-        [switch]$ForceLicenseCatalogRefresh
+        [switch]$ForceLicenseCatalogRefresh,
+        [ValidateRange(1, 500)]
+        [int]$BatchSize = 50,
+        [switch]$Resume,
+        [string]$CsvPath,
+        [ValidateRange(1, 100)]
+        [int]$MaxConsecutiveErrors = 5
     )
 
     Set-ProgressAndInfoPreferences
@@ -556,8 +570,11 @@ function Export-MsolAccountSku {
                 return
             }
         }
-        $arr_MsolAccountSku = @()
-        $ProcessedCount = 0
+        $reportBuffer = [System.Collections.Generic.List[object]]::new()
+        $processedCount = 0
+        $processedSinceFlush = 0
+        $consecutiveErrors = 0
+        $aborted = $false
         $maxAttempts = 3
         $resolvedViaCustom = @{}
         $unknownSkuTracker = @{}
@@ -719,13 +736,54 @@ function Export-MsolAccountSku {
             return ($domains | Select-Object -Unique) -contains $normalizedDomain
         }
 
-        $CSV = New-File("$($folder)\$((Get-Date -Format $($NCVars.DateTimeString_CSV)).ToString())_M365-User-License-Report.csv")
-        if (Test-Path $CSV) {
-            $ProcessedUsers = Import-CSV $CSV | Select-Object -ExpandProperty UserPrincipalName
+        $defaultCsvPath = New-File("$($folder)\$((Get-Date -Format $($NCVars.DateTimeString_CSV)).ToString())_M365-User-License-Report.csv")
+        $CSV = $defaultCsvPath
+        $processedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+        if ($Resume) {
+            $resumePath = $null
+            if (-not [string]::IsNullOrWhiteSpace($CsvPath)) {
+                $resumePath = $CsvPath
+            }
+            else {
+                $existingCsv = Get-ChildItem -LiteralPath $folder -File -Filter "*_M365-User-License-Report.csv" |
+                    Sort-Object LastWriteTime -Descending |
+                    Select-Object -First 1
+                if ($existingCsv) {
+                    $resumePath = $existingCsv.FullName
+                }
+            }
+
+            if ($resumePath) {
+                $CSV = $resumePath
+                if (Test-Path -LiteralPath $CSV) {
+                    try {
+                        foreach ($row in (Import-CSV -LiteralPath $CSV -Delimiter $NCVars.CSV_DefaultLimiter -ErrorAction Stop)) {
+                            $identity = if ($row.UserPrincipalName) { [string]$row.UserPrincipalName } else { $null }
+                            if ($identity) {
+                                $null = $processedUsers.Add($identity.Trim())
+                            }
+                        }
+                        Write-NCMessage ("Resuming user license export from {0}; {1} user(s) already recorded." -f $CSV, $processedUsers.Count) -Level INFO
+                    }
+                    catch {
+                        Write-NCMessage ("Unable to read existing CSV '{0}' for resume. {1}" -f $CSV, $_.Exception.Message) -Level WARNING
+                        $processedUsers.Clear()
+                        $CSV = $defaultCsvPath
+                    }
+                }
+                else {
+                    Write-NCMessage ("Resume requested for '{0}', but the file does not exist. Starting a new report at that path." -f $CSV) -Level INFO
+                }
+            }
+            else {
+                $CSV = $defaultCsvPath
+                Write-NCMessage ("Resume requested, but no existing CSV was found. Starting a new report at {0}." -f $CSV) -Level INFO
+            }
         }
-        else {
-            $ProcessedUsers = @()
-        }
+
+        Write-NCMessage ("User license export will flush every {0} user(s). Resume: {1}. Stop after {2} consecutive error(s)." -f $BatchSize, $Resume.IsPresent, $MaxConsecutiveErrors) -Level INFO
+        Write-NCMessage "Saving report to $CSV" -Level DEBUG
 
         try {
             $Users = Get-MgUser -Filter 'assignedLicenses/$count ne 0' -ConsistencyLevel eventual -CountVariable totalUsers -All -Property Id,DisplayName,UserPrincipalName,Mail,ProxyAddresses -ErrorAction Stop
@@ -745,14 +803,16 @@ function Export-MsolAccountSku {
         }
 
         foreach ($User in $Users) {
-            $ProcessedCount++
-            $Percentage = [Math]::Round(($ProcessedCount / [Math]::Max($totalUsers, 1)) * 100, 2)
-            Write-Progress -Activity "Processing $($User.DisplayName)" -Status "$ProcessedCount out of $totalUsers - $Percentage%" -PercentComplete $Percentage
+            $processedCount++
+            $Percentage = Get-NCProgressPercent -Current $processedCount -Total $totalUsers
+            Write-Progress -Activity "Processing $($User.DisplayName)" -Status "$processedCount out of $totalUsers - $Percentage%" -PercentComplete $Percentage
 
-            if ($ProcessedUsers -contains $User.UserPrincipalName) {
+            if ($processedUsers.Contains($User.UserPrincipalName)) {
                 Write-NCMessage "Skipping $($User.UserPrincipalName), already processed." -Level WARNING
                 continue
             }
+
+            $processedSinceFlush++
 
             try {
                 $GraphLicense = Invoke-NCRetry -Action {
@@ -766,6 +826,22 @@ function Export-MsolAccountSku {
         }
             catch {
                 Write-NCMessage "Failed to retrieve licenses for $($User.UserPrincipalName) after $maxAttempts attempts. Skipping." -Level ERROR
+                $consecutiveErrors++
+                if ($MaxConsecutiveErrors -gt 0 -and $consecutiveErrors -ge $MaxConsecutiveErrors) {
+                    if ($reportBuffer.Count -gt 0) {
+                        if ((Test-Path -LiteralPath $CSV) -and ((Get-Item -LiteralPath $CSV).Length -gt 0)) {
+                            $reportBuffer | Export-CSV -LiteralPath $CSV -NoTypeInformation -Delimiter $($NCVars.CSV_DefaultLimiter) -Encoding $($NCVars.CSV_Encoding) -Append
+                        }
+                        else {
+                            $reportBuffer | Export-CSV -LiteralPath $CSV -NoTypeInformation -Delimiter $($NCVars.CSV_DefaultLimiter) -Encoding $($NCVars.CSV_Encoding)
+                        }
+                        $reportBuffer.Clear()
+                    }
+
+                    Write-NCMessage ("Stopping export after {0} consecutive user error(s). Partial report kept at {1}." -f $consecutiveErrors, $CSV) -Level ERROR
+                    $aborted = $true
+                    break
+                }
                 continue
             }
 
@@ -833,25 +909,52 @@ function Export-MsolAccountSku {
 
             if ($License -and $userMatchedLicenseNames.Count -gt 0) {
                 $matchedNames = $userMatchedLicenseNames | Select-Object -Unique
-                $userRows = $userRows | ForEach-Object {
+                $userRows = @($userRows | ForEach-Object {
                     $_ | Add-Member -NotePropertyName MatchedLicenses -NotePropertyValue ($matchedNames -join ', ') -PassThru
-                }
+                })
             }
             elseif ($License) {
-                $userRows = $userRows | ForEach-Object {
+                $userRows = @($userRows | ForEach-Object {
                     $_ | Add-Member -NotePropertyName MatchedLicenses -NotePropertyValue $null -PassThru
-                }
+                })
             }
 
-            $arr_MsolAccountSku += $userRows
+            if ($userRows.Count -gt 0) {
+                $reportBuffer.AddRange($userRows)
+                $null = $processedUsers.Add($User.UserPrincipalName)
+            }
 
-            if ($ProcessedCount % 50 -eq 0) {
-                Write-Verbose "Processed $ProcessedCount out of $totalUsers, saving partial results ..."
-                $arr_MsolAccountSku | Export-CSV $CSV -NoTypeInformation -Delimiter $($NCVars.CSV_DefaultLimiter) -Encoding $($NCVars.CSV_Encoding) -Append
+            $consecutiveErrors = 0
+
+            if ($processedSinceFlush -ge $BatchSize -and $reportBuffer.Count -gt 0) {
+                if ((Test-Path -LiteralPath $CSV) -and ((Get-Item -LiteralPath $CSV).Length -gt 0)) {
+                    $reportBuffer | Export-CSV -LiteralPath $CSV -NoTypeInformation -Delimiter $($NCVars.CSV_DefaultLimiter) -Encoding $($NCVars.CSV_Encoding) -Append
+                }
+                else {
+                    $reportBuffer | Export-CSV -LiteralPath $CSV -NoTypeInformation -Delimiter $($NCVars.CSV_DefaultLimiter) -Encoding $($NCVars.CSV_Encoding)
+                }
+                Write-Verbose "Processed $processedCount out of $totalUsers, saving partial results ..."
+                $reportBuffer.Clear()
+                $processedSinceFlush = 0
             }
         }
 
-        $arr_MsolAccountSku | Export-CSV $CSV -NoTypeInformation -Delimiter $($NCVars.CSV_DefaultLimiter) -Encoding $($NCVars.CSV_Encoding)
+        if ($reportBuffer.Count -gt 0) {
+            if ((Test-Path -LiteralPath $CSV) -and ((Get-Item -LiteralPath $CSV).Length -gt 0)) {
+                $reportBuffer | Export-CSV -LiteralPath $CSV -NoTypeInformation -Delimiter $($NCVars.CSV_DefaultLimiter) -Encoding $($NCVars.CSV_Encoding) -Append
+            }
+            else {
+                $reportBuffer | Export-CSV -LiteralPath $CSV -NoTypeInformation -Delimiter $($NCVars.CSV_DefaultLimiter) -Encoding $($NCVars.CSV_Encoding)
+            }
+            $reportBuffer.Clear()
+        }
+
+        if ($aborted) {
+            Write-NCMessage "User license report export stopped early. Partial data kept at $CSV." -Level ERROR
+        }
+        else {
+            Write-NCMessage "User license report exported to $CSV." -Level SUCCESS
+        }
 
         if ($resolvedViaCustom.Count -gt 0) {
             Write-NCMessage "Licenses not found, but resolved via custom catalog:" -Level WARNING
@@ -888,6 +991,9 @@ function Get-TenantMsolAccountSku {
         Force a fresh download of the cached license catalog before processing.
     .PARAMETER Filter
         Filters the output to licenses whose name or SkuPartNumber contains the provided text.
+    .PARAMETER Domain
+        Optional domain filter for sample users. When specified, sample users are limited to
+        accounts whose Mail, UserPrincipalName, or ProxyAddresses belong to the selected domain.
     .PARAMETER SampleUsers
         Returns up to N sample users for each matching SKU (requires -Filter).
     .PARAMETER IncludeSampleUsers
@@ -906,11 +1012,14 @@ function Get-TenantMsolAccountSku {
         Get-TenantMsolAccountSku -Filter "E3" -SampleUsers 5
     .EXAMPLE
         Get-TenantMsolAccountSku -Filter "E3" -IncludeSampleUsers
+    .EXAMPLE
+        Get-TenantMsolAccountSku -Filter "E3" -SampleUsers 5 -Domain "contoso.com"
     #>
     [CmdletBinding()]
     param(
         [switch]$ForceLicenseCatalogRefresh,
         [string]$Filter,
+        [string]$Domain,
         [int]$SampleUsers = 5,
         [switch]$IncludeSampleUsers,
         [switch]$AsTable,
@@ -964,6 +1073,65 @@ function Get-TenantMsolAccountSku {
         if ($useSampleUsers -and -not $Filter) {
             Write-NCMessage "SampleUsers requires -Filter to limit the query scope. Example: Get-TenantMsolAccountSku -Filter \"E3\" -SampleUsers 5" -Level ERROR
             return
+        }
+
+        $normalizedDomain = $null
+        if (-not [string]::IsNullOrWhiteSpace($Domain)) {
+            $normalizedDomain = $Domain.Trim().ToLowerInvariant().TrimStart('@')
+            if ([string]::IsNullOrWhiteSpace($normalizedDomain)) {
+                Write-NCMessage "Domain filter cannot be empty." -Level ERROR
+                return
+            }
+            else {
+                Write-Verbose "Filtering sample users for domain '$normalizedDomain'."
+            }
+        }
+
+        $getAddressDomain = {
+            param($value)
+
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                return $null
+            }
+
+            $address = [string]$value
+            if ($address.Contains(':')) {
+                $address = $address.Substring($address.IndexOf(':') + 1)
+            }
+
+            $atIndex = $address.LastIndexOf('@')
+            if ($atIndex -lt 0 -or $atIndex -eq ($address.Length - 1)) {
+                return $null
+            }
+
+            return $address.Substring($atIndex + 1).Trim().ToLowerInvariant()
+        }
+
+        $matchesDomain = {
+            param($user)
+
+            if (-not $normalizedDomain) {
+                return $true
+            }
+
+            $domains = @()
+            foreach ($candidate in @($user.Mail, $user.UserPrincipalName)) {
+                $candidateDomain = & $getAddressDomain $candidate
+                if ($candidateDomain) {
+                    $domains += $candidateDomain
+                }
+            }
+
+            if ($user.PSObject.Properties['ProxyAddresses'] -and $user.ProxyAddresses) {
+                foreach ($proxy in $user.ProxyAddresses) {
+                    $proxyDomain = & $getAddressDomain $proxy
+                    if ($proxyDomain) {
+                        $domains += $proxyDomain
+                    }
+                }
+            }
+
+            return ($domains | Select-Object -Unique) -contains $normalizedDomain
         }
 
         $results = foreach ($sku in $skus) {
@@ -1022,11 +1190,23 @@ function Get-TenantMsolAccountSku {
                 $sampleUserList = @()
                 try {
                     $examples = Invoke-NCRetry -Action {
-                        Get-MgUser -Filter "assignedLicenses/any(x:x/skuId eq $($sku.SkuId))" `
-                            -Top $sampleUserLimit `
-                            -ConsistencyLevel eventual `
-                            -Property Id,UserPrincipalName,DisplayName `
-                            -ErrorAction Stop
+                        if ($normalizedDomain) {
+                            Get-MgUser -Filter "assignedLicenses/any(x:x/skuId eq $($sku.SkuId))" `
+                                -All `
+                                -ConsistencyLevel eventual `
+                                -Property Id, UserPrincipalName, DisplayName, Mail, ProxyAddresses `
+                                -ErrorAction Stop |
+                            Where-Object { & $matchesDomain $_ } |
+                            Select-Object -First $sampleUserLimit
+                        }
+                        else {
+                            Get-MgUser -Filter "assignedLicenses/any(x:x/skuId eq $($sku.SkuId))" `
+                                -Top $sampleUserLimit `
+                                -ConsistencyLevel eventual `
+                                -Property Id, UserPrincipalName, DisplayName `
+                                -ErrorAction Stop |
+                            Select-Object -First $sampleUserLimit
+                        }
                     } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve sample users for $($sku.SkuPartNumber)" -OnError {
                         param($attempt, $max, $err)
                         $currentAttempt = if ($attempt) { $attempt } else { '?' }
@@ -1053,18 +1233,18 @@ function Get-TenantMsolAccountSku {
                 }
 
                 [pscustomobject][ordered]@{
-                    Name          = $sku.Name
-                    SkuPartNumber = $sku.SkuPartNumber
-                    SkuId         = $sku.SkuId
-                    Total         = $sku.Total
-                    TotalCount    = $sku.TotalCount
-                    Consumed      = $sku.Consumed
-                    Available     = $sku.Available
-                    Enabled       = $sku.Enabled
-                    Suspended     = $sku.Suspended
-                    Warning       = $sku.Warning
-                    Source        = $sku.Source
-                    SampleUsers   = $sampleUserList
+                    Name            = $sku.Name
+                    SkuPartNumber   = $sku.SkuPartNumber
+                    SkuId           = $sku.SkuId
+                    Total           = $sku.Total
+                    TotalCount      = $sku.TotalCount
+                    Consumed        = $sku.Consumed
+                    Available       = $sku.Available
+                    Enabled         = $sku.Enabled
+                    Suspended       = $sku.Suspended
+                    Warning         = $sku.Warning
+                    Source          = $sku.Source
+                    SampleUsers     = $sampleUserList
                     SampleUsersText = if ($sampleUserList.Count -gt 0) { $sampleUserList -join [Environment]::NewLine } else { $null }
                 }
             }
@@ -1094,9 +1274,9 @@ function Get-TenantMsolAccountSku {
         }
         elseif ($AsTable.IsPresent) {
             $limited = $sorted | Select-Object @{
-                    Name       = 'Name'
-                    Expression = { Format-OutputString -Value $_.Name -MaxLength $NCVars.MaxFieldLength }
-                }, SkuPartNumber, Total, Consumed, Available
+                Name       = 'Name'
+                Expression = { Format-OutputString -Value $_.Name -MaxLength $NCVars.MaxFieldLength }
+            }, SkuPartNumber, Total, Consumed, Available
             Show-Table -Rows $limited -AsTable
 
             if ($useSampleUsers) {
@@ -1350,6 +1530,114 @@ function Get-UserMsolAccountSku {
     }
 }
 
+function Get-UserUsageLocation {
+    <#
+    .SYNOPSIS
+        Reads the current usage location for one or more users.
+    .DESCRIPTION
+        Resolves users from pipeline or explicit input and returns their current UsageLocation
+        from Microsoft Graph. The output also includes the configured NebulaCore default so the
+        current value can be compared against the environment setting at a glance.
+    .PARAMETER UserPrincipalName
+        User principal name, object ID, or short identifier. Accepts pipeline input.
+    .EXAMPLE
+        Get-UserUsageLocation -UserPrincipalName user@contoso.com
+    .EXAMPLE
+        'user1@contoso.com','user2@contoso.com' | Get-UserUsageLocation
+    .EXAMPLE
+        Get-MgUser -Filter "endsWith(userPrincipalName,'@contoso.com')" | Get-UserUsageLocation
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('User', 'UPN', 'Identity')]
+        [string[]]$UserPrincipalName
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $targets = [System.Collections.Generic.List[string]]::new()
+    }
+
+    process {
+        foreach ($entry in $UserPrincipalName) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                $targets.Add($entry.Trim()) | Out-Null
+            }
+        }
+    }
+
+    end {
+        try {
+            if ($targets.Count -eq 0) {
+                Write-NCMessage "No user principal names provided." -Level WARNING
+                return
+            }
+
+            $GraphConnection = Test-MgGraphConnection -Scopes @('User.Read.All') -EnsureExchangeOnline:$false
+            if (-not $GraphConnection) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+                return
+            }
+
+            $defaultUsageLocation = if (($NCVars -is [System.Collections.IDictionary]) -and $NCVars.Contains('UsageLocation') -and $NCVars.UsageLocation) {
+                [string]$NCVars.UsageLocation
+            }
+            else {
+                'US'
+            }
+
+            $normalizeUsageLocation = {
+                param($value)
+                if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+                return $value.Trim().ToUpperInvariant()
+            }
+
+            $queue = [System.Collections.Generic.List[string]]::new()
+            $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($entry in $targets) {
+                if ($dedup.Add($entry)) {
+                    $queue.Add($entry) | Out-Null
+                }
+            }
+
+            $counter = 0
+            foreach ($upn in $queue) {
+                $counter++
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
+                Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
+
+                $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $upn -PreferGraphIdentity
+                if (-not $resolvedPrincipal) {
+                    Write-NCMessage "Unable to resolve user recipient for $upn" -Level ERROR
+                    continue
+                }
+
+                try {
+                    $user = Get-MgUser -UserId $resolvedPrincipal -Property Id, UserPrincipalName, DisplayName, UsageLocation -ErrorAction Stop
+                }
+                catch {
+                    Write-NCMessage "Unable to retrieve user '$upn'. $($_.Exception.Message)" -Level ERROR
+                    continue
+                }
+
+                [pscustomobject]@{
+                    UserPrincipalName              = $user.UserPrincipalName
+                    DisplayName                    = $user.DisplayName
+                    UsageLocation                  = $user.UsageLocation
+                    ConfiguredDefaultUsageLocation = $defaultUsageLocation
+                    MatchesConfiguredDefault       = (& $normalizeUsageLocation $user.UsageLocation) -eq (& $normalizeUsageLocation $defaultUsageLocation)
+                }
+            }
+        }
+        finally {
+            Write-Progress -Activity "Processing users" -Completed
+            Restore-ProgressAndInfoPreferences
+        }
+    }
+}
+
 function Move-UserMsolAccountSku {
     <#
     .SYNOPSIS
@@ -1400,8 +1688,8 @@ function Move-UserMsolAccountSku {
         }
 
         try {
-            $sourceUser = Get-MgUser -UserId $resolvedSource -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
-            $destinationUser = Get-MgUser -UserId $resolvedDestination -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
+            $sourceUser = Get-MgUser -UserId $resolvedSource -Property Id, UserPrincipalName, DisplayName, UsageLocation -ErrorAction Stop
+            $destinationUser = Get-MgUser -UserId $resolvedDestination -Property Id, UserPrincipalName, DisplayName, UsageLocation -ErrorAction Stop
         }
         catch {
             Write-NCMessage "Unable to retrieve users: $($_.Exception.Message)" -Level ERROR
@@ -1820,6 +2108,180 @@ function Remove-UserMsolAccountSku {
     }
 }
 
+function Set-UserUsageLocation {
+    <#
+    .SYNOPSIS
+        Updates usage location for one or more users.
+    .DESCRIPTION
+        Resolves users from pipeline or explicit input, connects to Microsoft Graph, and updates
+        their UsageLocation value. If -UsageLocation is omitted, Nebula.Core uses the configured
+        UsageLocation default (or US when no override exists).
+    .PARAMETER UserPrincipalName
+        User principal name, object ID, or short identifier. Accepts pipeline input.
+    .PARAMETER UsageLocation
+        Two-letter country code to set. When omitted, the configured default is used.
+    .PARAMETER PassThru
+        Emit the processed users as objects.
+    .EXAMPLE
+        Set-UserUsageLocation -UserPrincipalName user@contoso.com -UsageLocation IT
+    .EXAMPLE
+        'user1@contoso.com','user2@contoso.com' | Set-UserUsageLocation -UsageLocation DE
+    .EXAMPLE
+        Get-MgUser -Filter "endsWith(userPrincipalName,'@contoso.com')" | Set-UserUsageLocation -UsageLocation FR
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('User', 'UPN', 'Identity')]
+        [string[]]$UserPrincipalName,
+        [string]$UsageLocation,
+        [switch]$PassThru
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $targets = [System.Collections.Generic.List[string]]::new()
+    }
+
+    process {
+        foreach ($entry in $UserPrincipalName) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                $targets.Add($entry.Trim()) | Out-Null
+            }
+        }
+    }
+
+    end {
+        try {
+            if ($targets.Count -eq 0) {
+                Write-NCMessage "No user principal names provided." -Level WARNING
+                return
+            }
+
+            $GraphConnection = Test-MgGraphConnection -Scopes @('Directory.ReadWrite.All') -EnsureExchangeOnline:$false
+            if (-not $GraphConnection) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+                return
+            }
+
+            $defaultUsageLocation = if (-not [string]::IsNullOrWhiteSpace($UsageLocation)) {
+                $UsageLocation.Trim()
+            }
+            elseif (($NCVars -is [System.Collections.IDictionary]) -and $NCVars.Contains('UsageLocation') -and $NCVars.UsageLocation) {
+                [string]$NCVars.UsageLocation
+            }
+            else {
+                'US'
+            }
+
+            $targetUsage = $defaultUsageLocation.Trim().ToUpperInvariant()
+            if ($targetUsage.Length -ne 2) {
+                Write-NCMessage "UsageLocation must be a two-letter country code." -Level ERROR
+                return
+            }
+
+            $normalizeUsageLocation = {
+                param($value)
+                if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+                return $value.Trim().ToUpperInvariant()
+            }
+
+            $queue = [System.Collections.Generic.List[string]]::new()
+            $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($entry in $targets) {
+                if ($dedup.Add($entry)) {
+                    $queue.Add($entry) | Out-Null
+                }
+            }
+
+            $results = [System.Collections.Generic.List[object]]::new()
+            $updatedCount = 0
+            $skippedCount = 0
+            $counter = 0
+
+            foreach ($upn in $queue) {
+                $counter++
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
+                Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
+
+                $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $upn -PreferGraphIdentity
+                if (-not $resolvedPrincipal) {
+                    Write-NCMessage "Unable to resolve user recipient for $upn" -Level ERROR
+                    continue
+                }
+
+                try {
+                    $user = Get-MgUser -UserId $resolvedPrincipal -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
+                }
+                catch {
+                    Write-NCMessage "Unable to retrieve user '$upn'. $($_.Exception.Message)" -Level ERROR
+                    continue
+                }
+
+                $currentUsage = & $normalizeUsageLocation $user.UsageLocation
+                if ($currentUsage -eq $targetUsage) {
+                    $skippedCount++
+                    if ($PassThru.IsPresent) {
+                        $results.Add([pscustomobject]@{
+                                UserPrincipalName     = $user.UserPrincipalName
+                                DisplayName           = $user.DisplayName
+                                PreviousUsageLocation = $user.UsageLocation
+                                UsageLocation         = $user.UsageLocation
+                                Action                = 'Skipped'
+                            }) | Out-Null
+                    }
+                    Write-Verbose "Usage location already set to $targetUsage for $($user.UserPrincipalName)."
+                    continue
+                }
+
+                if (-not $PSCmdlet.ShouldProcess($user.UserPrincipalName, "Set usage location to $targetUsage")) {
+                    continue
+                }
+
+                try {
+                    Update-MgUser -UserId $user.Id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
+                    $updatedCount++
+                    if ($PassThru.IsPresent) {
+                        $results.Add([pscustomobject]@{
+                                UserPrincipalName     = $user.UserPrincipalName
+                                DisplayName           = $user.DisplayName
+                                PreviousUsageLocation = $user.UsageLocation
+                                UsageLocation         = $targetUsage
+                                Action                = 'Updated'
+                            }) | Out-Null
+                    }
+                    Write-Verbose "Usage location set to $targetUsage for $($user.UserPrincipalName)."
+                }
+                catch {
+                    Write-NCMessage "Unable to set usage location ($targetUsage) for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
+                }
+            }
+
+            if ($PassThru.IsPresent) {
+                $results
+            }
+            elseif ($updatedCount -gt 0) {
+                $summary = "Usage location updated for {0} user(s) to {1}." -f $updatedCount, $targetUsage
+                if ($skippedCount -gt 0) {
+                    $summary = $summary + (" {0} user(s) already had that value." -f $skippedCount)
+                }
+                Write-NCMessage $summary -Level SUCCESS
+            }
+            elseif ($skippedCount -gt 0) {
+                Write-NCMessage ("Usage location already set to {0} for {1} user(s)." -f $targetUsage, $skippedCount) -Level INFO
+            }
+            else {
+                Write-NCMessage "No usage location changes were applied." -Level WARNING
+            }
+        }
+        finally {
+            Write-Progress -Activity "Processing users" -Completed
+            Restore-ProgressAndInfoPreferences
+        }
+    }
+}
+
 function Update-LicenseCatalog {
     <#
     .SYNOPSIS
@@ -1860,3 +2322,5 @@ function Update-LicenseCatalog {
         throw
     }
 }
+
+

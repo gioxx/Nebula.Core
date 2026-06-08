@@ -19,6 +19,12 @@ function Export-MboxStatistics {
         Round quota values up to the nearest integer GB.
     .PARAMETER BatchSize
         Number of processed mailboxes before flushing partial CSV output (defaults to 25).
+    .PARAMETER Resume
+        Resume from the most recent existing mailbox statistics CSV in the target folder.
+    .PARAMETER CsvPath
+        Optional CSV file to resume. When omitted, the most recent matching CSV in the target folder is used.
+    .PARAMETER MaxConsecutiveErrors
+        Stop the export after this many mailbox-level failures in a row.
     #>
     [CmdletBinding()]
     param(
@@ -26,9 +32,13 @@ function Export-MboxStatistics {
         [Alias('User', 'Identity')]
         [string]$UserPrincipalName,
         [string]$CsvFolder,
+        [string]$CsvPath,
         [switch]$Round,
         [ValidateRange(1, 500)]
-        [int]$BatchSize = 25
+        [int]$BatchSize = 25,
+        [switch]$Resume,
+        [ValidateRange(1, 100)]
+        [int]$MaxConsecutiveErrors = 5
     )
 
     Set-ProgressAndInfoPreferences
@@ -63,32 +73,142 @@ function Export-MboxStatistics {
         $folder = if ($CsvFolder) { Test-Folder $CsvFolder } else { Test-Folder $null }
         $statsBuffer = New-Object System.Collections.Generic.List[object]
         $processedCount = 0
-        $totalMailboxes = $mailboxes.Count
         $writeToCsv = $exportAll
         $csvPath = $null
         $csvInitialized = $false
+        $failedInARow = 0
+        $aborted = $false
+        $normalizeIdentity = {
+            param([object]$Value)
+
+            if ($null -eq $Value) {
+                return $null
+            }
+
+            $text = [string]$Value
+            if ([string]::IsNullOrWhiteSpace($text)) {
+                return $null
+            }
+
+            return $text.Trim().ToLowerInvariant()
+        }
+        $processedIdentities = [System.Collections.Generic.HashSet[string]]::new()
+        $pendingMailboxes = [System.Collections.Generic.List[object]]::new()
 
         if ($writeToCsv) {
-            $csvPath = New-File("$($folder)\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-MailboxStatistics.csv")
+            $defaultCsvPath = New-File("$($folder)\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-MailboxStatistics.csv")
+            if ($Resume) {
+                $resumePath = $null
+                if (-not [string]::IsNullOrWhiteSpace($CsvPath)) {
+                    $resumePath = $CsvPath
+                }
+                else {
+                    $existingCsv = Get-ChildItem -LiteralPath $folder -File -Filter "*_M365-MailboxStatistics.csv" |
+                        Sort-Object LastWriteTime -Descending |
+                        Select-Object -First 1
+
+                    if ($existingCsv) {
+                        $resumePath = $existingCsv.FullName
+                    }
+                }
+
+                if ($resumePath) {
+                    $csvPath = $resumePath
+                    if (Test-Path -LiteralPath $csvPath) {
+                        $csvInitialized = ((Get-Item -LiteralPath $csvPath).Length -gt 0)
+
+                        try {
+                            foreach ($row in (Import-CSV -LiteralPath $csvPath -Delimiter $NCVars.CSV_DefaultLimiter -ErrorAction Stop)) {
+                                $identity = & $normalizeIdentity $row.UserPrincipalName
+                                if (-not $identity) {
+                                    $identity = & $normalizeIdentity $row.PrimarySmtpAddress
+                                }
+                                if (-not $identity) {
+                                    $identity = & $normalizeIdentity $row.UserName
+                                }
+
+                                if ($identity) {
+                                    $null = $processedIdentities.Add($identity)
+                                }
+                            }
+                        }
+                        catch {
+                            Write-NCMessage ("Unable to read existing CSV '{0}' for resume. {1}" -f $csvPath, $_.Exception.Message) -Level WARNING
+                            $processedIdentities.Clear()
+                            $csvPath = $defaultCsvPath
+                            $csvInitialized = $false
+                        }
+
+                        if ($csvPath -ne $defaultCsvPath) {
+                            Write-NCMessage ("Resuming mailbox statistics from {0}; {1} mailbox(es) already recorded." -f $csvPath, $processedIdentities.Count) -Level INFO
+                        }
+                    }
+                    else {
+                        Write-NCMessage ("Resume requested for '{0}', but the file does not exist. Starting a new report at that path." -f $csvPath) -Level INFO
+                    }
+                }
+                else {
+                    $csvPath = $defaultCsvPath
+                    Write-NCMessage ("Resume requested, but no existing CSV was found. Starting a new report at {0}." -f $csvPath) -Level INFO
+                }
+            }
+            else {
+                $csvPath = $defaultCsvPath
+            }
+
+            Write-NCMessage ("Mailbox statistics export will flush every {0} mailbox(es). Resume: {1}. Stop after {2} consecutive error(s)." -f $BatchSize, $Resume.IsPresent, $MaxConsecutiveErrors) -Level INFO
             Write-NCMessage "Saving report to $csvPath" -Level DEBUG
+
+            foreach ($mailbox in $mailboxes) {
+                $identity = & $normalizeIdentity $mailbox.UserPrincipalName
+                if (-not $identity) {
+                    $identity = & $normalizeIdentity $mailbox.PrimarySmtpAddress
+                }
+
+                if ($Resume -and $identity -and $processedIdentities.Contains($identity)) {
+                    continue
+                }
+
+                $null = $pendingMailboxes.Add($mailbox)
+            }
+        }
+        else {
+            foreach ($mailbox in $mailboxes) {
+                $null = $pendingMailboxes.Add($mailbox)
+            }
         }
 
-        foreach ($mailbox in $mailboxes) {
+        $totalMailboxes = $pendingMailboxes.Count
+
+        if ($writeToCsv -and $Resume -and $csvPath -and $processedIdentities.Count -gt 0 -and $totalMailboxes -eq 0) {
+            Write-NCMessage "All matching mailboxes are already present in the CSV. Nothing to do." -Level WARNING
+            return
+        }
+
+        foreach ($mailbox in $pendingMailboxes) {
             $processedCount++
-            $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
+            $Percentage = Get-NCProgressPercent -Current $processedCount -Total $totalMailboxes
             Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes - $Percentage%" -PercentComplete $Percentage
 
+            $mailboxHadError = $false
             $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
+            if ($null -eq $stats) {
+                $mailboxHadError = $true
+            }
             $mailboxSizeGb = if ($stats) { Convert-MbxSizeToGB -SizeObject $stats.TotalItemSize } else { "Error" }
 
             $hasArchive = ($mailbox.ArchiveStatus -eq 'Active') -or ($mailbox.ArchiveGuid -and $mailbox.ArchiveGuid -ne [guid]::Empty)
             $archiveSize = $null
             if ($hasArchive) {
                 $archiveStats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName -Archive
+                if ($null -eq $archiveStats) {
+                    $mailboxHadError = $true
+                }
                 $archiveSize = if ($archiveStats) { Convert-MbxSizeToGB -SizeObject $archiveStats.TotalItemSize } else { "Error" }
             }
 
             $record = [pscustomobject][ordered]@{
+                UserPrincipalName           = $mailbox.UserPrincipalName
                 UserName                     = $mailbox.DisplayName
                 ServerName                   = $mailbox.ServerName
                 Database                     = $mailbox.Database
@@ -114,6 +234,30 @@ function Export-MboxStatistics {
 
             $statsBuffer.Add($record) | Out-Null
 
+            if ($mailboxHadError) {
+                $failedInARow++
+            }
+            else {
+                $failedInARow = 0
+            }
+
+            if ($MaxConsecutiveErrors -gt 0 -and $failedInARow -ge $MaxConsecutiveErrors) {
+                if ($writeToCsv -and $statsBuffer.Count -gt 0) {
+                    if ($csvInitialized) {
+                        $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter) -Append
+                    }
+                    else {
+                        $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter)
+                        $csvInitialized = $true
+                    }
+                    $statsBuffer.Clear()
+                }
+
+                Write-NCMessage ("Stopping export after {0} consecutive mailbox error(s). Partial report kept at {1}." -f $failedInARow, $csvPath) -Level ERROR
+                $aborted = $true
+                break
+            }
+
             if ($writeToCsv -and (($processedCount % $BatchSize) -eq 0)) {
                 if ($csvInitialized) {
                     $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter) -Append
@@ -127,7 +271,7 @@ function Export-MboxStatistics {
             }
         }
 
-        if ($writeToCsv) {
+        if ($writeToCsv -and -not $aborted) {
             if ($statsBuffer.Count -gt 0) {
                 if ($csvInitialized) {
                     $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter) -Append
@@ -138,6 +282,16 @@ function Export-MboxStatistics {
             }
 
             Write-NCMessage "Mailbox statistics exported to $csvPath." -Level SUCCESS
+        }
+        elseif ($aborted) {
+            if ($statsBuffer.Count -gt 0) {
+                if ($csvInitialized) {
+                    $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter) -Append
+                }
+                else {
+                    $statsBuffer | Export-CSV -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $($NCVars.CSV_DefaultLimiter)
+                }
+            }
         }
         else {
             $statsBuffer
@@ -163,6 +317,14 @@ function Export-MboxDeletedItemSize {
         Destination folder for the CSV file when exporting the report.
     .PARAMETER Csv
         When present, export the report to CSV. Defaults to on.
+    .PARAMETER BatchSize
+        Number of processed mailboxes before flushing partial CSV output.
+    .PARAMETER Resume
+        Resume from the latest matching CSV in the target folder or from -CsvPath.
+    .PARAMETER CsvPath
+        Explicit CSV file to resume. When omitted, the most recent matching CSV in the target folder is used.
+    .PARAMETER MaxConsecutiveErrors
+        Stop after this many consecutive mailbox-level failures.
     #>
     [CmdletBinding()]
     param(
@@ -170,13 +332,22 @@ function Export-MboxDeletedItemSize {
         [Alias('User', 'Identity', 'Mailbox', 'SourceMailbox')]
         [string[]]$UserPrincipalName,
         [string]$CsvFolder,
-        [bool]$Csv = $true
+        [bool]$Csv = $true,
+        [ValidateRange(1, 500)]
+        [int]$BatchSize = 25,
+        [switch]$Resume,
+        [string]$CsvPath,
+        [ValidateRange(1, 100)]
+        [int]$MaxConsecutiveErrors = 5
     )
 
     begin {
         Set-ProgressAndInfoPreferences
         $requestedMailboxes = [System.Collections.Generic.List[string]]::new()
         $report = [System.Collections.Generic.List[object]]::new()
+        $processedSinceFlush = 0
+        $consecutiveErrors = 0
+        $aborted = $false
     }
 
     process {
@@ -216,32 +387,128 @@ function Export-MboxDeletedItemSize {
                 return
             }
 
+            $folder = if ($CsvFolder) { Test-Folder $CsvFolder } else { Test-Folder $null }
+            $defaultCsvPath = New-File "$folder\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-DeletedItemSize.csv"
+            $csv = $defaultCsvPath
+            $processedMailboxes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+            if ($Resume) {
+                $resumePath = $null
+                if (-not [string]::IsNullOrWhiteSpace($CsvPath)) {
+                    $resumePath = $CsvPath
+                }
+                else {
+                    $existingCsv = Get-ChildItem -LiteralPath $folder -File -Filter "*_M365-DeletedItemSize.csv" |
+                        Sort-Object LastWriteTime -Descending |
+                        Select-Object -First 1
+                    if ($existingCsv) {
+                        $resumePath = $existingCsv.FullName
+                    }
+                }
+
+                if ($resumePath) {
+                    $csv = $resumePath
+                    if (Test-Path -LiteralPath $csv) {
+                        try {
+                            foreach ($row in (Import-CSV -LiteralPath $csv -Delimiter $NCVars.CSV_DefaultLimiter -ErrorAction Stop)) {
+                                if ($row.UserPrincipalName) {
+                                    $null = $processedMailboxes.Add(([string]$row.UserPrincipalName).Trim())
+                                }
+                            }
+                            Write-NCMessage ("Resuming deleted item export from {0}; {1} mailbox(es) already recorded." -f $csv, $processedMailboxes.Count) -Level INFO
+                        }
+                        catch {
+                            Write-NCMessage ("Unable to read existing CSV '{0}' for resume. {1}" -f $csv, $_.Exception.Message) -Level WARNING
+                            $processedMailboxes.Clear()
+                            $csv = $defaultCsvPath
+                        }
+                    }
+                    else {
+                        Write-NCMessage ("Resume requested for '{0}', but the file does not exist. Starting a new report at that path." -f $csv) -Level INFO
+                    }
+                }
+                else {
+                    Write-NCMessage ("Resume requested, but no existing CSV was found. Starting a new report at {0}." -f $csv) -Level INFO
+                }
+            }
+
+            Write-NCMessage ("Deleted item export will flush every {0} mailbox(es). Resume: {1}. Stop after {2} consecutive error(s)." -f $BatchSize, $Resume.IsPresent, $MaxConsecutiveErrors) -Level INFO
+            Write-NCMessage "Saving report to $csv" -Level DEBUG
+
             $totalMailboxes = $mailboxes.Count
             $processedCount = 0
 
             foreach ($mailbox in $mailboxes) {
                 $processedCount++
-                $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $processedCount -Total $totalMailboxes
                 Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes - $Percentage%" -PercentComplete $Percentage
+
+                if ($Resume -and $mailbox.UserPrincipalName -and $processedMailboxes.Contains($mailbox.UserPrincipalName)) {
+                    Write-Verbose "Skipping $($mailbox.UserPrincipalName), already processed."
+                    continue
+                }
 
                 $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
                 if (-not $stats) {
+                    $consecutiveErrors++
+                    if ($MaxConsecutiveErrors -gt 0 -and $consecutiveErrors -ge $MaxConsecutiveErrors) {
+                        if ($report.Count -gt 0) {
+                            if ((Test-Path -LiteralPath $csv) -and ((Get-Item -LiteralPath $csv).Length -gt 0)) {
+                                $report | Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter -Append
+                            }
+                            else {
+                                $report | Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+                            }
+                            $report.Clear()
+                        }
+
+                        Write-NCMessage ("Stopping export after {0} consecutive mailbox error(s). Partial report kept at {1}." -f $consecutiveErrors, $csv) -Level ERROR
+                        $aborted = $true
+                        break
+                    }
                     continue
                 }
 
                 $report.Add([pscustomobject][ordered]@{
+                        UserPrincipalName      = $mailbox.UserPrincipalName
                         DisplayName            = $mailbox.DisplayName
                         PrimarySmtpAddress     = $mailbox.PrimarySmtpAddress
                         TotalDeletedItemSizeGB = Convert-MbxSizeToGB -SizeObject $stats.TotalDeletedItemSize
                     }) | Out-Null
+
+                $null = $processedMailboxes.Add($mailbox.UserPrincipalName)
+                $consecutiveErrors = 0
+                $processedSinceFlush++
+
+                if ($processedSinceFlush -ge $BatchSize -and $report.Count -gt 0) {
+                    if ((Test-Path -LiteralPath $csv) -and ((Get-Item -LiteralPath $csv).Length -gt 0)) {
+                        $report | Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter -Append
+                    }
+                    else {
+                        $report | Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+                    }
+                    Write-Verbose "Processed $processedCount / $totalMailboxes mailboxes, flushed batch to CSV."
+                    $report.Clear()
+                    $processedSinceFlush = 0
+                }
+            }
+
+            if ($Csv -and $report.Count -gt 0) {
+                if ((Test-Path -LiteralPath $csv) -and ((Get-Item -LiteralPath $csv).Length -gt 0)) {
+                    $report | Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter -Append
+                }
+                else {
+                    $report | Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
+                }
             }
 
             if ($Csv) {
-                $folder = if ($CsvFolder) { Test-Folder $CsvFolder } else { Test-Folder $null }
-                $csvPath = New-File "$folder\$((Get-Date -Format $NCVars.DateTimeString_CSV))_M365-DeletedItemSize.csv"
-                $report | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter
-                Write-NCMessage "Deleted item size report exported to $csvPath." -Level SUCCESS
-                $csvPath
+                if ($aborted) {
+                    Write-NCMessage "Deleted item size report export stopped early. Partial data kept at $csv." -Level ERROR
+                }
+                else {
+                    Write-NCMessage "Deleted item size report exported to $csv." -Level SUCCESS
+                }
             }
             else {
                 $report
@@ -265,7 +532,7 @@ function Get-MboxStatistics {
     .PARAMETER UserPrincipalName
         Optional single mailbox identity. When omitted, returns all mailboxes.
     .PARAMETER IncludeArchive
-        When present, includes archive size and archive usage percentage (if available).
+        When present, includes archive size, archive quota, and archive usage percentage (if available).
     .PARAMETER IncludeMessageActivity
         When present, includes latest message trace info and oldest mailbox item metadata
         (LastReceived, LastSent, OldestItemReceivedDate, OldestItemFolderPath).
@@ -332,7 +599,7 @@ function Get-MboxStatistics {
 
             foreach ($mailbox in $mailboxes) {
                 $processedCount++
-                $Percentage = [Math]::Round(($processedCount / [Math]::Max($totalMailboxes, 1)) * 100, 2)
+                $Percentage = Get-NCProgressPercent -Current $processedCount -Total $totalMailboxes
                 Write-Progress -Activity "Processing $($mailbox.DisplayName)" -Status "$processedCount of $totalMailboxes - $Percentage%" -PercentComplete $Percentage
 
                 $stats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName
@@ -372,12 +639,13 @@ function Get-MboxStatistics {
 
                 $archiveSize = $null
                 $archivePercentUsed = $null
+                $archiveQuota = $null
                 $hasArchive = ($mailbox.ArchiveStatus -eq 'Active') -or ($mailbox.ArchiveGuid -and $mailbox.ArchiveGuid -ne [guid]::Empty)
                 if ($IncludeArchive -and $hasArchive) {
+                    $archiveQuota = Resolve-MbxQuotaValue -RawValue $mailbox.ArchiveQuota -Round:$Round
                     $archiveStats = Get-MailboxStatisticsSafe -Identity $mailbox.UserPrincipalName -Archive
                     if ($archiveStats) {
                         $archiveSize = Convert-MbxSizeToGB -SizeObject $archiveStats.TotalItemSize
-                        $archiveQuota = Resolve-MbxQuotaValue -RawValue $mailbox.ArchiveQuota -Round:$Round
                         if ($archiveQuota -is [double] -and $archiveQuota -gt 0) {
                             $archivePercentUsed = [Math]::Round(($archiveSize / $archiveQuota) * 100, 2)
                         }
@@ -435,6 +703,7 @@ function Get-MboxStatistics {
 
                 if ($IncludeArchive) {
                     $record.ArchiveSizeGB = $archiveSize
+                    $record.ArchiveQuotaGB = $archiveQuota
                     $record.ArchivePercentUsed = $archivePercentUsed
                 }
 
@@ -448,3 +717,5 @@ function Get-MboxStatistics {
         }
     }
 }
+
+

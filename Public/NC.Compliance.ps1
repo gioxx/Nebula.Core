@@ -3,6 +3,506 @@ using namespace System.Management.Automation
 
 # Nebula.Core: Compliance helpers ===================================================================================================================
 
+function Get-MboxMrmCleanup {
+    <#
+    .SYNOPSIS
+        Lists retention tags, policies, and mailbox assignments for MRM cleanup workflows.
+    .DESCRIPTION
+        Connects to Exchange Online and inventories retention policies. The output defaults to the temporary
+        Nebula.Core cleanup objects created by Set-MboxMrmCleanup. Use -AllTenantObjects to list every
+        retention policy in the tenant. Each row includes the linked tag details inline and the mailbox count,
+        so you can spot temporary cleanup objects and decide what can be removed safely.
+    .PARAMETER Identity
+        Retention policy name or linked tag name to inspect. When omitted, temporary cleanup policies are returned.
+    .PARAMETER AllTenantObjects
+        Include every retention policy in the tenant instead of limiting the inventory to temporary Nebula.Core
+        cleanup objects.
+    .PARAMETER Detailed
+        Include the linked tag names and mailbox lists in the output.
+    .EXAMPLE
+        Get-MboxMrmCleanup
+    .EXAMPLE
+        Get-MboxMrmCleanup -Detailed
+    .EXAMPLE
+        Get-MboxMrmCleanup -AllTenantObjects
+    .EXAMPLE
+        Get-MboxMrmCleanup -Identity OneShot_PreCutoff_20250101
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('Name', 'TagName', 'PolicyName')]
+        [string[]]$Identity,
+        [switch]$AllTenantObjects,
+        [switch]$Detailed
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $targets = [System.Collections.Generic.List[string]]::new()
+    }
+
+    process {
+        foreach ($entry in $Identity) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                $targets.Add($entry.Trim()) | Out-Null
+            }
+        }
+    }
+
+    end {
+        try {
+            if (-not (Test-EOLConnection)) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
+                return
+            }
+
+            $tagObjects = @()
+            $policyObjects = @()
+
+            try {
+                $tagObjects = @(Get-RetentionPolicyTag -ErrorAction Stop)
+            }
+            catch {
+                Write-NCMessage "Unable to retrieve retention policy tags. $($_.Exception.Message)" -Level ERROR
+                return
+            }
+
+            try {
+                $policyObjects = @(Get-RetentionPolicy -ErrorAction Stop)
+            }
+            catch {
+                Write-NCMessage "Unable to retrieve retention policies. $($_.Exception.Message)" -Level ERROR
+                return
+            }
+
+            $mailboxObjects = @()
+            try {
+                if (Get-Command -Name Get-EXOMailbox -ErrorAction SilentlyContinue) {
+                    $mailboxObjects = @(Get-EXOMailbox -ResultSize Unlimited -Properties RetentionPolicy, RecipientTypeDetails, DisplayName, PrimarySmtpAddress -ErrorAction Stop)
+                }
+                else {
+                    $mailboxObjects = @(Get-Mailbox -ResultSize Unlimited -WarningAction SilentlyContinue -ErrorAction Stop)
+                }
+            }
+            catch {
+                Write-NCMessage "Unable to retrieve mailbox assignments for retention policies. $($_.Exception.Message)" -Level WARNING
+                $mailboxObjects = @()
+            }
+
+            $mailboxesByPolicy = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[object]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($mailbox in $mailboxObjects) {
+                $retentionPolicyName = [string]$mailbox.RetentionPolicy
+                if ([string]::IsNullOrWhiteSpace($retentionPolicyName)) {
+                    continue
+                }
+
+                if (-not $mailboxesByPolicy.ContainsKey($retentionPolicyName)) {
+                    $mailboxesByPolicy[$retentionPolicyName] = [System.Collections.Generic.List[object]]::new()
+                }
+
+                $mailboxesByPolicy[$retentionPolicyName].Add($mailbox) | Out-Null
+            }
+
+            $policyLinksByTag = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[string]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($policy in $policyObjects) {
+                foreach ($tagLink in @($policy.RetentionPolicyTagLinks)) {
+                    if ([string]::IsNullOrWhiteSpace([string]$tagLink)) {
+                        continue
+                    }
+
+                    $tagName = [string]$tagLink
+                    if (-not $policyLinksByTag.ContainsKey($tagName)) {
+                        $policyLinksByTag[$tagName] = [System.Collections.Generic.List[string]]::new()
+                    }
+
+                    $policyLinksByTag[$tagName].Add([string]$policy.Name) | Out-Null
+                }
+            }
+
+            $policyResults = foreach ($policy in $policyObjects) {
+                if ($null -eq $policy) {
+                    continue
+                }
+
+                $policyName = [string]$policy.Name
+                $linkedTags = @($policy.RetentionPolicyTagLinks | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                $primaryTagName = $linkedTags | Select-Object -First 1
+                $primaryTag = $null
+                if (-not [string]::IsNullOrWhiteSpace($primaryTagName)) {
+                    $primaryTag = $tagObjects | Where-Object { [string]$_.Name -ieq $primaryTagName } | Select-Object -First 1
+                }
+
+                if (-not $AllTenantObjects.IsPresent -and $policyName -notlike 'OneShot_PreCutoff_*') {
+                    continue
+                }
+
+                if ($targets.Count -gt 0) {
+                    $matchesPolicy = $targets -contains $policyName
+                    $matchesLinkedTag = $false
+                    foreach ($tagName in $linkedTags) {
+                        if ($targets -contains $tagName) {
+                            $matchesLinkedTag = $true
+                            break
+                        }
+                    }
+
+                    if (-not $matchesPolicy -and -not $matchesLinkedTag) {
+                        continue
+                    }
+                }
+
+                $assignedMailboxes = @()
+                if ($mailboxesByPolicy.ContainsKey($policyName)) {
+                    $assignedMailboxes = @($mailboxesByPolicy[$policyName] | ForEach-Object {
+                            if ($_.PrimarySmtpAddress) { [string]$_.PrimarySmtpAddress }
+                            elseif ($_.UserPrincipalName) { [string]$_.UserPrincipalName }
+                            else { [string]$_.Identity }
+                        } | Sort-Object -Unique)
+                }
+
+                $ageLimitDays = if ($primaryTag -and ($primaryTag.AgeLimitForRetention -is [TimeSpan])) {
+                    [int][math]::Floor($primaryTag.AgeLimitForRetention.TotalDays)
+                }
+                elseif ($primaryTag) {
+                    $primaryTag.AgeLimitForRetention
+                }
+                else {
+                    $null
+                }
+
+                $row = [ordered]@{
+                    ObjectType           = 'Policy'
+                    Identity             = $policy.Identity
+                    Name                 = $policyName
+                    LinkedTagName        = $primaryTagName
+                    TagType              = $primaryTag.Type
+                    RetentionEnabled     = $primaryTag.RetentionEnabled
+                    AgeLimitForRetentionDays = $ageLimitDays
+                    RetentionAction      = $primaryTag.RetentionAction
+                    ConditionSummary     = if ($primaryTag) {
+                        "Type={0}; AgeLimit={1}d; Action={2}; Enabled={3}" -f $primaryTag.Type, $ageLimitDays, $primaryTag.RetentionAction, $primaryTag.RetentionEnabled
+                    }
+                    elseif ($linkedTags.Count -gt 0) {
+                        "TagLinks={0}" -f ($linkedTags -join ', ')
+                    }
+                    else {
+                        'TagLinks='
+                    }
+                    LinkedTagCount       = $linkedTags.Count
+                    TagLinkCount         = $linkedTags.Count
+                    AssignedMailboxCount = $assignedMailboxes.Count
+                }
+
+                if ($Detailed.IsPresent) {
+                    $row.LinkedTagNames = $linkedTags
+                    $row.AssignedMailboxes = $assignedMailboxes
+                }
+
+                [pscustomobject]$row
+            }
+
+            $results = @($policyResults)
+            if ($results.Count -eq 0) {
+                Write-NCMessage "No retention policies matched the requested filters." -Level WARNING
+                return
+            }
+
+            $results | Sort-Object ObjectType, Name
+        }
+        finally {
+            Restore-ProgressAndInfoPreferences
+        }
+    }
+}
+
+function Remove-MboxMrmCleanup {
+    <#
+    .SYNOPSIS
+        Removes temporary MRM cleanup tags and policies.
+    .DESCRIPTION
+        Finds the specified retention policy tag and policy, moves the affected mailboxes back to the
+        default retention policy or to a specific standard policy, and then removes the temporary policy
+        and tag when they are no longer needed.
+    .PARAMETER Identity
+        Retention tag or retention policy name to remove. When omitted, all Nebula.Core temporary cleanup
+        objects (names starting with OneShot_PreCutoff_) are targeted.
+    .PARAMETER Mailbox
+        Optional mailbox list to restore before deleting the cleanup policy. When omitted, every mailbox
+        currently using the target policy is restored.
+    .PARAMETER RestorePolicyName
+        Explicit standard retention policy to assign back to the mailbox or mailboxes.
+    .PARAMETER ClearRetentionPolicy
+        Clear the mailbox retention policy instead of assigning a specific standard policy.
+    .PARAMETER RemoveTag
+        Remove the retention policy tag after the policy has been cleaned up.
+    .PARAMETER RemovePolicy
+        Remove the retention policy after the target mailboxes have been restored.
+    .EXAMPLE
+        Remove-MboxMrmCleanup -Identity OneShot_PreCutoff_20250101
+    .EXAMPLE
+        Remove-MboxMrmCleanup -PolicyName OneShot_PreCutoff_20250101 -RestorePolicyName 'Default MRM Policy'
+    .EXAMPLE
+        'user@contoso.com' | Remove-MboxMrmCleanup -Identity OneShot_PreCutoff_20250101 -ClearRetentionPolicy
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('Name', 'TagName', 'PolicyName')]
+        [string[]]$Identity,
+        [Parameter(ValueFromPipelineByPropertyName = $true)]
+        [Alias('UserPrincipalName', 'IdentityMailbox', 'SourceMailbox')]
+        [string[]]$Mailbox,
+        [string]$RestorePolicyName,
+        [switch]$ClearRetentionPolicy,
+        [bool]$RemoveTag = $true,
+        [bool]$RemovePolicy = $true
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $targets = [System.Collections.Generic.List[string]]::new()
+        $mailboxTargets = [System.Collections.Generic.List[string]]::new()
+    }
+
+    process {
+        foreach ($entry in $Identity) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                $targets.Add($entry.Trim()) | Out-Null
+            }
+        }
+
+        foreach ($entry in $Mailbox) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) {
+                $mailboxTargets.Add($entry.Trim()) | Out-Null
+            }
+        }
+    }
+
+    end {
+        try {
+            if (-not (Test-EOLConnection)) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
+                return
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($RestorePolicyName) -and $ClearRetentionPolicy.IsPresent) {
+                Write-NCMessage "Use either -RestorePolicyName or -ClearRetentionPolicy, not both." -Level ERROR
+                return
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($RestorePolicyName)) {
+                $restorePolicyCheck = Get-RetentionPolicy -Identity $RestorePolicyName -ErrorAction SilentlyContinue
+                if (-not $restorePolicyCheck) {
+                    Write-NCMessage "Restore policy '$RestorePolicyName' was not found. Use the exact retention policy name." -Level ERROR
+                    return
+                }
+            }
+
+            $tagObjects = @()
+            $policyObjects = @()
+            try {
+                $tagObjects = @(Get-RetentionPolicyTag -ErrorAction Stop)
+            }
+            catch {
+                Write-NCMessage "Unable to retrieve retention policy tags. $($_.Exception.Message)" -Level ERROR
+                return
+            }
+
+            try {
+                $policyObjects = @(Get-RetentionPolicy -ErrorAction Stop)
+            }
+            catch {
+                Write-NCMessage "Unable to retrieve retention policies. $($_.Exception.Message)" -Level ERROR
+                return
+            }
+
+            $targetTagNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $targetPolicyNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+            if ($targets.Count -eq 0) {
+                foreach ($tag in $tagObjects) {
+                    if ($tag.Name -like 'OneShot_PreCutoff_*') {
+                        $null = $targetTagNames.Add([string]$tag.Name)
+                    }
+                }
+
+                foreach ($policy in $policyObjects) {
+                    if ($policy.Name -like 'OneShot_PreCutoff_*') {
+                        $null = $targetPolicyNames.Add([string]$policy.Name)
+                    }
+                }
+            }
+            else {
+                foreach ($entry in $targets) {
+                    $tagMatch = $tagObjects | Where-Object { [string]$_.Name -ieq $entry } | Select-Object -First 1
+                    if ($tagMatch) {
+                        $null = $targetTagNames.Add([string]$tagMatch.Name)
+                    }
+
+                    $policyMatch = $policyObjects | Where-Object { [string]$_.Name -ieq $entry } | Select-Object -First 1
+                    if ($policyMatch) {
+                        $null = $targetPolicyNames.Add([string]$policyMatch.Name)
+                    }
+                }
+            }
+
+            if ($targetTagNames.Count -eq 0 -and $targetPolicyNames.Count -eq 0) {
+                Write-NCMessage "No matching retention tags or policies were found." -Level WARNING
+                return
+            }
+
+            $mailboxesToRestore = [System.Collections.Generic.List[object]]::new()
+            $policyNamesToRemove = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($policyName in $targetPolicyNames) {
+                $policy = $policyObjects | Where-Object { [string]$_.Name -ieq $policyName } | Select-Object -First 1
+                if ($policy) {
+                    $null = $policyNamesToRemove.Add([string]$policy.Name)
+                }
+            }
+
+            foreach ($tagName in $targetTagNames) {
+                $tagLinkedPolicies = @($policyObjects | Where-Object { @($_.RetentionPolicyTagLinks) -contains $tagName })
+                foreach ($policy in $tagLinkedPolicies) {
+                    $null = $policyNamesToRemove.Add([string]$policy.Name)
+                }
+            }
+
+            if ($mailboxTargets.Count -gt 0) {
+                foreach ($mailboxIdentity in $mailboxTargets) {
+                    try {
+                        $mailboxObj = Get-Mailbox -Identity $mailboxIdentity -ErrorAction Stop
+                        $mailboxesToRestore.Add($mailboxObj) | Out-Null
+                    }
+                    catch {
+                        Write-NCMessage "Unable to read mailbox '$mailboxIdentity'. $($_.Exception.Message)" -Level ERROR
+                    }
+                }
+            }
+            else {
+                try {
+                    $allMailboxes = @(Get-Mailbox -ResultSize Unlimited -WarningAction SilentlyContinue -ErrorAction Stop)
+                }
+                catch {
+                    Write-NCMessage "Unable to enumerate mailboxes using retention policies. $($_.Exception.Message)" -Level WARNING
+                    $allMailboxes = @()
+                }
+
+                foreach ($mailbox in $allMailboxes) {
+                    if ($policyNamesToRemove.Contains([string]$mailbox.RetentionPolicy)) {
+                        $mailboxesToRestore.Add($mailbox) | Out-Null
+                    }
+                }
+            }
+
+            $restoreTargets = [System.Collections.Generic.List[object]]::new()
+            foreach ($mailbox in $mailboxesToRestore) {
+                if ($null -eq $mailbox) {
+                    continue
+                }
+
+                $mailboxName = if ($mailbox.PrimarySmtpAddress) { [string]$mailbox.PrimarySmtpAddress } else { [string]$mailbox.Identity }
+                $targetPolicy = if (-not [string]::IsNullOrWhiteSpace($RestorePolicyName)) { $RestorePolicyName } else { $null }
+                $action = if ($null -eq $targetPolicy) { 'Clear retention policy back to default' } else { "Restore retention policy '$targetPolicy'" }
+
+                if (-not $PSCmdlet.ShouldProcess($mailboxName, $action)) {
+                    continue
+                }
+
+                try {
+                    Set-Mailbox -Identity $mailbox.Identity -RetentionPolicy $targetPolicy -ErrorAction Stop | Out-Null
+                    $restoreTargets.Add([pscustomobject]@{
+                            Mailbox        = $mailboxName
+                            PreviousPolicy = [string]$mailbox.RetentionPolicy
+                            NewPolicy      = $targetPolicy
+                            Action         = if ($null -eq $targetPolicy) { 'Cleared' } else { 'Restored' }
+                        }) | Out-Null
+                }
+                catch {
+                    Write-NCMessage "Unable to restore retention policy for '$mailboxName'. $($_.Exception.Message)" -Level ERROR
+                }
+            }
+
+            foreach ($policyName in $policyNamesToRemove) {
+                $policy = $policyObjects | Where-Object { [string]$_.Name -ieq $policyName } | Select-Object -First 1
+                if (-not $policy) {
+                    continue
+                }
+
+                $linkedTags = @($policy.RetentionPolicyTagLinks)
+                if ($linkedTags.Count -gt 1) {
+                    Write-NCMessage ("Policy '{0}' has multiple tag links. Review it manually before deletion." -f $policyName) -Level WARNING
+                    continue
+                }
+
+                if ($RemovePolicy -and $PSCmdlet.ShouldProcess($policyName, "Remove retention policy")) {
+                    try {
+                        Remove-RetentionPolicy -Identity $policyName -ErrorAction Stop
+                        Write-NCMessage "Retention policy '$policyName' removed." -Level SUCCESS
+                    }
+                    catch {
+                        Write-NCMessage "Unable to remove retention policy '$policyName'. $($_.Exception.Message)" -Level ERROR
+                    }
+                }
+            }
+
+            if ($RemoveTag) {
+                foreach ($tagName in $targetTagNames) {
+                    $tag = $tagObjects | Where-Object { [string]$_.Name -ieq $tagName } | Select-Object -First 1
+                    if (-not $tag) {
+                        continue
+                    }
+
+                    $linkedPolicies = @($policyObjects | Where-Object { @($_.RetentionPolicyTagLinks) -contains $tagName })
+                    if ($linkedPolicies.Count -gt 0) {
+                        foreach ($policy in $linkedPolicies) {
+                            if ($policyNamesToRemove.Contains([string]$policy.Name)) {
+                                continue
+                            }
+
+                            Write-NCMessage ("Tag '{0}' is still linked to policy '{1}'. Review that policy before deleting the tag." -f $tagName, $policy.Name) -Level WARNING
+                        }
+
+                        if (($linkedPolicies | Where-Object { -not $policyNamesToRemove.Contains([string]$_.Name) }).Count -gt 0) {
+                            continue
+                        }
+                    }
+
+                    if ($PSCmdlet.ShouldProcess($tagName, "Remove retention policy tag")) {
+                        try {
+                            Remove-RetentionPolicyTag -Identity $tagName -ErrorAction Stop
+                            Write-NCMessage "Retention policy tag '$tagName' removed." -Level SUCCESS
+                        }
+                        catch {
+                            Write-NCMessage "Unable to remove retention policy tag '$tagName'. $($_.Exception.Message)" -Level ERROR
+                        }
+                    }
+                }
+            }
+
+            if ($restoreTargets.Count -gt 0) {
+                $restoreCount = $restoreTargets.Count
+                Write-NCMessage ("Restored retention policy for {0} mailbox(es)." -f $restoreCount) -Level SUCCESS
+            }
+
+            if ($restoreTargets.Count -gt 0 -or $policyNamesToRemove.Count -gt 0 -or $targetTagNames.Count -gt 0) {
+                [pscustomobject]@{
+                    RestoredMailboxes = @($restoreTargets)
+                    RemovedPolicies   = @($policyNamesToRemove | Sort-Object)
+                    RemovedTags       = @($targetTagNames | Sort-Object)
+                    RestorePolicyName = $RestorePolicyName
+                    ClearedToDefault  = $ClearRetentionPolicy.IsPresent -or [string]::IsNullOrWhiteSpace($RestorePolicyName)
+                }
+            }
+        }
+        finally {
+            Restore-ProgressAndInfoPreferences
+        }
+    }
+}
+
 function Search-MboxCutoffWindow {
     <#
     .SYNOPSIS
@@ -361,6 +861,15 @@ function Set-MboxMrmCleanup {
         Write-NCMessage ("Tag name: {0}" -f $TagName) -Level INFO
         Write-NCMessage ("Policy name: {0}" -f $PolicyName) -Level INFO
 
+        $existingMailboxRetentionPolicy = $null
+        try {
+            $mailboxState = Get-Mailbox -Identity $Mailbox -ErrorAction Stop
+            $existingMailboxRetentionPolicy = [string]$mailboxState.RetentionPolicy
+        }
+        catch {
+            Write-NCMessage "Unable to read current retention policy for '$Mailbox'. Cleanup hints will assume the default policy." -Level WARNING
+        }
+
         try {
             $tag = Get-RetentionPolicyTag -Identity $TagName -ErrorAction SilentlyContinue
             if (-not $tag) {
@@ -434,6 +943,15 @@ function Set-MboxMrmCleanup {
             Write-NCMessage "Managed Folder Assistant not triggered. Use -RunAssistant to start it." -Level INFO
         }
 
+        $escapedPolicyName = $PolicyName -replace "'", "''"
+        $escapedTagName = $TagName -replace "'", "''"
+        $escapedExistingPolicy = if ([string]::IsNullOrWhiteSpace($existingMailboxRetentionPolicy)) {
+            $null
+        }
+        else {
+            $existingMailboxRetentionPolicy -replace "'", "''"
+        }
+
         [pscustomobject]@{
             Mailbox            = $Mailbox
             FixedCutoffDate    = $FixedCutoffDate
@@ -442,9 +960,15 @@ function Set-MboxMrmCleanup {
             RetentionAction    = $RetentionAction
             TagName            = $TagName
             PolicyName         = $PolicyName
-            RollbackCommand    = "Set-Mailbox -Identity '$Mailbox' -RetentionPolicy `$null"
-            RemovePolicyHint   = "Remove-RetentionPolicy -Identity '$PolicyName'"
-            RemoveTagHint      = "Remove-RetentionPolicyTag -Identity '$TagName'"
+            ExistingPolicy     = $existingMailboxRetentionPolicy
+            RollbackCommand    = if ([string]::IsNullOrWhiteSpace($existingMailboxRetentionPolicy)) {
+                "Set-Mailbox -Identity '$Mailbox' -RetentionPolicy `$null"
+            }
+            else {
+                "Set-Mailbox -Identity '$Mailbox' -RetentionPolicy '$escapedExistingPolicy'"
+            }
+            RemovePolicyHint   = "Remove-RetentionPolicy -Identity '$escapedPolicyName'"
+            RemoveTagHint      = "Remove-RetentionPolicyTag -Identity '$escapedTagName'"
         }
     }
 
@@ -452,4 +976,3 @@ function Set-MboxMrmCleanup {
         Restore-ProgressAndInfoPreferences
     }
 }
-
