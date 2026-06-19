@@ -27,15 +27,15 @@ function Add-EntraGroupDevice {
     #>
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
     param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0)]
         [Alias('Group', 'DisplayName')]
         [string]$GroupName,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0)]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Device', 'DeviceName', 'Id', 'DeviceId', 'Name')]
         [string[]]$DeviceIdentifier,
 
@@ -200,15 +200,15 @@ function Add-EntraGroupOwner {
     #>
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
     param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0)]
         [Alias('Group', 'DisplayName')]
         [string]$GroupName,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0)]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Owner', 'UPN', 'Mail', 'Id', 'UserId', 'Name')]
         [string[]]$OwnerIdentifier,
 
@@ -326,17 +326,17 @@ function Remove-EntraGroupOwner {
     #>
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
     param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0)]
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllByName')]
         [Alias('Group', 'DisplayName')]
         [string]$GroupName,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0)]
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Owner', 'UPN', 'Mail', 'Id', 'UserId', 'Name')]
         [string[]]$OwnerIdentifier,
 
@@ -1032,15 +1032,15 @@ function Add-EntraGroupUser {
     #>
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
     param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0)]
         [Alias('Group', 'DisplayName')]
         [string]$GroupName,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0)]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('User', 'UPN', 'Mail', 'Id', 'UserId')]
         [string[]]$UserIdentifier,
 
@@ -3190,8 +3190,19 @@ function Get-UserGroups {
                 }
             }
             default {
-                $recipient = Get-Mailbox -Identity $resolvedPrincipal -ErrorAction Stop # To get WindowsLiveID when UPN differs / when Get-Recipient can't provide it
-                $userId = if ($recipient.WindowsLiveID) { $recipient.WindowsLiveID } else { $resolvedPrincipal }
+                $userId = $null
+
+                try {
+                    $recipient = Get-Mailbox -Identity $resolvedPrincipal -ErrorAction Stop # Preserve the Exchange-first path for regular mailboxes.
+                    $userId = if ($recipient.WindowsLiveID) { $recipient.WindowsLiveID } elseif ($recipient.PrimarySmtpAddress) { $recipient.PrimarySmtpAddress } else { $resolvedPrincipal }
+                }
+                catch {
+                    $userId = Find-UserRecipient -UserPrincipalName $resolvedPrincipal -PreferGraphIdentity
+                    if (-not $userId) {
+                        Write-NCMessage "Unable to resolve user $resolvedPrincipal in Microsoft Graph: $($_.Exception.Message)" -Level ERROR
+                        return
+                    }
+                }
 
                 try {
                     $user = Get-MgUser -UserId $userId -ErrorAction Stop
@@ -3370,17 +3381,17 @@ function Remove-EntraGroupDevice {
     #>
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
     param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0)]
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllByName')]
         [Alias('Group', 'DisplayName')]
         [string]$GroupName,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0)]
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Device', 'DeviceName', 'Id', 'DeviceId', 'Name')]
         [string[]]$DeviceIdentifier,
 
@@ -3569,7 +3580,7 @@ function Remove-EntraGroupDevice {
                 catch {
                     if ($_.Exception.Message -match 'could not find member' -or $_.Exception.Message -match 'does not exist') {
                         $status = 'NotFound'
-                        Write-NCMessage "Device '$deviceLabel' is not a member of '$($resolvedGroup.DisplayName)'." -Level WARNING
+                        Write-NCMessage "Device '$deviceLabel' is not a member of '$($resolvedGroup.DisplayName)'" -Level WARNING
                     }
                     else {
                         $status = 'Failed'
@@ -3626,17 +3637,17 @@ function Remove-EntraGroupUser {
     #>
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
     param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0)]
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllByName')]
         [Alias('Group', 'DisplayName')]
         [string]$GroupName,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0)]
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('User', 'UPN', 'Mail', 'Id', 'UserId')]
         [string[]]$UserIdentifier,
 
@@ -3834,7 +3845,7 @@ function Remove-EntraGroupUser {
                 catch {
                     if ($_.Exception.Message -match 'could not find member' -or $_.Exception.Message -match 'does not exist') {
                         $status = 'NotFound'
-                        Write-NCMessage "User '$userLabel' is not a member of '$($resolvedGroup.DisplayName)'." -Level WARNING
+                        Write-NCMessage "User '$userLabel' is not a member of '$($resolvedGroup.DisplayName)'" -Level WARNING
                     }
                     else {
                         $status = 'Failed'
