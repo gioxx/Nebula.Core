@@ -394,9 +394,13 @@ function Edit-ContentFilterPolicy {
         [Parameter(Mandatory, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('SpamFilter', 'PolicyName')]
         [string]$Identity,
+        [Parameter(ValueFromPipelineByPropertyName = $true)]
         [string[]]$BlockedSender,
+        [Parameter(ValueFromPipelineByPropertyName = $true)]
         [string[]]$BlockedDomain,
+        [Parameter(ValueFromPipelineByPropertyName = $true)]
         [string[]]$AllowedSender,
+        [Parameter(ValueFromPipelineByPropertyName = $true)]
         [string[]]$AllowedDomain,
         [string]$AllowedSendersGroup,
         [string[]]$TransportRuleNames,
