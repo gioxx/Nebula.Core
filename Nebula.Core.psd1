@@ -80,6 +80,8 @@
         'Remove-MboxPermission',
         'Remove-UserMsolAccountSku',
         'Revoke-UserSessions',
+        'Remove-EntraUser',
+        'Search-EntraUser',
         'Search-EntraGroup',
         'Search-IntuneProfileLocation',
         'Search-MboxCutoffWindow',
@@ -141,6 +143,8 @@
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/icon.png'
         ReleaseNotes = @'
+- Improve: add `Remove-EntraUser` for direct UPN-based Entra user removal with Graph.
+- Improve: add `Search-EntraUser` to search users by display name, user principal name, or mail, including guest UPN fragments.
 - Fix: `Add/Remove-EntraGroupDevice`, `Add/Remove-EntraGroupOwner`, and `Add/Remove-EntraGroupUser` now support the positional form `<GroupName> <MemberIdentifier>` in addition to named parameters.
 - Fix: `Get-UserGroups` now falls back to Microsoft Graph resolution when Exchange mailbox lookup is not available, so Entra guest users can be queried without using the GUI.
 - Improve: `Get-UserGroups` keeps the existing Exchange-first behavior for regular users while handling guest identities more gracefully.
