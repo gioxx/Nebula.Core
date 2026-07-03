@@ -1366,7 +1366,7 @@ function Get-UserMsolAccountSku {
 
             $catalogSource = $licenseCatalog.Source
             $catalogUpdated = if ($licenseCatalog.LastCommitUtc) {
-                $licenseCatalog.LastCommitUtc.ToLocalTime().ToString($NCVars.DateTimeString_Full)
+                Format-NCDateTime -Value $licenseCatalog.LastCommitUtc -AsLocalTime
             }
             else { $null }
             $catalogInfo = if ($catalogSource -or $catalogUpdated) {
@@ -2298,7 +2298,7 @@ function Update-LicenseCatalog {
     try {
         $catalog = Get-LicenseCatalog -ForceRefresh -IncludeMetadata
         if ($catalog.LastCommitUtc) {
-            $timestamp = $catalog.LastCommitUtc.ToLocalTime().ToString($NCVars.DateTimeString_Full)
+            $timestamp = Format-NCDateTime -Value $catalog.LastCommitUtc -AsLocalTime
             Write-NCMessage "Primary license catalog refreshed. Last commit: $timestamp" -Level SUCCESS
         }
         else {
@@ -2307,7 +2307,7 @@ function Update-LicenseCatalog {
 
         if ($catalog.CustomLookup) {
             if ($catalog.CustomLastCommitUtc) {
-                $customStamp = $catalog.CustomLastCommitUtc.ToLocalTime().ToString($NCVars.DateTimeString_Full)
+                $customStamp = Format-NCDateTime -Value $catalog.CustomLastCommitUtc -AsLocalTime
                 Write-NCMessage "Custom license catalog refreshed. Last commit: $customStamp" -Level INFO
             }
             else {

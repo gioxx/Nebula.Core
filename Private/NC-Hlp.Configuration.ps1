@@ -74,12 +74,13 @@ if (-not $script:NCLicenseSources) {
 
 if (-not $script:NC_Defaults) {
     $script:NC_Defaults = [ordered]@{
-        CSV_DefaultLimiter      = ";"
+        CSV_DefaultLimiter      = ","
         CSV_Encoding            = 'UTF-8'
         CheckUpdatesOnConnect   = $true
         CheckUpdatesIntervalHours = 72
         DateTimeString_CSV      = 'yyyyMMdd'
-        DateTimeString_Full     = 'yyy-MM-dd HH:mm:ss'
+        DateTimeString_Full     = 'yyyy-MM-dd HH:mm:ss'
+        DateTimeTimeZone        = 'Eastern Standard Time'
         LicenseCacheDays        = 7
         LicenseCacheDirectory   = (Join-Path $env:USERPROFILE '.NebulaCore\Cache')
         MaxFieldLength          = 35

@@ -143,11 +143,16 @@
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/icon.png'
         ReleaseNotes = @'
-- Improve: add `Remove-EntraUser` for direct UPN-based Entra user removal with Graph.
-- Improve: add `Search-EntraUser` to search users by display name, user principal name, or mail, including guest UPN fragments.
+- Improve: change the default CSV delimiter to comma for a more standard US-friendly baseline.
 - Fix: `Add/Remove-EntraGroupDevice`, `Add/Remove-EntraGroupOwner`, and `Add/Remove-EntraGroupUser` now support the positional form `<GroupName> <MemberIdentifier>` in addition to named parameters.
 - Fix: `Get-UserGroups` now falls back to Microsoft Graph resolution when Exchange mailbox lookup is not available, so Entra guest users can be queried without using the GUI.
+- Improve: `Export-IntuneAppInventory` now supports `-LastInventory` and can suppress the redundant `Platform` column when `-FilterByPlatform` targets a single OS family.
 - Improve: `Get-UserGroups` keeps the existing Exchange-first behavior for regular users while handling guest identities more gracefully.
+- Improve: add `Remove-EntraUser` for direct UPN-based Entra user removal with Graph.
+- Improve: add `Search-EntraUser` to search users by display name, user principal name, or mail, including guest UPN fragments.
+- Improve: add culture-safe date parsing plus optional timezone-aware formatting through `DateTimeTimeZone`.
+- Improve: set the default user-facing date/time zone to `Eastern Standard Time` to align with the module's US baseline.
+- Improve: unify user-facing date formatting through Nebula's configured date/time patterns, including Intune inventory and license catalog outputs.
 '@
         }
     }

@@ -33,6 +33,147 @@ function Format-OutputString {
     return $Value.Substring(0, $length - 3) + '...'
 }
 
+function Format-NCDateTime {
+    <#
+    .SYNOPSIS
+        Formats a date value using Nebula.Core conventions.
+    .DESCRIPTION
+        Converts a date-like value to a string using the configured Nebula date format.
+        Returns the original value when it cannot be parsed as a date.
+    .PARAMETER Value
+        Date value to format.
+    .PARAMETER Format
+        Target string format. Defaults to the configured full date/time format.
+    .PARAMETER AsLocalTime
+        Convert the value to local time before formatting.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Value,
+        [string]$Format = $NCVars.DateTimeString_Full,
+        [switch]$AsLocalTime
+    )
+
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        return $null
+    }
+
+    $dateTimeOffset = $null
+    $parsed = $false
+
+    if ($Value -is [datetimeoffset]) {
+        $dateTimeOffset = [datetimeoffset]$Value
+        $parsed = $true
+    }
+    elseif ($Value -is [datetime]) {
+        $dateTimeOffset = [datetimeoffset]::new([datetime]$Value)
+        $parsed = $true
+    }
+    else {
+        $text = [string]$Value
+        $styles = [System.Globalization.DateTimeStyles]::AllowWhiteSpaces -bor [System.Globalization.DateTimeStyles]::RoundtripKind
+        $formats = @(
+            $Format,
+            'o',
+            'O',
+            's',
+            'yyyy-MM-ddTHH:mm:ssK',
+            'yyyy-MM-ddTHH:mm:ss.FFFFFFFK',
+            'yyyy-MM-dd HH:mm:ssK'
+        )
+
+        foreach ($fmt in $formats) {
+            if ([datetimeoffset]::TryParseExact($text, $fmt, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$dateTimeOffset)) {
+                $parsed = $true
+                break
+            }
+        }
+
+        if (-not $parsed) {
+            if ([datetimeoffset]::TryParse($text, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$dateTimeOffset)) {
+                $parsed = $true
+            }
+            elseif ([datetimeoffset]::TryParse($text, [System.Globalization.CultureInfo]::CurrentCulture, $styles, [ref]$dateTimeOffset)) {
+                $parsed = $true
+            }
+        }
+
+        if (-not $parsed) {
+            return [string]$Value
+        }
+    }
+
+    $targetTimeZoneId = $NCVars.DateTimeTimeZone
+    if (-not [string]::IsNullOrWhiteSpace([string]$targetTimeZoneId)) {
+        $timeZoneInfo = Get-NCDateTimeZoneInfo -TimeZoneId $targetTimeZoneId
+        if ($timeZoneInfo) {
+            $dateTimeOffset = [System.TimeZoneInfo]::ConvertTime($dateTimeOffset, $timeZoneInfo)
+        }
+    }
+    elseif ($AsLocalTime) {
+        $dateTimeOffset = $dateTimeOffset.ToLocalTime()
+    }
+
+    return $dateTimeOffset.ToString($Format)
+}
+
+function Get-NCDateTimeZoneInfo {
+    <#
+    .SYNOPSIS
+        Resolves a time zone ID for Nebula.Core date formatting.
+    .DESCRIPTION
+        Tries the provided ID first, then a small alias map for common cross-platform zone names.
+    .PARAMETER TimeZoneId
+        Time zone identifier from configuration.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$TimeZoneId
+    )
+
+    if ([string]::IsNullOrWhiteSpace($TimeZoneId)) {
+        return $null
+    }
+
+    if ($script:NCTimeZoneCache -and $script:NCTimeZoneCache.TimeZoneId -eq $TimeZoneId) {
+        return $script:NCTimeZoneCache.TimeZoneInfo
+    }
+
+    $candidateIds = [System.Collections.Generic.List[string]]::new()
+    $candidateIds.Add($TimeZoneId.Trim())
+
+    $aliasMap = @{
+        'Europe/Rome' = 'W. Europe Standard Time'
+    }
+
+    if ($aliasMap.ContainsKey($TimeZoneId.Trim())) {
+        $candidateIds.Add($aliasMap[$TimeZoneId.Trim()])
+    }
+
+    foreach ($candidateId in $candidateIds) {
+        try {
+            $timeZoneInfo = [System.TimeZoneInfo]::FindSystemTimeZoneById($candidateId)
+            $script:NCTimeZoneCache = [pscustomobject]@{
+                TimeZoneId   = $TimeZoneId
+                TimeZoneInfo = $timeZoneInfo
+            }
+            return $timeZoneInfo
+        }
+        catch {
+            continue
+        }
+    }
+
+    Write-NCMessage "Unable to resolve time zone '$TimeZoneId'. Falling back to local time." -Level WARNING
+    $script:NCTimeZoneCache = [pscustomobject]@{
+        TimeZoneId   = $TimeZoneId
+        TimeZoneInfo = $null
+    }
+    return $null
+}
+
 function Get-NormalizedText {
     <#
     .SYNOPSIS

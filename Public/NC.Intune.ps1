@@ -208,6 +208,8 @@ function Export-IntuneAppInventory {
         Optional app type filter when deployed app data is included.
     .PARAMETER FilterByPlatform
         Optional device platform filter.
+    .PARAMETER LastInventory
+        Include the managed device last Intune sync date in the report.
     .PARAMETER OnlySuccessfulInstalls
         When deployed app data is included, keep only successful installs.
     .PARAMETER IncludeDeployedApps
@@ -232,6 +234,8 @@ function Export-IntuneAppInventory {
         Export-IntuneAppInventory -ApplicationName "TeamViewer"
     .EXAMPLE
         Export-IntuneAppInventory -ApplicationName "Microsoft*" -IncludeDeployedApps -FilterByType Win32 -OutputCsvPath "apps.csv"
+    .EXAMPLE
+        Export-IntuneAppInventory -ApplicationName "*java*" -FilterByPlatform Windows -LastInventory
     #>
     [CmdletBinding()]
     param(
@@ -249,6 +253,7 @@ function Export-IntuneAppInventory {
 
         [switch]$OnlySuccessfulInstalls,
         [switch]$IncludeDeployedApps,
+        [switch]$LastInventory,
 
         [ValidateRange(0, [int]::MaxValue)]
         [int]$MaxDevices = 0,
@@ -314,15 +319,56 @@ function Export-IntuneAppInventory {
             Write-NCMessage "Starting app inventory reporting ..." -Level INFO
 
             # Pull devices
-            $devicesUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices"
+            $devicesUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?`$select=id,deviceName,operatingSystem,userPrincipalName,lastSyncDateTime"
             if ($MaxDevices -gt 0) {
-                $devicesUri += "?`$top=$MaxDevices"
+                $devicesUri += "&`$top=$MaxDevices"
             }
             $devices = @(Invoke-NCGraphAllPagesCore -Uri $devicesUri)
+            $lastInventoryCache = @{}
+            if ($LastInventory) {
+                foreach ($device in $devices) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$device.lastSyncDateTime)) {
+                        $lastInventoryCache[[string]$device.id] = $device.lastSyncDateTime
+                    }
+                }
+            }
             if ($FilterByPlatform -ne "All") {
                 $devices = $devices | Where-Object { $_.operatingSystem -like "$FilterByPlatform*" }
             }
             Write-NCMessage "Managed devices retrieved: $($devices.Count)" -Level INFO
+
+            function Get-NCIntuneManagedDeviceLastInventory {
+                param(
+                    [Parameter(Mandatory = $true)]
+                    [string]$DeviceId
+                )
+
+                if (-not $LastInventory) {
+                    return $null
+                }
+
+                if ($lastInventoryCache.ContainsKey($DeviceId) -and -not [string]::IsNullOrWhiteSpace([string]$lastInventoryCache[$DeviceId])) {
+                    return [string]$lastInventoryCache[$DeviceId]
+                }
+
+                try {
+                    $deviceDetailsUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$DeviceId?`$select=lastSyncDateTime"
+                    $deviceDetails = Invoke-MgGraphRequest -Uri $deviceDetailsUri -Method GET -ErrorAction Stop
+                    $lastInventoryValue = $deviceDetails.lastSyncDateTime
+
+                    if (-not [string]::IsNullOrWhiteSpace([string]$lastInventoryValue)) {
+                        $normalizedLastInventory = Format-NCDateTime -Value $lastInventoryValue -AsLocalTime
+                        $lastInventoryCache[$DeviceId] = $normalizedLastInventory
+                        return $normalizedLastInventory
+                    }
+
+                    return $null
+                }
+                catch {
+                    Write-NCMessage "Unable to read last inventory date for device ${DeviceId}: $($_.Exception.Message)" -Level WARNING
+                    return $null
+                }
+            }
 
             # Build app --> device mapping from Detected Apps
             $appDeviceMap = @{}
@@ -351,7 +397,7 @@ function Export-IntuneAppInventory {
                             $appDeviceMap[$key] = [ordered]@{ Devices = @(); Versions = @{}; Publishers = @{} }
                         }
                         
-                        $appDeviceMap[$key].Devices += [ordered]@{
+                        $deviceRow = [ordered]@{
                             DeviceId   = $device.id
                             DeviceName = $device.deviceName
                             Platform   = $device.operatingSystem
@@ -360,6 +406,10 @@ function Export-IntuneAppInventory {
                             Publisher  = $app.publisher
                             Source     = "DetectedApps"
                         }
+                        if ($LastInventory) {
+                            $deviceRow.LastInventory = Get-NCIntuneManagedDeviceLastInventory -DeviceId $device.id
+                        }
+                        $appDeviceMap[$key].Devices += $deviceRow
                         
                         if ($app.version) { 
                             $appDeviceMap[$key].Versions[$app.version] = ($appDeviceMap[$key].Versions[$app.version] + 1)
@@ -429,7 +479,7 @@ function Export-IntuneAppInventory {
                         # Avoid duplicates for the same device/app when DetectedApps already included it
                         $exists = $appDeviceMap[$key].Devices | Where-Object { $_.DeviceId -eq $d.id }
                         if (-not $exists) {
-                            $appDeviceMap[$key].Devices += [ordered]@{
+                            $deviceRow = [ordered]@{
                                 DeviceId     = $d.id
                                 DeviceName   = $d.deviceName
                                 Platform     = $d.operatingSystem
@@ -440,6 +490,10 @@ function Export-IntuneAppInventory {
                                 AppType      = $appType
                                 Source       = "DeploymentStatus"
                             }
+                            if ($LastInventory) {
+                                $deviceRow.LastInventory = Get-NCIntuneManagedDeviceLastInventory -DeviceId $d.id
+                            }
+                            $appDeviceMap[$key].Devices += $deviceRow
                         }
                     }
                 }
@@ -462,6 +516,7 @@ function Export-IntuneAppInventory {
                         DeviceName   = $dev.DeviceName
                         DeviceId     = $dev.DeviceId
                         Platform     = $dev.Platform
+                        LastInventory = $dev.LastInventory
                         User         = $dev.User
                         InstallState = $dev.InstallState
                         Source       = $dev.Source
@@ -519,13 +574,34 @@ function Export-IntuneAppInventory {
                 return
             }
 
+            $displayColumns = @('AppName', 'Version', 'DeviceName')
+            $exportColumns = @('AppName', 'Version', 'Publisher', 'DeviceName', 'DeviceId')
+            if ($IncludeDeployedApps) {
+                $exportColumns += 'AppType'
+            }
+            if ($FilterByPlatform -eq 'All') {
+                $displayColumns += 'Platform'
+                $exportColumns += 'Platform'
+            }
+            if ($LastInventory) {
+                $displayColumns += 'LastInventory'
+                $exportColumns += 'LastInventory'
+            }
+            $displayColumns += @('User', 'Source')
+            $exportColumns += 'User'
+            if ($IncludeDeployedApps) {
+                $exportColumns += 'InstallState'
+            }
+            $exportColumns += 'Source'
+            $reportRows = @($rows | Select-Object -Property $exportColumns)
+
             # Console table output
-            $rows | Sort-Object AppName, DeviceName | Format-Table -AutoSize AppName, Version, DeviceName, Platform, User, Source
+            $reportRows | Sort-Object AppName, DeviceName | Select-Object -Property $displayColumns | Format-Table -AutoSize
 
             # Optional exports
             if ($exportCsv) {
                 try {
-                    $sortedRows = $rows | Sort-Object AppName, DeviceName, DeviceId, Source
+                    $sortedRows = $reportRows | Sort-Object AppName, DeviceName, DeviceId, Source
                     $exportRows = if ($Resume) { @($sortedRows | Where-Object { -not $existingRowKeys.Contains((& $buildRowKey $_)) }) } else { @($sortedRows) }
 
                     if ($exportRows.Count -eq 0) {
@@ -557,7 +633,7 @@ function Export-IntuneAppInventory {
 
             if ($OutputJsonPath) {
                 try {
-                    $rows | ConvertTo-Json -Depth 5 | Out-File -FilePath $OutputJsonPath -Encoding UTF8
+                    $reportRows | ConvertTo-Json -Depth 5 | Out-File -FilePath $OutputJsonPath -Encoding UTF8
                     Write-NCMessage "JSON exported to $OutputJsonPath" -Level SUCCESS
                 }
                 catch {
@@ -568,7 +644,7 @@ function Export-IntuneAppInventory {
             # Optional per-app pivot/summary
             if ($PivotSummary) {
                 Write-NCMessage "`n=== SUMMARY BY APPLICATION ===" -Level INFO
-                $rows | Group-Object AppName | Sort-Object Count -Descending | ForEach-Object {
+                $reportRows | Group-Object AppName | Sort-Object Count -Descending | ForEach-Object {
                     $app = $_.Name
                     $count = $_.Count
                     $versions = ($_.Group | Where-Object Version | Group-Object Version | Sort-Object Count -Descending | ForEach-Object { "{0} ({1})" -f $_.Name, $_.Count }) -join ", "

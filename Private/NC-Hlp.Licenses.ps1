@@ -338,10 +338,10 @@ function Get-LicenseCatalog {
     }
 
     if ($IncludeMetadata.IsPresent -and $primaryData.LastCommitUtc) {
-        Write-Verbose "License catalog last updated: $($primaryData.LastCommitUtc.ToLocalTime().ToString($NCVars.DateTimeString_Full)) (source: $primaryData.Source)"
+        Write-Verbose "License catalog last updated: $((Format-NCDateTime -Value $primaryData.LastCommitUtc -AsLocalTime)) (source: $primaryData.Source)"
     }
     if ($IncludeMetadata.IsPresent -and $customData -and $customData.LastCommitUtc) {
-        Write-Verbose "Custom license catalog last updated: $($customData.LastCommitUtc.ToLocalTime().ToString($NCVars.DateTimeString_Full)) (source: $customData.Source)"
+        Write-Verbose "Custom license catalog last updated: $((Format-NCDateTime -Value $customData.LastCommitUtc -AsLocalTime)) (source: $customData.Source)"
     }
 
     return [pscustomobject]@{
