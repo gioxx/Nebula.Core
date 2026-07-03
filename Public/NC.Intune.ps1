@@ -328,7 +328,7 @@ function Export-IntuneAppInventory {
             if ($LastInventory) {
                 foreach ($device in $devices) {
                     if (-not [string]::IsNullOrWhiteSpace([string]$device.lastSyncDateTime)) {
-                        $lastInventoryCache[[string]$device.id] = $device.lastSyncDateTime
+                        $lastInventoryCache[[string]$device.id] = Format-NCDateTime -Value $device.lastSyncDateTime -AsLocalTime
                     }
                 }
             }
@@ -659,6 +659,99 @@ function Export-IntuneAppInventory {
             Write-NCMessage "Script execution failed: $($_.Exception.Message)" -Level ERROR
             exit 1
         }
+    }
+}
+
+function Get-IntuneAppPresence {
+    <#
+    .SYNOPSIS
+        Checks whether a single Intune-managed device has a matching app installed.
+    .DESCRIPTION
+        Queries one managed device and returns a single summary row with the match result.
+        Use this when you want a quick yes/no check without the full inventory report.
+    .PARAMETER DeviceName
+        Intune managed device name to inspect.
+    .PARAMETER ApplicationName
+        Application name or wildcard pattern to match.
+    .PARAMETER MinimumVersion
+        Minimum application version to consider a match.
+    .EXAMPLE
+        Get-IntuneAppPresence -DeviceName "UE5CG30740PT" -ApplicationName "*java*"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DeviceName,
+
+        [Parameter(Mandatory = $true)]
+        [Alias('SearchText', 'Name', 'DisplayName', 'Query', 'AppName')]
+        [string]$ApplicationName,
+
+        [string]$MinimumVersion
+    )
+
+    try {
+        $graphConnected = Test-MgGraphConnection -Scopes @('DeviceManagementManagedDevices.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        if (-not $graphConnected) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+            return
+        }
+
+        if (-not (Get-Command -Name Invoke-MgGraphRequest -ErrorAction SilentlyContinue)) {
+            Write-NCMessage "Invoke-MgGraphRequest is not available in the current Microsoft Graph session." -Level ERROR
+            return
+        }
+
+        $escapedDeviceName = $DeviceName.Replace("'", "''")
+        $devicesUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?`$filter=deviceName eq '$escapedDeviceName'&`$select=id,deviceName,operatingSystem,userPrincipalName,lastSyncDateTime"
+        $devices = @(Invoke-MgGraphRequest -Uri $devicesUri -Method GET -ErrorAction Stop).value
+        $device = $devices | Select-Object -First 1
+
+        if (-not $device) {
+            return [pscustomobject]@{
+                DeviceName    = $DeviceName
+                DeviceId      = $null
+                AppName       = $ApplicationName
+                Present       = $false
+                Version       = $null
+                Publisher     = $null
+                LastInventory = $null
+                Source        = 'ManagedDevice'
+                Status        = 'DeviceNotFound'
+            }
+        }
+
+        $deviceAppsUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$($device.id)?`$expand=detectedApps"
+        $deviceWithApps = Invoke-MgGraphRequest -Uri $deviceAppsUri -Method GET -ErrorAction Stop
+        $matches = @($deviceWithApps.detectedApps | Where-Object { $_.displayName -like $ApplicationName })
+
+        if ($MinimumVersion) {
+            $matches = @($matches | Where-Object {
+                $_.version -and (Test-NCIntuneVersionAtLeast -CurrentVersion $_.version -MinimumVersion $MinimumVersion)
+            })
+        }
+
+        $match = $matches | Select-Object -First 1
+        $present = [bool]$match
+
+        $lastInventoryValue = Format-NCDateTime -Value $device.lastSyncDateTime -AsLocalTime
+
+        return [pscustomobject]@{
+            DeviceName    = $device.deviceName
+            DeviceId      = $device.id
+            AppName       = if ($match) { $match.displayName } else { $ApplicationName }
+            Present       = $present
+            Version       = if ($match) { $match.version } else { $null }
+            Publisher     = if ($match) { $match.publisher } else { $null }
+            LastInventory = $lastInventoryValue
+            Source        = 'DetectedApps'
+            Status        = if ($present) { 'Found' } else { 'NotFound' }
+        }
+    }
+    catch {
+        Write-NCMessage "Get-IntuneAppPresence failed: $($_.Exception.Message)" -Level ERROR
+        throw
     }
 }
 

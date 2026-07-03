@@ -95,6 +95,7 @@
         'Set-UserUsageLocation',
         'Sync-NebulaConfig',
         'Test-SharedMailboxCompliance',
+        'Get-IntuneAppPresence',
         'Unlock-QuarantineFrom',
         'Unlock-QuarantineMessageId',
         'Update-LicenseCatalog',
@@ -142,11 +143,12 @@
             ProjectUri   = 'https://github.com/gioxx/Nebula.Core'
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/icon.png'
-        ReleaseNotes = @'
+ReleaseNotes = @'
+- Improve: add `Get-IntuneAppPresence` for quick single-device app presence checks with one-row output, always include `LastInventory`, and return the matched app name in `AppName`.
 - Improve: change the default CSV delimiter to comma for a more standard US-friendly baseline.
 - Fix: `Add/Remove-EntraGroupDevice`, `Add/Remove-EntraGroupOwner`, and `Add/Remove-EntraGroupUser` now support the positional form `<GroupName> <MemberIdentifier>` in addition to named parameters.
 - Fix: `Get-UserGroups` now falls back to Microsoft Graph resolution when Exchange mailbox lookup is not available, so Entra guest users can be queried without using the GUI.
-- Improve: `Export-IntuneAppInventory` now supports `-LastInventory` and can suppress the redundant `Platform` column when `-FilterByPlatform` targets a single OS family.
+- Fix: `Export-IntuneAppInventory` now normalizes cached `LastInventory` values through Nebula's configured date/time formatter so export output matches the single-device helper.
 - Improve: `Get-UserGroups` keeps the existing Exchange-first behavior for regular users while handling guest identities more gracefully.
 - Improve: add `Remove-EntraUser` for direct UPN-based Entra user removal with Graph.
 - Improve: add `Search-EntraUser` to search users by display name, user principal name, or mail, including guest UPN fragments.

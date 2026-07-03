@@ -74,28 +74,20 @@ function Format-NCDateTime {
         $text = [string]$Value
         $styles = [System.Globalization.DateTimeStyles]::AllowWhiteSpaces -bor [System.Globalization.DateTimeStyles]::RoundtripKind
         $formats = @(
-            $Format,
             'o',
             'O',
             's',
             'yyyy-MM-ddTHH:mm:ssK',
             'yyyy-MM-ddTHH:mm:ss.FFFFFFFK',
-            'yyyy-MM-dd HH:mm:ssK'
+            'yyyy-MM-dd HH:mm:ssK',
+            'yyyy-MM-ddTHH:mm:ss',
+            'yyyy-MM-dd HH:mm:ss'
         )
 
         foreach ($fmt in $formats) {
             if ([datetimeoffset]::TryParseExact($text, $fmt, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$dateTimeOffset)) {
                 $parsed = $true
                 break
-            }
-        }
-
-        if (-not $parsed) {
-            if ([datetimeoffset]::TryParse($text, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$dateTimeOffset)) {
-                $parsed = $true
-            }
-            elseif ([datetimeoffset]::TryParse($text, [System.Globalization.CultureInfo]::CurrentCulture, $styles, [ref]$dateTimeOffset)) {
-                $parsed = $true
             }
         }
 
