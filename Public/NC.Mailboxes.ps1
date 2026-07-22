@@ -1026,7 +1026,7 @@ function Get-MboxPermission {
         Write-Progress -Activity "Gathered SendOnBehalfTo permissions for $($mailbox.PrimarySmtpAddress) ..." -Status "90% Complete" -PercentComplete 90
 
         Add-EmptyLine
-        Write-NCMessage ("Access Rights on {0} ({1})" -f $mailbox.DisplayName, $mailbox.PrimarySmtpAddress) -Level WARNING
+        Write-NCMessage ("Access Rights on {0} ({1}) - {2}" -f $mailbox.DisplayName, $mailbox.PrimarySmtpAddress, $mailbox.RecipientTypeDetails) -Level WARNING
         if ($PSCmdlet.MyInvocation.PipelineLength -gt 1) {
             $results
         }
