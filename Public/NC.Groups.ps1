@@ -1135,7 +1135,7 @@ function Add-EntraGroupUser {
                     $resolvedUser = Get-MgUser -UserId $user -ErrorAction Stop
                 }
                 catch {
-                    $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $user
+                    $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $user -PreferGraphIdentity
                     if ($resolvedIdentifier) {
                         try {
                             $resolvedUser = Get-MgUser -UserId $resolvedIdentifier -ErrorAction Stop
@@ -2922,7 +2922,7 @@ function Get-EntraGroupUser {
                 $user = Get-MgUser -UserId $UserIdentifier -ErrorAction Stop
             }
             catch {
-                $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $UserIdentifier
+                $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $UserIdentifier -PreferGraphIdentity
                 if ($resolvedIdentifier) {
                     try {
                         $user = Get-MgUser -UserId $resolvedIdentifier -ErrorAction Stop
@@ -3796,7 +3796,7 @@ function Remove-EntraGroupUser {
                         $resolvedUser = Get-MgUser -UserId $user -ErrorAction Stop
                     }
                     catch {
-                        $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $user
+                        $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $user -PreferGraphIdentity
                         if ($resolvedIdentifier) {
                             try {
                                 $resolvedUser = Get-MgUser -UserId $resolvedIdentifier -ErrorAction Stop

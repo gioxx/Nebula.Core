@@ -144,16 +144,17 @@
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/icon.png'
 ReleaseNotes = @'
-- Improve: add `Get-IntuneAppPresence` for quick single-device app presence checks with one-row output, always include `LastInventory`, and return the matched app name in `AppName`.
-- Improve: change the default CSV delimiter to comma for a more standard US-friendly baseline.
 - Fix: `Add/Remove-EntraGroupDevice`, `Add/Remove-EntraGroupOwner`, and `Add/Remove-EntraGroupUser` now support the positional form `<GroupName> <MemberIdentifier>` in addition to named parameters.
-- Fix: `Get-UserGroups` now falls back to Microsoft Graph resolution when Exchange mailbox lookup is not available, so Entra guest users can be queried without using the GUI.
+- Fix: `Add/Get/Remove-EntraGroupUser` now resolve invited Entra guests by external e-mail through a Graph-compatible fallback while preserving direct lookup for tenant members.
 - Fix: `Export-IntuneAppInventory` now normalizes cached `LastInventory` values through Nebula's configured date/time formatter so export output matches the single-device helper.
+- Fix: `Get-UserGroups` now falls back to Microsoft Graph resolution when Exchange mailbox lookup is not available, so Entra guest users can be queried without using the GUI.
 - Improve: `Get-MboxPermission` now shows the source mailbox `RecipientTypeDetails` value in the output heading.
 - Improve: `Get-UserGroups` keeps the existing Exchange-first behavior for regular users while handling guest identities more gracefully.
+- Improve: add `Get-IntuneAppPresence` for quick single-device app presence checks with one-row output, always include `LastInventory`, and return the matched app name in `AppName`.
 - Improve: add `Remove-EntraUser` for direct UPN-based Entra user removal with Graph.
 - Improve: add `Search-EntraUser` to search users by display name, user principal name, or mail, including guest UPN fragments.
 - Improve: add culture-safe date parsing plus optional timezone-aware formatting through `DateTimeTimeZone`.
+- Improve: change the default CSV delimiter to comma for a more standard US-friendly baseline.
 - Improve: set the default user-facing date/time zone to `Eastern Standard Time` to align with the module's US baseline.
 - Improve: unify user-facing date formatting through Nebula's configured date/time patterns, including Intune inventory and license catalog outputs.
 '@
