@@ -177,12 +177,34 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     }
     catch {
         Write-NCMessage "Unable to resolve target Enterprise Application '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR
+        [pscustomobject][ordered]@{
+            TargetDisplayName   = $TargetDisplayName
+            TargetApplicationId = $null
+            Created             = $false
+            OwnersAdded         = 0
+            OwnersSkipped       = 0
+            AssignmentsAdded    = 0
+            AssignmentsSkipped  = 0
+            AssignmentsFailed   = 0
+            Error               = "Unable to resolve target Enterprise Application '$TargetDisplayName': $($_.Exception.Message)"
+        }
         return
     }
 
     $existingMatches = @($existingResponse.value)
     if ($existingMatches.Count -gt 1) {
         Write-NCMessage "Multiple Enterprise Applications named '$TargetDisplayName' found. Aborting to avoid ambiguity." -Level ERROR
+        [pscustomobject][ordered]@{
+            TargetDisplayName   = $TargetDisplayName
+            TargetApplicationId = $null
+            Created             = $false
+            OwnersAdded         = 0
+            OwnersSkipped       = 0
+            AssignmentsAdded    = 0
+            AssignmentsSkipped  = 0
+            AssignmentsFailed   = 0
+            Error               = "Multiple Enterprise Applications named '$TargetDisplayName' found. Aborting to avoid ambiguity."
+        }
         return
     }
 
@@ -218,6 +240,17 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         }
         catch {
             Write-NCMessage "Failed to create Enterprise Application '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR
+            [pscustomobject][ordered]@{
+                TargetDisplayName   = $TargetDisplayName
+                TargetApplicationId = $null
+                Created             = $false
+                OwnersAdded         = 0
+                OwnersSkipped       = 0
+                AssignmentsAdded    = 0
+                AssignmentsSkipped  = 0
+                AssignmentsFailed   = 0
+                Error               = "Failed to create Enterprise Application '$TargetDisplayName': $($_.Exception.Message)"
+            }
             return
         }
     }
@@ -238,6 +271,17 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         }
         catch {
             Write-NCMessage "Failed to update Enterprise Application '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR
+            [pscustomobject][ordered]@{
+                TargetDisplayName   = $TargetDisplayName
+                TargetApplicationId = $null
+                Created             = $false
+                OwnersAdded         = 0
+                OwnersSkipped       = 0
+                AssignmentsAdded    = 0
+                AssignmentsSkipped  = 0
+                AssignmentsFailed   = 0
+                Error               = "Failed to update Enterprise Application '$TargetDisplayName': $($_.Exception.Message)"
+            }
             return
         }
     }
@@ -247,6 +291,17 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     }
     catch {
         Write-NCMessage "Unable to check Service Principal for '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR
+        [pscustomobject][ordered]@{
+            TargetDisplayName   = $TargetDisplayName
+            TargetApplicationId = $null
+            Created             = $false
+            OwnersAdded         = 0
+            OwnersSkipped       = 0
+            AssignmentsAdded    = 0
+            AssignmentsSkipped  = 0
+            AssignmentsFailed   = 0
+            Error               = "Unable to check Service Principal for '$TargetDisplayName': $($_.Exception.Message)"
+        }
         return
     }
 
@@ -258,6 +313,17 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         }
         catch {
             Write-NCMessage "Failed to create Service Principal for '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR
+            [pscustomobject][ordered]@{
+                TargetDisplayName   = $TargetDisplayName
+                TargetApplicationId = $null
+                Created             = $false
+                OwnersAdded         = 0
+                OwnersSkipped       = 0
+                AssignmentsAdded    = 0
+                AssignmentsSkipped  = 0
+                AssignmentsFailed   = 0
+                Error               = "Failed to create Service Principal for '$TargetDisplayName': $($_.Exception.Message)"
+            }
             return
         }
     }
@@ -299,6 +365,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
 
     $assignmentsAdded = 0
     $assignmentsSkipped = 0
+    $assignmentsFailed = 0
     if ($IncludeAppRoleAssignments.IsPresent -and $Snapshot.AppRoleAssignments -and @($Snapshot.AppRoleAssignments).Count -gt 0) {
         try {
             $destinationAssignments = @(Invoke-NCGraphAllPagesCore -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($targetSp.id)/appRoleAssignedTo")
@@ -328,8 +395,13 @@ function Set-NCEnterpriseApplicationFromSnapshot {
                 Write-NCMessage "Assigned '$($assignment.PrincipalDisplayName)' to '$TargetDisplayName'." -Level SUCCESS
             }
             catch {
-                Write-NCMessage "Failed to assign '$($assignment.PrincipalDisplayName)' to '$TargetDisplayName': $($_.Exception.Message)" -Level WARNING
-                $assignmentsSkipped++
+                if ($_.Exception.Message -match 'already exist' -or $_.Exception.Message -match 'exists') {
+                    $assignmentsSkipped++
+                }
+                else {
+                    Write-NCMessage "Failed to assign '$($assignment.PrincipalDisplayName)' to '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR
+                    $assignmentsFailed++
+                }
             }
         }
     }
@@ -342,5 +414,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         OwnersSkipped       = $ownersSkipped
         AssignmentsAdded    = $assignmentsAdded
         AssignmentsSkipped  = $assignmentsSkipped
+        AssignmentsFailed   = $assignmentsFailed
+        Error               = $null
     }
 }

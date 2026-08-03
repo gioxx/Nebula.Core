@@ -154,6 +154,8 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
         $result.TargetApplicationId | Should -Be 'new-app-id'
         $result.OwnersAdded | Should -Be 1
         $result.AssignmentsAdded | Should -Be 0
+        $result.AssignmentsFailed | Should -Be 0
+        $result.Error | Should -BeNullOrEmpty
 
         Assert-MockCalled Invoke-MgGraphRequest -Scope It -ParameterFilter {
             $Method -eq 'POST' -and $Uri -eq 'https://graph.microsoft.com/v1.0/applications'
@@ -177,6 +179,8 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
 
         $result.Created | Should -Be $false
         $result.TargetApplicationId | Should -Be 'existing-app-id'
+        $result.AssignmentsFailed | Should -Be 0
+        $result.Error | Should -BeNullOrEmpty
         Assert-MockCalled Invoke-MgGraphRequest -Scope It -ParameterFilter {
             $Method -eq 'PATCH' -and $Uri -eq 'https://graph.microsoft.com/v1.0/applications/existing-app-id'
         }
@@ -198,8 +202,58 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
         $result = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -IncludeAppRoleAssignments -Confirm:$false
 
         $result.AssignmentsAdded | Should -Be 1
+        $result.AssignmentsFailed | Should -Be 0
+        $result.Error | Should -BeNullOrEmpty
         Assert-MockCalled Invoke-MgGraphRequest -Scope It -ParameterFilter {
             $Method -eq 'POST' -and $Uri -eq 'https://graph.microsoft.com/v1.0/servicePrincipals/existing-sp-id/appRoleAssignedTo'
+        }
+    }
+
+    It 'returns an error object without crashing when the target name is ambiguous' {
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^https://graph\.microsoft\.com/v1\.0/applications\?') {
+                return [pscustomobject]@{
+                    value = @(
+                        [pscustomobject]@{ id = 'dup-app-id-1'; appId = 'dup-client-id-1'; displayName = 'Target App' }
+                        [pscustomobject]@{ id = 'dup-app-id-2'; appId = 'dup-client-id-2'; displayName = 'Target App' }
+                    )
+                }
+            }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $result = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        $result | Should -Not -BeNullOrEmpty
+        $result.Error | Should -Not -BeNullOrEmpty
+        $result.Created | Should -Be $false
+        $result.TargetApplicationId | Should -BeNullOrEmpty
+    }
+
+    It 'counts a non-duplicate App Role Assignment failure as failed, not skipped, and logs at ERROR' {
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^https://graph\.microsoft\.com/v1\.0/applications\?') {
+                return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-app-id'; appId = 'existing-client-id'; displayName = 'Target App' }) }
+            }
+            if ($Uri -match '/servicePrincipals\?') {
+                return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-sp-id'; appId = 'existing-client-id' }) }
+            }
+            if ($Method -eq 'POST' -and $Uri -match '/appRoleAssignedTo$') {
+                throw 'Insufficient privileges to complete the operation.'
+            }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $result = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -IncludeAppRoleAssignments -Confirm:$false
+
+        $result.AssignmentsFailed | Should -Be 1
+        $result.AssignmentsSkipped | Should -Be 0
+        $result.AssignmentsAdded | Should -Be 0
+
+        Assert-MockCalled Write-NCMessage -Scope It -ParameterFilter {
+            $Level -eq 'ERROR' -and $Message -match 'Failed to assign'
         }
     }
 }
