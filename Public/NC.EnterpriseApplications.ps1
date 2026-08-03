@@ -225,3 +225,141 @@ function Copy-EnterpriseApplication {
         }
     }
 }
+
+function Compare-EnterpriseApplication {
+    <#
+    .SYNOPSIS
+        Diffs two Enterprise Applications, each given as a JSON snapshot file or a live application.
+    .DESCRIPTION
+        Loads the reference and difference sides (file or live Graph lookup, independently), diffs them,
+        and returns the differing properties on the pipeline. Optionally writes a CSV or JSON report.
+    .PARAMETER ReferencePath
+        JSON snapshot file for the reference ("A") side.
+    .PARAMETER ReferenceApplicationName
+        Display name of a live application for the reference side.
+    .PARAMETER ReferenceApplicationId
+        Object ID of a live application for the reference side.
+    .PARAMETER DifferencePath
+        JSON snapshot file for the difference ("B") side.
+    .PARAMETER DifferenceApplicationName
+        Display name of a live application for the difference side.
+    .PARAMETER DifferenceApplicationId
+        Object ID of a live application for the difference side.
+    .PARAMETER IncludeAppRoleAssignments
+        Also compare App Role Assignments.
+    .PARAMETER OutputReportPath
+        Optional report file. Written as JSON if the path ends in .json, otherwise as CSV.
+    .PARAMETER PassThru
+        Also emit the diff rows on the pipeline even when -OutputReportPath is used (rows are emitted by default; this has no additional effect and exists for symmetry with the other cmdlets).
+    .EXAMPLE
+        Compare-EnterpriseApplication -ReferencePath .\contoso-test-app.json -DifferenceApplicationName "Contoso Prod App"
+    .EXAMPLE
+        Compare-EnterpriseApplication -ReferenceApplicationName "Contoso Test App" -DifferenceApplicationName "Contoso Prod App" -OutputReportPath .\diff.csv
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$ReferencePath,
+        [string]$ReferenceApplicationName,
+        [string]$ReferenceApplicationId,
+
+        [string]$DifferencePath,
+        [string]$DifferenceApplicationName,
+        [string]$DifferenceApplicationId,
+
+        [switch]$IncludeAppRoleAssignments,
+        [string]$OutputReportPath,
+        [switch]$PassThru
+    )
+
+    begin {
+        $referenceSourceCount = @($ReferencePath, $ReferenceApplicationName, $ReferenceApplicationId | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
+        $differenceSourceCount = @($DifferencePath, $DifferenceApplicationName, $DifferenceApplicationId | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
+
+        $inputValid = $true
+        if ($referenceSourceCount -ne 1) {
+            Write-NCMessage "Specify exactly one of -ReferencePath, -ReferenceApplicationName, or -ReferenceApplicationId." -Level ERROR
+            $inputValid = $false
+        }
+        if ($differenceSourceCount -ne 1) {
+            Write-NCMessage "Specify exactly one of -DifferencePath, -DifferenceApplicationName, or -DifferenceApplicationId." -Level ERROR
+            $inputValid = $false
+        }
+
+        $graphReady = $true
+        if ($inputValid -and ((-not $ReferencePath) -or (-not $DifferencePath))) {
+            $graphReady = Test-MgGraphConnection -Scopes @('Application.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+            if (-not $graphReady) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+            }
+        }
+    }
+
+    process {
+        if (-not $inputValid -or -not $graphReady) {
+            return
+        }
+
+        $referenceSnapshot = if ($ReferencePath) {
+            if (-not (Test-Path -LiteralPath $ReferencePath)) {
+                Write-NCMessage "Reference file '$ReferencePath' not found." -Level ERROR
+                return
+            }
+            Get-Content -LiteralPath $ReferencePath -Raw | ConvertFrom-Json
+        }
+        elseif ($ReferenceApplicationId) {
+            Get-NCEnterpriseApplicationSnapshot -ApplicationId $ReferenceApplicationId -IncludeAppRoleAssignments:$IncludeAppRoleAssignments.IsPresent
+        }
+        else {
+            Get-NCEnterpriseApplicationSnapshot -ApplicationName $ReferenceApplicationName -IncludeAppRoleAssignments:$IncludeAppRoleAssignments.IsPresent
+        }
+
+        if (-not $referenceSnapshot) {
+            return
+        }
+
+        $differenceSnapshot = if ($DifferencePath) {
+            if (-not (Test-Path -LiteralPath $DifferencePath)) {
+                Write-NCMessage "Difference file '$DifferencePath' not found." -Level ERROR
+                return
+            }
+            Get-Content -LiteralPath $DifferencePath -Raw | ConvertFrom-Json
+        }
+        elseif ($DifferenceApplicationId) {
+            Get-NCEnterpriseApplicationSnapshot -ApplicationId $DifferenceApplicationId -IncludeAppRoleAssignments:$IncludeAppRoleAssignments.IsPresent
+        }
+        else {
+            Get-NCEnterpriseApplicationSnapshot -ApplicationName $DifferenceApplicationName -IncludeAppRoleAssignments:$IncludeAppRoleAssignments.IsPresent
+        }
+
+        if (-not $differenceSnapshot) {
+            return
+        }
+
+        $rows = Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $referenceSnapshot -DifferenceSnapshot $differenceSnapshot -IncludeAppRoleAssignments:$IncludeAppRoleAssignments.IsPresent
+
+        if ($OutputReportPath) {
+            try {
+                if ($OutputReportPath -match '\.json$') {
+                    $rows | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $OutputReportPath -Encoding UTF8 -ErrorAction Stop
+                }
+                else {
+                    $rows | Export-Csv -LiteralPath $OutputReportPath -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+                }
+                Write-NCMessage "Wrote comparison report to '$OutputReportPath' ($($rows.Count) difference(s))." -Level SUCCESS
+            }
+            catch {
+                Write-NCMessage "Failed to write comparison report to '$OutputReportPath': $($_.Exception.Message)" -Level ERROR
+            }
+        }
+
+        if ($rows.Count -eq 0) {
+            Write-NCMessage "No differences found." -Level SUCCESS
+        }
+        else {
+            Write-NCMessage "Found $($rows.Count) difference(s)." -Level WARNING
+        }
+
+        $rows
+    }
+}

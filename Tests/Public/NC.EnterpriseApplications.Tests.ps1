@@ -39,6 +39,13 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         [switch]$IncludeAppRoleAssignments
     )
 }
+function Compare-NCEnterpriseApplicationSnapshot {
+    param(
+        [object]$ReferenceSnapshot,
+        [object]$DifferenceSnapshot,
+        [switch]$IncludeAppRoleAssignments
+    )
+}
 
 . "$PSScriptRoot/../../Private/NC-Hlp.EnterpriseApplications.ps1"
 
@@ -479,5 +486,54 @@ Describe 'Copy-EnterpriseApplication' {
 
         Assert-MockCalled Get-NCEnterpriseApplicationSnapshot -Times 1 -Scope It -ParameterFilter { $IncludeAppRoleAssignments }
         Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 1 -Scope It -ParameterFilter { $IncludeAppRoleAssignments }
+    }
+}
+
+Describe 'Compare-EnterpriseApplication' {
+    $referencePath = Join-Path $TestDrive 'reference.json'
+    $differencePath = Join-Path $TestDrive 'difference.json'
+    $diffRows = @([pscustomobject]@{ Property = 'Application.Web'; ReferenceValue = 'a'; DifferenceValue = 'b' })
+
+    BeforeEach {
+        Mock Test-MgGraphConnection { $true }
+        Mock Add-EmptyLine {}
+        Mock Write-NCMessage {}
+        Mock Compare-NCEnterpriseApplicationSnapshot { $diffRows }
+        '{"Application":{"DisplayName":"Reference App"}}' | Set-Content -LiteralPath $referencePath
+        '{"Application":{"DisplayName":"Difference App"}}' | Set-Content -LiteralPath $differencePath
+    }
+
+    It 'compares two files without needing a Graph connection' {
+        $rows = Compare-EnterpriseApplication -ReferencePath $referencePath -DifferencePath $differencePath
+
+        $rows[0].Property | Should -Be 'Application.Web'
+        Assert-MockCalled Test-MgGraphConnection -Times 0 -Scope It
+    }
+
+    It 'compares a file against a live application' {
+        Mock Get-NCEnterpriseApplicationSnapshot { [pscustomobject]@{ Application = [pscustomobject]@{ DisplayName = 'Live App' } } }
+
+        $rows = Compare-EnterpriseApplication -ReferencePath $referencePath -DifferenceApplicationName 'Live App'
+
+        $rows[0].Property | Should -Be 'Application.Web'
+        Assert-MockCalled Test-MgGraphConnection -Times 1 -Scope It
+        Assert-MockCalled Get-NCEnterpriseApplicationSnapshot -Times 1 -Scope It -ParameterFilter { $ApplicationName -eq 'Live App' }
+    }
+
+    It 'errors when more than one reference source is given' {
+        $rows = Compare-EnterpriseApplication -ReferencePath $referencePath -ReferenceApplicationName 'X' -DifferencePath $differencePath
+
+        $rows | Should -BeNullOrEmpty
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' }
+    }
+
+    It 'writes a JSON report when -OutputReportPath is given' {
+        $reportPath = Join-Path $TestDrive 'report.json'
+
+        Compare-EnterpriseApplication -ReferencePath $referencePath -DifferencePath $differencePath -OutputReportPath $reportPath
+
+        Test-Path -LiteralPath $reportPath | Should -Be $true
+        $written = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+        $written[0].Property | Should -Be 'Application.Web'
     }
 }
