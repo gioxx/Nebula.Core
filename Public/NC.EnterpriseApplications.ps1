@@ -349,7 +349,23 @@ function Compare-EnterpriseApplication {
                     ConvertTo-Json -InputObject $rows -Depth 10 | Set-Content -LiteralPath $OutputReportPath -Encoding UTF8 -ErrorAction Stop
                 }
                 else {
-                    $rows | Export-Csv -LiteralPath $OutputReportPath -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+                    # Export-Csv stringifies each cell via .ToString(), which renders every non-scalar
+                    # ReferenceValue/DifferenceValue (Application.Web, .RequiredResourceAccess, .AppRoles,
+                    # .Owners, etc.) as the unhelpful, identical "@{...=System.Object[]}" text regardless of
+                    # what actually differs. Project both columns through ConvertTo-Json first so the CSV
+                    # cell carries readable, information-preserving content instead. Use -InputObject (not
+                    # a pipe) so an empty-array value isn't unwrapped/collapsed away to nothing - the same
+                    # pipe-vs-array-collapse hazard already worked around for $rows above. $null is handled
+                    # explicitly since `ConvertTo-Json -InputObject $null` produces nothing useful for a CSV
+                    # cell; render it as an empty string instead.
+                    $csvRows = $rows | ForEach-Object {
+                        [pscustomobject][ordered]@{
+                            Property        = $_.Property
+                            ReferenceValue  = if ($null -eq $_.ReferenceValue) { '' } else { ConvertTo-Json -InputObject $_.ReferenceValue -Compress -Depth 10 }
+                            DifferenceValue = if ($null -eq $_.DifferenceValue) { '' } else { ConvertTo-Json -InputObject $_.DifferenceValue -Compress -Depth 10 }
+                        }
+                    }
+                    $csvRows | Export-Csv -LiteralPath $OutputReportPath -NoTypeInformation -Encoding $NCVars.CSV_Encoding -Delimiter $NCVars.CSV_DefaultLimiter -ErrorAction Stop
                 }
                 Write-NCMessage "Wrote comparison report to '$OutputReportPath' ($($rows.Count) difference(s))." -Level SUCCESS
             }

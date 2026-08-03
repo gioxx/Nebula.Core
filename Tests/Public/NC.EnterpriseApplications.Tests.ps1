@@ -495,6 +495,7 @@ Describe 'Compare-EnterpriseApplication' {
     $diffRows = @([pscustomobject]@{ Property = 'Application.Web'; ReferenceValue = 'a'; DifferenceValue = 'b' })
 
     BeforeEach {
+        $script:NCVars = @{ CSV_Encoding = 'UTF-8'; CSV_DefaultLimiter = ',' }
         Mock Test-MgGraphConnection { $true }
         Mock Add-EmptyLine {}
         Mock Write-NCMessage {}
@@ -561,5 +562,53 @@ Describe 'Compare-EnterpriseApplication' {
         ($rawContent -replace '\s', '') | Should -Be '[]'
         $parsed = $rawContent | ConvertFrom-Json
         @($parsed).Count | Should -Be 0
+    }
+
+    It 'writes JSON-projected, distinguishable values for non-scalar diff rows in the CSV report' {
+        Mock Compare-NCEnterpriseApplicationSnapshot {
+            @([pscustomobject]@{
+                Property        = 'Application.Web'
+                ReferenceValue  = [pscustomobject]@{ redirectUris = @('https://ref.contoso.com/callback') }
+                DifferenceValue = [pscustomobject]@{ redirectUris = @('https://diff.contoso.com/callback') }
+            })
+        }
+        $reportPath = Join-Path $TestDrive 'nonscalar-report.csv'
+
+        Compare-EnterpriseApplication -ReferencePath $referencePath -DifferencePath $differencePath -OutputReportPath $reportPath
+
+        $written = Import-Csv -LiteralPath $reportPath
+        $written[0].ReferenceValue | Should -Not -Be $written[0].DifferenceValue
+        $written[0].ReferenceValue | Should -Match 'ref\.contoso\.com'
+        $written[0].DifferenceValue | Should -Match 'diff\.contoso\.com'
+    }
+
+    It 'renders a null diff value as an empty CSV cell instead of erroring' {
+        Mock Compare-NCEnterpriseApplicationSnapshot {
+            @([pscustomobject]@{
+                Property        = 'Application.Notes'
+                ReferenceValue  = $null
+                DifferenceValue = 'Updated notes'
+            })
+        }
+        $reportPath = Join-Path $TestDrive 'null-value-report.csv'
+
+        Compare-EnterpriseApplication -ReferencePath $referencePath -DifferencePath $differencePath -OutputReportPath $reportPath
+
+        $written = Import-Csv -LiteralPath $reportPath
+        $written[0].ReferenceValue | Should -Be ''
+        $written[0].DifferenceValue | Should -Be '"Updated notes"'
+    }
+
+    It 'writes the CSV using the configured CSV encoding and delimiter defaults' {
+        $script:NCVars.CSV_DefaultLimiter = ';'
+        $reportPath = Join-Path $TestDrive 'delimiter-report.csv'
+
+        Compare-EnterpriseApplication -ReferencePath $referencePath -DifferencePath $differencePath -OutputReportPath $reportPath
+
+        $rawLines = Get-Content -LiteralPath $reportPath
+        $rawLines[0] | Should -Match ';'
+        $rawLines[0] | Should -Not -Match ','
+        $written = Import-Csv -LiteralPath $reportPath -Delimiter ';'
+        $written[0].Property | Should -Be 'Application.Web'
     }
 }
