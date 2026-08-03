@@ -1,19 +1,21 @@
-function Set-ProgressAndInfoPreferences {}
-function Restore-ProgressAndInfoPreferences {}
-function Test-EOLConnection {}
-function Add-EmptyLine {}
-function Write-NCMessage {
-    param(
-        [string]$Message,
-        [string]$Level
-    )
-}
-function Get-Mailbox {}
-function Get-MailboxPermission {}
-function Get-RecipientPermission {}
-function Get-User {}
+BeforeAll {
+    function Set-ProgressAndInfoPreferences {}
+    function Restore-ProgressAndInfoPreferences {}
+    function Test-EOLConnection {}
+    function Add-EmptyLine {}
+    function Write-NCMessage {
+        param(
+            [string]$Message,
+            [string]$Level
+        )
+    }
+    function Get-Mailbox {}
+    function Get-MailboxPermission {}
+    function Get-RecipientPermission {}
+    function Get-User {}
 
-. "$PSScriptRoot/../../Public/NC.Mailboxes.ps1"
+    . "$PSScriptRoot/../../Public/NC.Mailboxes.ps1"
+}
 
 Describe 'Get-MboxPermission' {
     It 'shows the source mailbox RecipientTypeDetails in the heading' {

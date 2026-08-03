@@ -1,85 +1,89 @@
-function Test-MgGraphConnection {
-    param(
-        [string[]]$Scopes,
-        [bool]$EnsureExchangeOnline
-    )
-}
-function Add-EmptyLine {}
-function Write-NCMessage {
-    param(
-        [string]$Message,
-        [string]$Level
-    )
-}
-function Get-MgGroup {
-    param(
-        [string]$GroupId,
-        [string]$Filter,
-        [switch]$All,
-        [string[]]$Property
-    )
-}
-function Get-MgUser {
-    param(
-        [string]$UserId,
-        [string]$Filter,
-        [switch]$All
-    )
-}
-function Find-UserRecipient {
-    param(
-        [string]$UserPrincipalName,
-        [switch]$PreferGraphIdentity
-    )
-}
-function New-MgGroupMember {
-    param(
-        [string]$GroupId,
-        [string]$DirectoryObjectId
-    )
-}
-function Get-MgUserMemberOf {
-    param(
-        [string]$UserId,
-        [switch]$All
-    )
-}
-function Remove-MgGroupMemberByRef {
-    param(
-        [string]$GroupId,
-        [string]$DirectoryObjectId
-    )
-}
+BeforeAll {
+    function Test-MgGraphConnection {
+        param(
+            [string[]]$Scopes,
+            [bool]$EnsureExchangeOnline
+        )
+    }
+    function Add-EmptyLine {}
+    function Write-NCMessage {
+        param(
+            [string]$Message,
+            [string]$Level
+        )
+    }
+    function Get-MgGroup {
+        param(
+            [string]$GroupId,
+            [string]$Filter,
+            [switch]$All,
+            [string[]]$Property
+        )
+    }
+    function Get-MgUser {
+        param(
+            [string]$UserId,
+            [string]$Filter,
+            [switch]$All
+        )
+    }
+    function Find-UserRecipient {
+        param(
+            [string]$UserPrincipalName,
+            [switch]$PreferGraphIdentity
+        )
+    }
+    function New-MgGroupMember {
+        param(
+            [string]$GroupId,
+            [string]$DirectoryObjectId
+        )
+    }
+    function Get-MgUserMemberOf {
+        param(
+            [string]$UserId,
+            [switch]$All
+        )
+    }
+    function Remove-MgGroupMemberByRef {
+        param(
+            [string]$GroupId,
+            [string]$DirectoryObjectId
+        )
+    }
 
-. "$PSScriptRoot/../../Public/NC.Groups.ps1"
+    . "$PSScriptRoot/../../Public/NC.Groups.ps1"
+}
 
 Describe 'Entra group user identity resolution' {
-    $memberUpn = 'employee@contoso.com'
-    $guestMail = 'consultant@external.example'
-    $memberId = '11111111-1111-1111-1111-111111111111'
-    $guestId = '22222222-2222-2222-2222-222222222222'
-    $groupId = '33333333-3333-3333-3333-333333333333'
+    BeforeAll {
+        $memberUpn = 'employee@contoso.com'
+        $guestMail = 'consultant@external.example'
+        $memberId = '11111111-1111-1111-1111-111111111111'
+        $guestId = '22222222-2222-2222-2222-222222222222'
+        $groupId = '33333333-3333-3333-3333-333333333333'
 
-    $memberUser = [pscustomobject]@{
-        Id                = $memberId
-        UserPrincipalName = $memberUpn
-        DisplayName       = 'Tenant Employee'
-    }
-    $guestUser = [pscustomobject]@{
-        Id                = $guestId
-        UserPrincipalName = 'consultant_external.example#EXT#@contoso.onmicrosoft.com'
-        DisplayName       = 'External Consultant'
-    }
-    $group = [pscustomobject]@{
-        Id                    = $groupId
-        DisplayName           = 'Cloud Group'
-        OnPremisesSyncEnabled = $false
-    }
-    $membership = [pscustomobject]@{
-        Id                   = $groupId
-        AdditionalProperties = @{
-            displayName = 'Cloud Group'
-            mail        = 'cloud-group@contoso.com'
+        $memberUser = [pscustomobject]@{
+            Id                = $memberId
+            UserPrincipalName = $memberUpn
+            DisplayName       = 'Tenant Employee'
+        }
+        $guestUser = [pscustomobject]@{
+            Id                = $guestId
+            UserPrincipalName = 'consultant_external.example#EXT#@contoso.onmicrosoft.com'
+            DisplayName       = 'External Consultant'
+        }
+        $group = [pscustomobject]@{
+            Id                    = $groupId
+            DisplayName           = 'Cloud Group'
+            OnPremisesSyncEnabled = $false
+        }
+        $membership = [pscustomobject]@{
+            Id                   = $groupId
+            AdditionalProperties = @{
+                displayName = 'Cloud Group'
+                mail        = 'cloud-group@contoso.com'
+            }
         }
     }
 

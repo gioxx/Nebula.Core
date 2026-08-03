@@ -1,84 +1,89 @@
-function Test-MgGraphConnection {
-    param(
-        [string[]]$Scopes,
-        [bool]$EnsureExchangeOnline
-    )
-}
-function Add-EmptyLine {}
-function Write-NCMessage {
-    param(
-        [string]$Message,
-        [string]$Level
-    )
-}
-function Invoke-MgGraphRequest {
-    param(
-        [string]$Uri,
-        [string]$Method,
-        [object]$Body,
-        [string]$ContentType
-    )
-}
-function Invoke-NCGraphAllPagesCore {
-    param(
-        [string]$Uri,
-        [int]$DelayMs
-    )
-}
-function Get-NCEnterpriseApplicationSnapshot {
-    param(
-        [string]$ApplicationName,
-        [string]$ApplicationId,
-        [switch]$IncludeAppRoleAssignments
-    )
-}
-function Set-NCEnterpriseApplicationFromSnapshot {
-    param(
-        [object]$Snapshot,
-        [string]$TargetDisplayName,
-        [switch]$IncludeAppRoleAssignments
-    )
-}
-function Compare-NCEnterpriseApplicationSnapshot {
-    param(
-        [object]$ReferenceSnapshot,
-        [object]$DifferenceSnapshot,
-        [switch]$IncludeAppRoleAssignments
-    )
-}
+BeforeAll {
+    function Test-MgGraphConnection {
+        param(
+            [string[]]$Scopes,
+            [bool]$EnsureExchangeOnline
+        )
+    }
+    function Add-EmptyLine {}
+    function Write-NCMessage {
+        param(
+            [string]$Message,
+            [string]$Level
+        )
+    }
+    function Invoke-MgGraphRequest {
+        param(
+            [string]$Uri,
+            [string]$Method,
+            [object]$Body,
+            [string]$ContentType
+        )
+    }
+    function Invoke-NCGraphAllPagesCore {
+        param(
+            [string]$Uri,
+            [int]$DelayMs
+        )
+    }
+    function Get-NCEnterpriseApplicationSnapshot {
+        param(
+            [string]$ApplicationName,
+            [string]$ApplicationId,
+            [switch]$IncludeAppRoleAssignments
+        )
+    }
+    function Set-NCEnterpriseApplicationFromSnapshot {
+        param(
+            [object]$Snapshot,
+            [string]$TargetDisplayName,
+            [switch]$IncludeAppRoleAssignments
+        )
+    }
+    function Compare-NCEnterpriseApplicationSnapshot {
+        param(
+            [object]$ReferenceSnapshot,
+            [object]$DifferenceSnapshot,
+            [switch]$IncludeAppRoleAssignments
+        )
+    }
 
-. "$PSScriptRoot/../../Private/NC-Hlp.EnterpriseApplications.ps1"
+    . "$PSScriptRoot/../../Private/NC-Hlp.EnterpriseApplications.ps1"
+    . "$PSScriptRoot/../../Public/NC.EnterpriseApplications.ps1"
+}
 
 Describe 'Get-NCEnterpriseApplicationSnapshot' {
-    $app = [pscustomobject]@{
-        id                 = 'app-id-1'
-        appId              = 'client-id-1'
-        displayName        = 'Contoso Test App'
-        signInAudience     = 'AzureADMyOrg'
-        identifierUris     = @('api://contoso-test-app')
-        notes              = 'test notes'
-        tags               = @('tag1')
-        web                = [pscustomobject]@{ redirectUris = @('https://localhost/callback') }
-        spa                = [pscustomobject]@{ redirectUris = @() }
-        publicClient       = [pscustomobject]@{ redirectUris = @() }
-        requiredResourceAccess = @()
-        appRoles           = @()
-        api                = [pscustomobject]@{ oauth2PermissionScopes = @() }
-        passwordCredentials = @(
-            [pscustomobject]@{ displayName = 'secret1'; keyId = 'kid-1'; endDateTime = '2027-01-01T00:00:00Z' }
-        )
-        keyCredentials      = @()
+    BeforeAll {
+        $app = [pscustomobject]@{
+            id                 = 'app-id-1'
+            appId              = 'client-id-1'
+            displayName        = 'Contoso Test App'
+            signInAudience     = 'AzureADMyOrg'
+            identifierUris     = @('api://contoso-test-app')
+            notes              = 'test notes'
+            tags               = @('tag1')
+            web                = [pscustomobject]@{ redirectUris = @('https://localhost/callback') }
+            spa                = [pscustomobject]@{ redirectUris = @() }
+            publicClient       = [pscustomobject]@{ redirectUris = @() }
+            requiredResourceAccess = @()
+            appRoles           = @()
+            api                = [pscustomobject]@{ oauth2PermissionScopes = @() }
+            passwordCredentials = @(
+                [pscustomobject]@{ displayName = 'secret1'; keyId = 'kid-1'; endDateTime = '2027-01-01T00:00:00Z' }
+            )
+            keyCredentials      = @()
+        }
+        $sp = [pscustomobject]@{
+            id          = 'sp-id-1'
+            appId       = 'client-id-1'
+            displayName = 'Contoso Test App'
+            tags        = @()
+            homepage    = $null
+            logoUrl     = $null
+        }
+        $owner = [pscustomobject]@{ id = 'owner-1'; displayName = 'Jane Doe'; userPrincipalName = 'jane@contoso.com' }
+        $assignment = [pscustomobject]@{ principalId = 'principal-1'; principalDisplayName = 'Some Group'; principalType = 'Group'; appRoleId = 'role-1' }
     }
-    $sp = [pscustomobject]@{
-        id          = 'sp-id-1'
-        appId       = 'client-id-1'
-        displayName = 'Contoso Test App'
-        tags        = @()
-        homepage    = $null
-        logoUrl     = $null
-    }
-    $owner = [pscustomobject]@{ id = 'owner-1'; displayName = 'Jane Doe'; userPrincipalName = 'jane@contoso.com' }
-    $assignment = [pscustomobject]@{ principalId = 'principal-1'; principalDisplayName = 'Some Group'; principalType = 'Group'; appRoleId = 'role-1' }
 
     BeforeEach {
         Mock Write-NCMessage {}
@@ -133,22 +138,24 @@ Describe 'Get-NCEnterpriseApplicationSnapshot' {
 }
 
 Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
-    $snapshot = [pscustomobject]@{
-        Application        = [pscustomobject]@{
-            DisplayName            = 'Source App'
-            SignInAudience         = 'AzureADMyOrg'
-            IdentifierUris         = @()
-            Notes                  = $null
-            Tags                   = @()
-            Web                    = [pscustomobject]@{ redirectUris = @('https://localhost/callback') }
-            Spa                    = [pscustomobject]@{ redirectUris = @() }
-            PublicClient           = [pscustomobject]@{ redirectUris = @() }
-            RequiredResourceAccess = @()
-            AppRoles               = @()
-            Oauth2PermissionScopes = @()
-            Owners                 = @([pscustomobject]@{ Id = 'owner-1'; DisplayName = 'Jane Doe'; UserPrincipalName = 'jane@contoso.com' })
+    BeforeAll {
+        $snapshot = [pscustomobject]@{
+            Application        = [pscustomobject]@{
+                DisplayName            = 'Source App'
+                SignInAudience         = 'AzureADMyOrg'
+                IdentifierUris         = @()
+                Notes                  = $null
+                Tags                   = @()
+                Web                    = [pscustomobject]@{ redirectUris = @('https://localhost/callback') }
+                Spa                    = [pscustomobject]@{ redirectUris = @() }
+                PublicClient           = [pscustomobject]@{ redirectUris = @() }
+                RequiredResourceAccess = @()
+                AppRoles               = @()
+                Oauth2PermissionScopes = @()
+                Owners                 = @([pscustomobject]@{ Id = 'owner-1'; DisplayName = 'Jane Doe'; UserPrincipalName = 'jane@contoso.com' })
+            }
+            AppRoleAssignments = @([pscustomobject]@{ PrincipalId = 'principal-1'; PrincipalDisplayName = 'Some Group'; PrincipalType = 'Group'; AppRoleId = 'role-1' })
         }
-        AppRoleAssignments = @([pscustomobject]@{ PrincipalId = 'principal-1'; PrincipalDisplayName = 'Some Group'; PrincipalType = 'Group'; AppRoleId = 'role-1' })
     }
 
     BeforeEach {
@@ -280,26 +287,28 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
 }
 
 Describe 'Compare-NCEnterpriseApplicationSnapshot' {
-    function New-TestSnapshot {
-        param([string]$DisplayName, [string[]]$RedirectUris, [object[]]$Owners = @())
-        [pscustomobject]@{
-            Application         = [pscustomobject]@{
-                DisplayName            = $DisplayName
-                SignInAudience         = 'AzureADMyOrg'
-                IdentifierUris         = @()
-                Notes                  = $null
-                Tags                   = @()
-                Owners                 = $Owners
-                Web                    = [pscustomobject]@{ redirectUris = $RedirectUris }
-                Spa                    = [pscustomobject]@{ redirectUris = @() }
-                PublicClient           = [pscustomobject]@{ redirectUris = @() }
-                RequiredResourceAccess = @()
-                AppRoles               = @()
-                Oauth2PermissionScopes = @()
+    BeforeAll {
+        function New-TestSnapshot {
+            param([string]$DisplayName, [string[]]$RedirectUris, [object[]]$Owners = @())
+            [pscustomobject]@{
+                Application         = [pscustomobject]@{
+                    DisplayName            = $DisplayName
+                    SignInAudience         = 'AzureADMyOrg'
+                    IdentifierUris         = @()
+                    Notes                  = $null
+                    Tags                   = @()
+                    Owners                 = $Owners
+                    Web                    = [pscustomobject]@{ redirectUris = $RedirectUris }
+                    Spa                    = [pscustomobject]@{ redirectUris = @() }
+                    PublicClient           = [pscustomobject]@{ redirectUris = @() }
+                    RequiredResourceAccess = @()
+                    AppRoles               = @()
+                    Oauth2PermissionScopes = @()
+                }
+                ServicePrincipal    = [pscustomobject]@{ Tags = @(); Homepage = $null; LogoUrl = $null }
+                AppRoleAssignments  = @()
+                CredentialsMetadata = [pscustomobject]@{ PasswordCredentials = @(); KeyCredentials = @() }
             }
-            ServicePrincipal    = [pscustomobject]@{ Tags = @(); Homepage = $null; LogoUrl = $null }
-            AppRoleAssignments  = @()
-            CredentialsMetadata = [pscustomobject]@{ PasswordCredentials = @(); KeyCredentials = @() }
         }
     }
 
@@ -343,14 +352,14 @@ Describe 'Compare-NCEnterpriseApplicationSnapshot' {
     }
 }
 
-. "$PSScriptRoot/../../Public/NC.EnterpriseApplications.ps1"
-
 Describe 'Export-EnterpriseApplication' {
-    $snapshot = [pscustomobject]@{
-        SchemaVersion = 1
-        Application   = [pscustomobject]@{ DisplayName = 'Contoso Test App' }
+    BeforeAll {
+        $snapshot = [pscustomobject]@{
+            SchemaVersion = 1
+            Application   = [pscustomobject]@{ DisplayName = 'Contoso Test App' }
+        }
+        $outputPath = Join-Path $TestDrive 'export.json'
     }
-    $outputPath = Join-Path $TestDrive 'export.json'
 
     BeforeEach {
         Mock Test-MgGraphConnection { $true }
@@ -395,8 +404,10 @@ Describe 'Export-EnterpriseApplication' {
 }
 
 Describe 'Import-EnterpriseApplication' {
-    $inputPath = Join-Path $TestDrive 'import.json'
-    $applyResult = [pscustomobject]@{ TargetDisplayName = 'Target App'; TargetApplicationId = 'app-1'; Created = $true; OwnersAdded = 0; OwnersSkipped = 0; AssignmentsAdded = 0; AssignmentsSkipped = 0 }
+    BeforeAll {
+        $inputPath = Join-Path $TestDrive 'import.json'
+        $applyResult = [pscustomobject]@{ TargetDisplayName = 'Target App'; TargetApplicationId = 'app-1'; Created = $true; OwnersAdded = 0; OwnersSkipped = 0; AssignmentsAdded = 0; AssignmentsSkipped = 0 }
+    }
 
     BeforeEach {
         Mock Test-MgGraphConnection { $true }
@@ -454,8 +465,10 @@ Describe 'Import-EnterpriseApplication' {
 }
 
 Describe 'Copy-EnterpriseApplication' {
-    $snapshot = [pscustomobject]@{ Application = [pscustomobject]@{ DisplayName = 'Source App' } }
-    $applyResult = [pscustomobject]@{ TargetDisplayName = 'Target App'; TargetApplicationId = 'app-1'; Created = $true; OwnersAdded = 0; OwnersSkipped = 0; AssignmentsAdded = 0; AssignmentsSkipped = 0 }
+    BeforeAll {
+        $snapshot = [pscustomobject]@{ Application = [pscustomobject]@{ DisplayName = 'Source App' } }
+        $applyResult = [pscustomobject]@{ TargetDisplayName = 'Target App'; TargetApplicationId = 'app-1'; Created = $true; OwnersAdded = 0; OwnersSkipped = 0; AssignmentsAdded = 0; AssignmentsSkipped = 0 }
+    }
 
     BeforeEach {
         Mock Test-MgGraphConnection { $true }
@@ -490,9 +503,11 @@ Describe 'Copy-EnterpriseApplication' {
 }
 
 Describe 'Compare-EnterpriseApplication' {
-    $referencePath = Join-Path $TestDrive 'reference.json'
-    $differencePath = Join-Path $TestDrive 'difference.json'
-    $diffRows = @([pscustomobject]@{ Property = 'Application.Web'; ReferenceValue = 'a'; DifferenceValue = 'b' })
+    BeforeAll {
+        $referencePath = Join-Path $TestDrive 'reference.json'
+        $differencePath = Join-Path $TestDrive 'difference.json'
+        $diffRows = @([pscustomobject]@{ Property = 'Application.Web'; ReferenceValue = 'a'; DifferenceValue = 'b' })
+    }
 
     BeforeEach {
         $script:NCVars = @{ CSV_Encoding = 'UTF-8'; CSV_DefaultLimiter = ',' }
