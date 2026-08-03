@@ -225,7 +225,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     }
 
     if ($Snapshot.Application.IdentifierUris -and @($Snapshot.Application.IdentifierUris).Count -gt 0) {
-        $appBody.identifierUris = @($Snapshot.Application.IdentifierUris)
+        Write-NCMessage "Source Enterprise Application '$($Snapshot.Application.DisplayName)' has identifierUris ($($Snapshot.Application.IdentifierUris -join ', ')). Identifier URIs are unique per tenant and are never copied to the destination app; set them manually if the destination needs to expose an API." -Level WARNING
     }
 
     if (-not $targetApp) {
