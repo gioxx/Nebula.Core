@@ -257,3 +257,57 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
         }
     }
 }
+
+Describe 'Compare-NCEnterpriseApplicationSnapshot' {
+    function New-TestSnapshot {
+        param([string]$DisplayName, [string[]]$RedirectUris)
+        [pscustomobject]@{
+            Application         = [pscustomobject]@{
+                DisplayName            = $DisplayName
+                SignInAudience         = 'AzureADMyOrg'
+                IdentifierUris         = @()
+                Notes                  = $null
+                Tags                   = @()
+                Web                    = [pscustomobject]@{ redirectUris = $RedirectUris }
+                Spa                    = [pscustomobject]@{ redirectUris = @() }
+                PublicClient           = [pscustomobject]@{ redirectUris = @() }
+                RequiredResourceAccess = @()
+                AppRoles               = @()
+                Oauth2PermissionScopes = @()
+            }
+            ServicePrincipal    = [pscustomobject]@{ Tags = @(); Homepage = $null; LogoUrl = $null }
+            AppRoleAssignments  = @()
+            CredentialsMetadata = [pscustomobject]@{ PasswordCredentials = @(); KeyCredentials = @() }
+        }
+    }
+
+    It 'reports no differences for identical snapshots' {
+        $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @('https://localhost/callback')
+        $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @('https://localhost/callback')
+
+        $rows = Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $a -DifferenceSnapshot $b
+
+        $rows.Count | Should -Be 0
+    }
+
+    It 'reports a row for a changed redirect URI' {
+        $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @('https://localhost/callback')
+        $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @('https://prod.contoso.com/callback')
+
+        $rows = Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $a -DifferenceSnapshot $b
+
+        ($rows | Where-Object { $_.Property -eq 'Application.Web' }).Count | Should -Be 1
+    }
+
+    It 'ignores App Role Assignments unless requested' {
+        $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
+        $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
+        $a.AppRoleAssignments = @([pscustomobject]@{ PrincipalId = 'p1'; AppRoleId = 'r1' })
+
+        $rowsWithoutAssignments = Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $a -DifferenceSnapshot $b
+        $rowsWithAssignments = Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $a -DifferenceSnapshot $b -IncludeAppRoleAssignments
+
+        ($rowsWithoutAssignments | Where-Object { $_.Property -eq 'AppRoleAssignments' }).Count | Should -Be 0
+        ($rowsWithAssignments | Where-Object { $_.Property -eq 'AppRoleAssignments' }).Count | Should -Be 1
+    }
+}

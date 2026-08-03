@@ -418,3 +418,65 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         Error               = $null
     }
 }
+
+function Compare-NCEnterpriseApplicationSnapshot {
+    <#
+    .SYNOPSIS
+        Diffs two Enterprise Application snapshots.
+    .PARAMETER ReferenceSnapshot
+        Baseline snapshot (the "A" side).
+    .PARAMETER DifferenceSnapshot
+        Snapshot to compare against the baseline (the "B" side).
+    .PARAMETER IncludeAppRoleAssignments
+        Also compare App Role Assignments.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$ReferenceSnapshot,
+
+        [Parameter(Mandatory = $true)]
+        [object]$DifferenceSnapshot,
+
+        [switch]$IncludeAppRoleAssignments
+    )
+
+    $rows = [System.Collections.Generic.List[object]]::new()
+
+    $addIfDifferent = {
+        param($name, $refValue, $diffValue)
+        $refJson = ($refValue | ConvertTo-Json -Depth 10 -Compress)
+        $diffJson = ($diffValue | ConvertTo-Json -Depth 10 -Compress)
+        if ($refJson -ne $diffJson) {
+            $rows.Add([pscustomobject][ordered]@{
+                    Property        = $name
+                    ReferenceValue  = $refValue
+                    DifferenceValue = $diffValue
+                })
+        }
+    }
+
+    & $addIfDifferent 'Application.DisplayName' $ReferenceSnapshot.Application.DisplayName $DifferenceSnapshot.Application.DisplayName
+    & $addIfDifferent 'Application.SignInAudience' $ReferenceSnapshot.Application.SignInAudience $DifferenceSnapshot.Application.SignInAudience
+    & $addIfDifferent 'Application.IdentifierUris' $ReferenceSnapshot.Application.IdentifierUris $DifferenceSnapshot.Application.IdentifierUris
+    & $addIfDifferent 'Application.Notes' $ReferenceSnapshot.Application.Notes $DifferenceSnapshot.Application.Notes
+    & $addIfDifferent 'Application.Tags' $ReferenceSnapshot.Application.Tags $DifferenceSnapshot.Application.Tags
+    & $addIfDifferent 'Application.Web' $ReferenceSnapshot.Application.Web $DifferenceSnapshot.Application.Web
+    & $addIfDifferent 'Application.Spa' $ReferenceSnapshot.Application.Spa $DifferenceSnapshot.Application.Spa
+    & $addIfDifferent 'Application.PublicClient' $ReferenceSnapshot.Application.PublicClient $DifferenceSnapshot.Application.PublicClient
+    & $addIfDifferent 'Application.RequiredResourceAccess' $ReferenceSnapshot.Application.RequiredResourceAccess $DifferenceSnapshot.Application.RequiredResourceAccess
+    & $addIfDifferent 'Application.AppRoles' $ReferenceSnapshot.Application.AppRoles $DifferenceSnapshot.Application.AppRoles
+    & $addIfDifferent 'Application.Oauth2PermissionScopes' $ReferenceSnapshot.Application.Oauth2PermissionScopes $DifferenceSnapshot.Application.Oauth2PermissionScopes
+    & $addIfDifferent 'ServicePrincipal.Tags' $ReferenceSnapshot.ServicePrincipal.Tags $DifferenceSnapshot.ServicePrincipal.Tags
+    & $addIfDifferent 'ServicePrincipal.Homepage' $ReferenceSnapshot.ServicePrincipal.Homepage $DifferenceSnapshot.ServicePrincipal.Homepage
+    & $addIfDifferent 'ServicePrincipal.LogoUrl' $ReferenceSnapshot.ServicePrincipal.LogoUrl $DifferenceSnapshot.ServicePrincipal.LogoUrl
+
+    if ($IncludeAppRoleAssignments.IsPresent) {
+        & $addIfDifferent 'AppRoleAssignments' $ReferenceSnapshot.AppRoleAssignments $DifferenceSnapshot.AppRoleAssignments
+    }
+
+    & $addIfDifferent 'CredentialsMetadata.PasswordCredentials' $ReferenceSnapshot.CredentialsMetadata.PasswordCredentials $DifferenceSnapshot.CredentialsMetadata.PasswordCredentials
+    & $addIfDifferent 'CredentialsMetadata.KeyCredentials' $ReferenceSnapshot.CredentialsMetadata.KeyCredentials $DifferenceSnapshot.CredentialsMetadata.KeyCredentials
+
+    return $rows.ToArray()
+}
