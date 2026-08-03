@@ -260,7 +260,7 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
 
 Describe 'Compare-NCEnterpriseApplicationSnapshot' {
     function New-TestSnapshot {
-        param([string]$DisplayName, [string[]]$RedirectUris)
+        param([string]$DisplayName, [string[]]$RedirectUris, [object[]]$Owners = @())
         [pscustomobject]@{
             Application         = [pscustomobject]@{
                 DisplayName            = $DisplayName
@@ -268,6 +268,7 @@ Describe 'Compare-NCEnterpriseApplicationSnapshot' {
                 IdentifierUris         = @()
                 Notes                  = $null
                 Tags                   = @()
+                Owners                 = $Owners
                 Web                    = [pscustomobject]@{ redirectUris = $RedirectUris }
                 Spa                    = [pscustomobject]@{ redirectUris = @() }
                 PublicClient           = [pscustomobject]@{ redirectUris = @() }
@@ -309,5 +310,14 @@ Describe 'Compare-NCEnterpriseApplicationSnapshot' {
 
         ($rowsWithoutAssignments | Where-Object { $_.Property -eq 'AppRoleAssignments' }).Count | Should -Be 0
         ($rowsWithAssignments | Where-Object { $_.Property -eq 'AppRoleAssignments' }).Count | Should -Be 1
+    }
+
+    It 'reports a row for a changed owner' {
+        $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @() -Owners @([pscustomobject]@{ Id = 'owner-1'; DisplayName = 'Jane Doe'; UserPrincipalName = 'jane@contoso.com' })
+        $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @() -Owners @([pscustomobject]@{ Id = 'owner-2'; DisplayName = 'John Smith'; UserPrincipalName = 'john@contoso.com' })
+
+        $rows = Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $a -DifferenceSnapshot $b
+
+        ($rows | Where-Object { $_.Property -eq 'Application.Owners' }).Count | Should -Be 1
     }
 }

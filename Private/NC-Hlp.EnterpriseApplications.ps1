@@ -461,6 +461,7 @@ function Compare-NCEnterpriseApplicationSnapshot {
     & $addIfDifferent 'Application.IdentifierUris' $ReferenceSnapshot.Application.IdentifierUris $DifferenceSnapshot.Application.IdentifierUris
     & $addIfDifferent 'Application.Notes' $ReferenceSnapshot.Application.Notes $DifferenceSnapshot.Application.Notes
     & $addIfDifferent 'Application.Tags' $ReferenceSnapshot.Application.Tags $DifferenceSnapshot.Application.Tags
+    & $addIfDifferent 'Application.Owners' $ReferenceSnapshot.Application.Owners $DifferenceSnapshot.Application.Owners
     & $addIfDifferent 'Application.Web' $ReferenceSnapshot.Application.Web $DifferenceSnapshot.Application.Web
     & $addIfDifferent 'Application.Spa' $ReferenceSnapshot.Application.Spa $DifferenceSnapshot.Application.Spa
     & $addIfDifferent 'Application.PublicClient' $ReferenceSnapshot.Application.PublicClient $DifferenceSnapshot.Application.PublicClient
