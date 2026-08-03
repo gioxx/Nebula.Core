@@ -81,3 +81,70 @@ function Export-EnterpriseApplication {
         }
     }
 }
+
+function Import-EnterpriseApplication {
+    <#
+    .SYNOPSIS
+        Creates or updates an Enterprise Application from a JSON snapshot file.
+    .DESCRIPTION
+        Reads a snapshot produced by Export-EnterpriseApplication and applies its properties to the
+        Enterprise Application identified by -TargetDisplayName, creating it if it does not exist.
+    .PARAMETER InputPath
+        Path to the JSON snapshot file.
+    .PARAMETER TargetDisplayName
+        Display name of the destination Enterprise Application. Created if missing, updated if it exists.
+    .PARAMETER IncludeAppRoleAssignments
+        Also apply App Role Assignments captured in the snapshot.
+    .PARAMETER PassThru
+        Emit the apply-result summary object.
+    .EXAMPLE
+        Import-EnterpriseApplication -InputPath .\contoso-test-app.json -TargetDisplayName "Contoso Prod App"
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true, Position = 1)]
+        [string]$TargetDisplayName,
+
+        [switch]$IncludeAppRoleAssignments,
+        [switch]$PassThru
+    )
+
+    begin {
+        $graphReady = Test-MgGraphConnection -Scopes @('Application.ReadWrite.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        if (-not $graphReady) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+        }
+    }
+
+    process {
+        if (-not $graphReady) {
+            return
+        }
+
+        if (-not (Test-Path -LiteralPath $InputPath)) {
+            Write-NCMessage "Input file '$InputPath' not found." -Level ERROR
+            return
+        }
+
+        try {
+            $snapshot = Get-Content -LiteralPath $InputPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            Write-NCMessage "Unable to read or parse snapshot '$InputPath': $($_.Exception.Message)" -Level ERROR
+            return
+        }
+
+        if (-not $PSCmdlet.ShouldProcess($TargetDisplayName, "Import Enterprise Application from '$InputPath'")) {
+            return
+        }
+
+        $result = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName $TargetDisplayName -IncludeAppRoleAssignments:$IncludeAppRoleAssignments.IsPresent -Confirm:$false
+        if ($PassThru.IsPresent) {
+            $result
+        }
+    }
+}

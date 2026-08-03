@@ -32,6 +32,13 @@ function Get-NCEnterpriseApplicationSnapshot {
         [switch]$IncludeAppRoleAssignments
     )
 }
+function Set-NCEnterpriseApplicationFromSnapshot {
+    param(
+        [object]$Snapshot,
+        [string]$TargetDisplayName,
+        [switch]$IncludeAppRoleAssignments
+    )
+}
 
 . "$PSScriptRoot/../../Private/NC-Hlp.EnterpriseApplications.ps1"
 
@@ -377,5 +384,47 @@ Describe 'Export-EnterpriseApplication' {
         Export-EnterpriseApplication -ApplicationName 'Contoso Test App' -OutputPath $outputPath
 
         Assert-MockCalled Get-NCEnterpriseApplicationSnapshot -Times 0 -Scope It
+    }
+}
+
+Describe 'Import-EnterpriseApplication' {
+    $inputPath = Join-Path $TestDrive 'import.json'
+    $applyResult = [pscustomobject]@{ TargetDisplayName = 'Target App'; TargetApplicationId = 'app-1'; Created = $true; OwnersAdded = 0; OwnersSkipped = 0; AssignmentsAdded = 0; AssignmentsSkipped = 0 }
+
+    BeforeEach {
+        Mock Test-MgGraphConnection { $true }
+        Mock Add-EmptyLine {}
+        Mock Write-NCMessage {}
+        Mock Set-NCEnterpriseApplicationFromSnapshot { $applyResult }
+        '{"Application":{"DisplayName":"Source App"}}' | Set-Content -LiteralPath $inputPath
+    }
+
+    It 'reads the snapshot file and applies it to the target' {
+        Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -Confirm:$false
+
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 1 -Scope It -ParameterFilter {
+            $TargetDisplayName -eq 'Target App' -and $Snapshot.Application.DisplayName -eq 'Source App'
+        }
+    }
+
+    It 'emits the result object only with -PassThru' {
+        $result = Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -Confirm:$false
+        $result | Should -BeNullOrEmpty
+
+        $result = Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -PassThru -Confirm:$false
+        $result.TargetApplicationId | Should -Be 'app-1'
+    }
+
+    It 'errors when the input file does not exist' {
+        Import-EnterpriseApplication -InputPath (Join-Path $TestDrive 'missing.json') -TargetDisplayName 'Target App' -Confirm:$false
+
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' }
+    }
+
+    It 'does not apply anything under -WhatIf' {
+        Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -WhatIf
+
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
     }
 }
