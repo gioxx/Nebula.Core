@@ -211,14 +211,26 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     $targetApp = $existingMatches | Select-Object -First 1
     $created = $false
 
+    # Graph returns read-only companion fields (e.g. web.redirectUriSettings) alongside the writable
+    # ones when reading an application; sending both back on create/update is rejected outright
+    # ("Can't modify redirectUris and redirectUriSettings within the same request."). Rebuild each
+    # sub-object from only the fields Graph accepts on write, instead of forwarding the raw payload.
+    $webSource = $Snapshot.Application.Web
+    $cleanWeb = [ordered]@{
+        redirectUris = @($webSource.redirectUris)
+    }
+    if ($webSource.homePageUrl) { $cleanWeb.homePageUrl = $webSource.homePageUrl }
+    if ($webSource.logoutUrl) { $cleanWeb.logoutUrl = $webSource.logoutUrl }
+    if ($webSource.implicitGrantSettings) { $cleanWeb.implicitGrantSettings = $webSource.implicitGrantSettings }
+
     $appBody = [ordered]@{
         displayName            = $TargetDisplayName
         signInAudience         = $Snapshot.Application.SignInAudience
         notes                  = $Snapshot.Application.Notes
         tags                   = @($Snapshot.Application.Tags)
-        web                    = $Snapshot.Application.Web
-        spa                    = $Snapshot.Application.Spa
-        publicClient           = $Snapshot.Application.PublicClient
+        web                    = $cleanWeb
+        spa                    = @{ redirectUris = @($Snapshot.Application.Spa.redirectUris) }
+        publicClient           = @{ redirectUris = @($Snapshot.Application.PublicClient.redirectUris) }
         requiredResourceAccess = @($Snapshot.Application.RequiredResourceAccess)
         appRoles               = @($Snapshot.Application.AppRoles)
         api                    = @{ oauth2PermissionScopes = @($Snapshot.Application.Oauth2PermissionScopes) }

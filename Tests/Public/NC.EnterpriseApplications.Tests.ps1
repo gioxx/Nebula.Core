@@ -259,6 +259,49 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
         $result.TargetApplicationId | Should -BeNullOrEmpty
     }
 
+    It 'never forwards read-only redirectUriSettings alongside redirectUris' {
+        $snapshotWithRedirectUriSettings = [pscustomobject]@{
+            Application        = [pscustomobject]@{
+                DisplayName            = 'Source App'
+                SignInAudience         = 'AzureADMyOrg'
+                IdentifierUris         = @()
+                Notes                  = $null
+                Tags                   = @()
+                Web                    = [pscustomobject]@{
+                    redirectUris        = @('https://localhost/callback')
+                    redirectUriSettings = @([pscustomobject]@{ uri = 'https://localhost/callback'; index = $null })
+                }
+                Spa                    = [pscustomobject]@{ redirectUris = @() }
+                PublicClient           = [pscustomobject]@{ redirectUris = @() }
+                RequiredResourceAccess = @()
+                AppRoles               = @()
+                Oauth2PermissionScopes = @()
+                Owners                 = @()
+            }
+            AppRoleAssignments = @()
+        }
+        $capturedBody = $null
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^https://graph\.microsoft\.com/v1\.0/applications\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'https://graph.microsoft.com/v1.0/applications') {
+                $script:capturedBody = $Body
+                return [pscustomobject]@{ id = 'new-app-id'; appId = 'new-client-id'; displayName = 'Target App' }
+            }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'https://graph.microsoft.com/v1.0/servicePrincipals') {
+                return [pscustomobject]@{ id = 'new-sp-id'; appId = 'new-client-id' }
+            }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $result = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshotWithRedirectUriSettings -TargetDisplayName 'Target App' -Confirm:$false
+
+        $result.Created | Should -Be $true
+        $script:capturedBody | Should -Not -Match 'redirectUriSettings'
+        $script:capturedBody | Should -Match 'https://localhost/callback'
+    }
+
     It 'never writes identifierUris and logs a warning when the source has them' {
         $snapshotWithUri = [pscustomobject]@{
             Application        = [pscustomobject]@{
