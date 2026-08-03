@@ -1,6 +1,6 @@
 @{
     RootModule           = 'Nebula.Core.psm1'
-    ModuleVersion        = '1.3.0'
+    ModuleVersion        = '1.2.3'
     GUID                 = '07acc3c0-14dc-4c1d-a1d0-6140e83c2a41'
     Author               = 'Giovanni Solone'
     Description          = 'A PowerShell module that go beyond your workstations. It will make your Microsoft 365 life easier!'
