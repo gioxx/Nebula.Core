@@ -337,11 +337,16 @@ function Compare-EnterpriseApplication {
         }
 
         $rows = Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $referenceSnapshot -DifferenceSnapshot $differenceSnapshot -IncludeAppRoleAssignments:$IncludeAppRoleAssignments.IsPresent
+        $rows = @($rows)
 
         if ($OutputReportPath) {
             try {
                 if ($OutputReportPath -match '\.json$') {
-                    $rows | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $OutputReportPath -Encoding UTF8 -ErrorAction Stop
+                    # Do not pipe $rows into ConvertTo-Json: piping unwraps the array one item at a
+                    # time, so ConvertTo-Json would still emit a bare object for exactly one row and
+                    # nothing at all for zero rows. Passing -InputObject keeps $rows a single array
+                    # argument, so ConvertTo-Json always emits a JSON array ([], [{...}], [{...},{...}]).
+                    ConvertTo-Json -InputObject $rows -Depth 10 | Set-Content -LiteralPath $OutputReportPath -Encoding UTF8 -ErrorAction Stop
                 }
                 else {
                     $rows | Export-Csv -LiteralPath $OutputReportPath -NoTypeInformation -Encoding UTF8 -ErrorAction Stop

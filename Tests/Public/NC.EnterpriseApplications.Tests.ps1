@@ -536,4 +536,30 @@ Describe 'Compare-EnterpriseApplication' {
         $written = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
         $written[0].Property | Should -Be 'Application.Web'
     }
+
+    It 'writes a JSON array (not a bare object or null) when there is exactly one difference' {
+        Mock Compare-NCEnterpriseApplicationSnapshot { @([pscustomobject]@{ Property = 'Application.Web'; ReferenceValue = 'a'; DifferenceValue = 'b' }) }
+        $reportPath = Join-Path $TestDrive 'single-diff-report.json'
+
+        Compare-EnterpriseApplication -ReferencePath $referencePath -DifferencePath $differencePath -OutputReportPath $reportPath
+
+        $rawContent = Get-Content -LiteralPath $reportPath -Raw
+        $rawContent.TrimStart() | Should -Match '^\['
+        $written = $rawContent | ConvertFrom-Json
+        @($written).Count | Should -Be 1
+    }
+
+    It 'writes an empty JSON array (not null) when there are no differences' {
+        Mock Compare-NCEnterpriseApplicationSnapshot { @() }
+        $reportPath = Join-Path $TestDrive 'no-diff-report.json'
+
+        Compare-EnterpriseApplication -ReferencePath $referencePath -DifferencePath $differencePath -OutputReportPath $reportPath
+
+        $rawContent = Get-Content -LiteralPath $reportPath -Raw
+        # ConvertTo-Json pretty-prints an empty array as "[\r\n\r\n]" (internal whitespace), so compare
+        # with all whitespace stripped rather than a strict string match.
+        ($rawContent -replace '\s', '') | Should -Be '[]'
+        $parsed = $rawContent | ConvertFrom-Json
+        @($parsed).Count | Should -Be 0
+    }
 }
