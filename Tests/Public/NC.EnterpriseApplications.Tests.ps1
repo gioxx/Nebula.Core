@@ -25,6 +25,13 @@ function Invoke-NCGraphAllPagesCore {
         [int]$DelayMs
     )
 }
+function Get-NCEnterpriseApplicationSnapshot {
+    param(
+        [string]$ApplicationName,
+        [string]$ApplicationId,
+        [switch]$IncludeAppRoleAssignments
+    )
+}
 
 . "$PSScriptRoot/../../Private/NC-Hlp.EnterpriseApplications.ps1"
 
@@ -319,5 +326,56 @@ Describe 'Compare-NCEnterpriseApplicationSnapshot' {
         $rows = Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $a -DifferenceSnapshot $b
 
         ($rows | Where-Object { $_.Property -eq 'Application.Owners' }).Count | Should -Be 1
+    }
+}
+
+. "$PSScriptRoot/../../Public/NC.EnterpriseApplications.ps1"
+
+Describe 'Export-EnterpriseApplication' {
+    $snapshot = [pscustomobject]@{
+        SchemaVersion = 1
+        Application   = [pscustomobject]@{ DisplayName = 'Contoso Test App' }
+    }
+    $outputPath = Join-Path $TestDrive 'export.json'
+
+    BeforeEach {
+        Mock Test-MgGraphConnection { $true }
+        Mock Add-EmptyLine {}
+        Mock Write-NCMessage {}
+        Mock Get-NCEnterpriseApplicationSnapshot { $snapshot }
+    }
+
+    It 'writes the snapshot as JSON to the output path' {
+        Export-EnterpriseApplication -ApplicationName 'Contoso Test App' -OutputPath $outputPath
+
+        Test-Path -LiteralPath $outputPath | Should -Be $true
+        $written = Get-Content -LiteralPath $outputPath -Raw | ConvertFrom-Json
+        $written.Application.DisplayName | Should -Be 'Contoso Test App'
+    }
+
+    It 'refuses to overwrite an existing file without -Force' {
+        Set-Content -LiteralPath $outputPath -Value '{}'
+
+        Export-EnterpriseApplication -ApplicationName 'Contoso Test App' -OutputPath $outputPath
+
+        Assert-MockCalled Get-NCEnterpriseApplicationSnapshot -Times 0 -Scope It
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' }
+    }
+
+    It 'overwrites an existing file when -Force is used' {
+        Set-Content -LiteralPath $outputPath -Value '{}'
+
+        Export-EnterpriseApplication -ApplicationName 'Contoso Test App' -OutputPath $outputPath -Force
+
+        $written = Get-Content -LiteralPath $outputPath -Raw | ConvertFrom-Json
+        $written.Application.DisplayName | Should -Be 'Contoso Test App'
+    }
+
+    It 'stops early when Microsoft Graph is not connected' {
+        Mock Test-MgGraphConnection { $false }
+
+        Export-EnterpriseApplication -ApplicationName 'Contoso Test App' -OutputPath $outputPath
+
+        Assert-MockCalled Get-NCEnterpriseApplicationSnapshot -Times 0 -Scope It
     }
 }
