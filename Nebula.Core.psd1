@@ -1,6 +1,6 @@
 @{
     RootModule           = 'Nebula.Core.psm1'
-    ModuleVersion        = '1.2.3'
+    ModuleVersion        = '1.3.0'
     GUID                 = '07acc3c0-14dc-4c1d-a1d0-6140e83c2a41'
     Author               = 'Giovanni Solone'
     Description          = 'A PowerShell module that go beyond your workstations. It will make your Microsoft 365 life easier!'
@@ -123,9 +123,11 @@
         PSData = @{
             Tags         = @(
                 'Administration',
+                'App-Registration',
                 'Automation',
                 'Calendar',
                 'Configuration',
+                'Enterprise-Applications',
                 'Entra',
                 'Exchange',
                 'Exchange-Online',
@@ -142,25 +144,16 @@
                 'Quarantine',
                 'Reporting',
                 'Rooms',
-                'Security'
+                'Security',
+                'Service-Principal'
             )
             ProjectUri   = 'https://github.com/gioxx/Nebula.Core'
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/icon.png'
 ReleaseNotes = @'
-- Fix: `Add/Remove-EntraGroupDevice`, `Add/Remove-EntraGroupOwner`, and `Add/Remove-EntraGroupUser` now support the positional form `<GroupName> <MemberIdentifier>` in addition to named parameters.
-- Fix: `Add/Get/Remove-EntraGroupUser` now resolve invited Entra guests by external e-mail through a Graph-compatible fallback while preserving direct lookup for tenant members.
-- Fix: `Export-IntuneAppInventory` now normalizes cached `LastInventory` values through Nebula's configured date/time formatter so export output matches the single-device helper.
-- Fix: `Get-UserGroups` now falls back to Microsoft Graph resolution when Exchange mailbox lookup is not available, so Entra guest users can be queried without using the GUI.
-- Improve: `Get-MboxPermission` now shows the source mailbox `RecipientTypeDetails` value in the output heading.
-- Improve: `Get-UserGroups` keeps the existing Exchange-first behavior for regular users while handling guest identities more gracefully.
-- Improve: add `Get-IntuneAppPresence` for quick single-device app presence checks with one-row output, always include `LastInventory`, and return the matched app name in `AppName`.
-- Improve: add `Remove-EntraUser` for direct UPN-based Entra user removal with Graph.
-- Improve: add `Search-EntraUser` to search users by display name, user principal name, or mail, including guest UPN fragments.
-- Improve: add culture-safe date parsing plus optional timezone-aware formatting through `DateTimeTimeZone`.
-- Improve: change the default CSV delimiter to comma for a more standard US-friendly baseline.
-- Improve: set the default user-facing date/time zone to `Eastern Standard Time` to align with the module's US baseline.
-- Improve: unify user-facing date formatting through Nebula's configured date/time patterns, including Intune inventory and license catalog outputs.
+- Add: `Export-EnterpriseApplication`, `Import-EnterpriseApplication`, `Copy-EnterpriseApplication`, and `Compare-EnterpriseApplication` to snapshot, recreate, clone, and diff Enterprise Applications (App Registration + Service Principal) within the same Entra tenant, including optional App Role Assignment copying, owner sync, and CSV/JSON diff reports. Client secrets and certificates are never copied; only their metadata is captured for reporting.
+- Fix: `Compare-EnterpriseApplication`'s CSV report now renders non-scalar diff values (redirect URIs, permissions, app roles, owners) as readable JSON instead of an identical, uninformative string on both sides, and now honors the module's configured CSV encoding and delimiter.
+- Improve: the Pester test suite (`Tests/Public/*.Tests.ps1`) now correctly scopes its fixtures inside `BeforeAll` blocks so tests run for real under Pester 5, instead of only succeeding at test discovery.
 '@
         }
     }
