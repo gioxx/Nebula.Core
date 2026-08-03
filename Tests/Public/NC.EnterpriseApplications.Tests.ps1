@@ -154,6 +154,7 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
                 Oauth2PermissionScopes = @()
                 Owners                 = @([pscustomobject]@{ Id = 'owner-1'; DisplayName = 'Jane Doe'; UserPrincipalName = 'jane@contoso.com' })
             }
+            ServicePrincipal   = [pscustomobject]@{ Tags = @('WindowsAzureActiveDirectoryIntegratedApp'); Homepage = $null; LogoUrl = $null }
             AppRoleAssignments = @([pscustomobject]@{ PrincipalId = 'principal-1'; PrincipalDisplayName = 'Some Group'; PrincipalType = 'Group'; AppRoleId = 'role-1' })
         }
     }
@@ -188,6 +189,10 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
         Assert-MockCalled Invoke-MgGraphRequest -Scope It -ParameterFilter {
             $Method -eq 'POST' -and $Uri -eq 'https://graph.microsoft.com/v1.0/applications'
         }
+        Assert-MockCalled Invoke-MgGraphRequest -Scope It -ParameterFilter {
+            $Method -eq 'POST' -and $Uri -eq 'https://graph.microsoft.com/v1.0/servicePrincipals' -and
+            $Body -match 'WindowsAzureActiveDirectoryIntegratedApp'
+        }
     }
 
     It 'updates an existing destination application instead of creating a new one' {
@@ -199,6 +204,7 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
             if ($Uri -match '/servicePrincipals\?') {
                 return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-sp-id'; appId = 'existing-client-id' }) }
             }
+            if ($Method -eq 'PATCH' -and $Uri -match '/servicePrincipals/existing-sp-id$') { return $null }
             return $null
         }
         Mock Invoke-NCGraphAllPagesCore { return @() }
@@ -212,6 +218,31 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
         Assert-MockCalled Invoke-MgGraphRequest -Scope It -ParameterFilter {
             $Method -eq 'PATCH' -and $Uri -eq 'https://graph.microsoft.com/v1.0/applications/existing-app-id'
         }
+    }
+
+    It 'updates tags/homepage on an existing Service Principal so the app stays visible under Enterprise applications' {
+        $spPatchCalled = $false
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^https://graph\.microsoft\.com/v1\.0/applications\?') {
+                return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-app-id'; appId = 'existing-client-id'; displayName = 'Target App' }) }
+            }
+            if ($Method -eq 'PATCH' -and $Uri -match '/applications/existing-app-id$') { return $null }
+            if ($Uri -match '/servicePrincipals\?') {
+                return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-sp-id'; appId = 'existing-client-id' }) }
+            }
+            if ($Method -eq 'PATCH' -and $Uri -match '/servicePrincipals/existing-sp-id$') {
+                $script:spPatchCalled = $true
+                $script:spPatchBody = $Body
+                return $null
+            }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -Confirm:$false | Out-Null
+
+        $script:spPatchCalled | Should -Be $true
+        $script:spPatchBody | Should -Match 'WindowsAzureActiveDirectoryIntegratedApp'
     }
 
     It 'applies App Role Assignments only when requested' {

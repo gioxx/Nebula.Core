@@ -317,10 +317,24 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         return
     }
 
+    # Tags (e.g. WindowsAzureActiveDirectoryIntegratedApp) are what makes the Entra Portal list a
+    # Service Principal under "Enterprise applications" at all; a bare `appId`-only create leaves
+    # the app visible in "App registrations" but absent from "Enterprise applications". homepageUrl
+    # is applied too; logoUrl is read-only in Graph and is never written.
+    $spWriteBody = [ordered]@{
+        tags = @($Snapshot.ServicePrincipal.Tags)
+    }
+    if ($Snapshot.ServicePrincipal.Homepage) {
+        $spWriteBody.homepage = $Snapshot.ServicePrincipal.Homepage
+    }
+
     $targetSp = @($spResponse.value) | Select-Object -First 1
     if (-not $targetSp) {
+        $spCreateBody = [ordered]@{ appId = $targetApp.appId }
+        foreach ($key in $spWriteBody.Keys) { $spCreateBody[$key] = $spWriteBody[$key] }
+
         try {
-            $targetSp = Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/servicePrincipals' -Method POST -Body (@{ appId = $targetApp.appId } | ConvertTo-Json -Depth 5) -ContentType 'application/json' -ErrorAction Stop
+            $targetSp = Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/servicePrincipals' -Method POST -Body ($spCreateBody | ConvertTo-Json -Depth 5) -ContentType 'application/json' -ErrorAction Stop
             Write-NCMessage "Created Service Principal for '$TargetDisplayName'." -Level SUCCESS
         }
         catch {
@@ -337,6 +351,14 @@ function Set-NCEnterpriseApplicationFromSnapshot {
                 Error               = "Failed to create Service Principal for '$TargetDisplayName': $($_.Exception.Message)"
             }
             return
+        }
+    }
+    else {
+        try {
+            Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($targetSp.id)" -Method PATCH -Body ($spWriteBody | ConvertTo-Json -Depth 5) -ContentType 'application/json' -ErrorAction Stop | Out-Null
+        }
+        catch {
+            Write-NCMessage "Unable to update Service Principal tags/homepage for '$TargetDisplayName': $($_.Exception.Message)" -Level WARNING
         }
     }
 
