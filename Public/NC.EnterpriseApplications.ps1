@@ -148,3 +148,80 @@ function Import-EnterpriseApplication {
         }
     }
 }
+
+function Copy-EnterpriseApplication {
+    <#
+    .SYNOPSIS
+        Clones an Enterprise Application directly into a new or existing destination, without an intermediate file.
+    .DESCRIPTION
+        Combines Get-NCEnterpriseApplicationSnapshot and Set-NCEnterpriseApplicationFromSnapshot to read the
+        source Enterprise Application and apply it to -TargetDisplayName in one step.
+    .PARAMETER SourceApplicationName
+        Display name of the source Enterprise Application.
+    .PARAMETER SourceApplicationId
+        Object ID of the source Application.
+    .PARAMETER TargetDisplayName
+        Display name of the destination Enterprise Application. Created if missing, updated if it exists.
+    .PARAMETER IncludeAppRoleAssignments
+        Also copy App Role Assignments (users/groups assigned to the app).
+    .PARAMETER PassThru
+        Emit the apply-result summary object.
+    .EXAMPLE
+        Copy-EnterpriseApplication -SourceApplicationName "Contoso Test App" -TargetDisplayName "Contoso Prod App"
+    #>
+    [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+    param(
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0)]
+        [string]$SourceApplicationName,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0)]
+        [string]$SourceApplicationId,
+
+        [Parameter(Mandatory = $true, Position = 1)]
+        [string]$TargetDisplayName,
+
+        [switch]$IncludeAppRoleAssignments,
+        [switch]$PassThru
+    )
+
+    begin {
+        $graphReady = Test-MgGraphConnection -Scopes @('Application.ReadWrite.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        if (-not $graphReady) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+        }
+    }
+
+    process {
+        if (-not $graphReady) {
+            return
+        }
+
+        $snapshotParams = @{ IncludeAppRoleAssignments = $IncludeAppRoleAssignments.IsPresent }
+        if ($PSCmdlet.ParameterSetName -eq 'ById') {
+            $snapshotParams.ApplicationId = $SourceApplicationId
+        }
+        else {
+            $snapshotParams.ApplicationName = $SourceApplicationName
+        }
+
+        $snapshot = Get-NCEnterpriseApplicationSnapshot @snapshotParams
+        if (-not $snapshot) {
+            return
+        }
+
+        if ($snapshot.Application.DisplayName -eq $TargetDisplayName) {
+            Write-NCMessage "Source and destination Enterprise Applications are the same. Aborting." -Level ERROR
+            return
+        }
+
+        if (-not $PSCmdlet.ShouldProcess($TargetDisplayName, "Clone Enterprise Application '$($snapshot.Application.DisplayName)' into '$TargetDisplayName'")) {
+            return
+        }
+
+        $result = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName $TargetDisplayName -IncludeAppRoleAssignments:$IncludeAppRoleAssignments.IsPresent -Confirm:$false
+        if ($PassThru.IsPresent) {
+            $result
+        }
+    }
+}

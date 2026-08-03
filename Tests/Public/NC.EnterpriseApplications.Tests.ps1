@@ -445,3 +445,39 @@ Describe 'Import-EnterpriseApplication' {
         Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' }
     }
 }
+
+Describe 'Copy-EnterpriseApplication' {
+    $snapshot = [pscustomobject]@{ Application = [pscustomobject]@{ DisplayName = 'Source App' } }
+    $applyResult = [pscustomobject]@{ TargetDisplayName = 'Target App'; TargetApplicationId = 'app-1'; Created = $true; OwnersAdded = 0; OwnersSkipped = 0; AssignmentsAdded = 0; AssignmentsSkipped = 0 }
+
+    BeforeEach {
+        Mock Test-MgGraphConnection { $true }
+        Mock Add-EmptyLine {}
+        Mock Write-NCMessage {}
+        Mock Get-NCEnterpriseApplicationSnapshot { $snapshot }
+        Mock Set-NCEnterpriseApplicationFromSnapshot { $applyResult }
+    }
+
+    It 'reads the source snapshot and applies it to the target' {
+        Copy-EnterpriseApplication -SourceApplicationName 'Source App' -TargetDisplayName 'Target App' -Confirm:$false
+
+        Assert-MockCalled Get-NCEnterpriseApplicationSnapshot -Times 1 -Scope It -ParameterFilter { $ApplicationName -eq 'Source App' }
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 1 -Scope It -ParameterFilter { $TargetDisplayName -eq 'Target App' }
+    }
+
+    It 'refuses to clone an application onto itself' {
+        Mock Get-NCEnterpriseApplicationSnapshot { [pscustomobject]@{ Application = [pscustomobject]@{ DisplayName = 'Same App' } } }
+
+        Copy-EnterpriseApplication -SourceApplicationName 'Same App' -TargetDisplayName 'Same App' -Confirm:$false
+
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' }
+    }
+
+    It 'passes -IncludeAppRoleAssignments through to both helpers' {
+        Copy-EnterpriseApplication -SourceApplicationName 'Source App' -TargetDisplayName 'Target App' -IncludeAppRoleAssignments -Confirm:$false
+
+        Assert-MockCalled Get-NCEnterpriseApplicationSnapshot -Times 1 -Scope It -ParameterFilter { $IncludeAppRoleAssignments }
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 1 -Scope It -ParameterFilter { $IncludeAppRoleAssignments }
+    }
+}
