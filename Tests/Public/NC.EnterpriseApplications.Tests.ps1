@@ -110,3 +110,96 @@ Describe 'Get-NCEnterpriseApplicationSnapshot' {
         Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' }
     }
 }
+
+Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
+    $snapshot = [pscustomobject]@{
+        Application        = [pscustomobject]@{
+            DisplayName            = 'Source App'
+            SignInAudience         = 'AzureADMyOrg'
+            IdentifierUris         = @()
+            Notes                  = $null
+            Tags                   = @()
+            Web                    = [pscustomobject]@{ redirectUris = @('https://localhost/callback') }
+            Spa                    = [pscustomobject]@{ redirectUris = @() }
+            PublicClient           = [pscustomobject]@{ redirectUris = @() }
+            RequiredResourceAccess = @()
+            AppRoles               = @()
+            Oauth2PermissionScopes = @()
+            Owners                 = @([pscustomobject]@{ Id = 'owner-1'; DisplayName = 'Jane Doe'; UserPrincipalName = 'jane@contoso.com' })
+        }
+        AppRoleAssignments = @([pscustomobject]@{ PrincipalId = 'principal-1'; PrincipalDisplayName = 'Some Group'; PrincipalType = 'Group'; AppRoleId = 'role-1' })
+    }
+
+    BeforeEach {
+        Mock Write-NCMessage {}
+    }
+
+    It 'creates the destination application and service principal when none exists' {
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^https://graph\.microsoft\.com/v1\.0/applications\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'https://graph.microsoft.com/v1.0/applications') {
+                return [pscustomobject]@{ id = 'new-app-id'; appId = 'new-client-id'; displayName = 'Target App' }
+            }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'https://graph.microsoft.com/v1.0/servicePrincipals') {
+                return [pscustomobject]@{ id = 'new-sp-id'; appId = 'new-client-id' }
+            }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $result = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        $result.Created | Should -Be $true
+        $result.TargetApplicationId | Should -Be 'new-app-id'
+        $result.OwnersAdded | Should -Be 1
+        $result.AssignmentsAdded | Should -Be 0
+
+        Assert-MockCalled Invoke-MgGraphRequest -Scope It -ParameterFilter {
+            $Method -eq 'POST' -and $Uri -eq 'https://graph.microsoft.com/v1.0/applications'
+        }
+    }
+
+    It 'updates an existing destination application instead of creating a new one' {
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^https://graph\.microsoft\.com/v1\.0/applications\?') {
+                return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-app-id'; appId = 'existing-client-id'; displayName = 'Target App' }) }
+            }
+            if ($Method -eq 'PATCH' -and $Uri -match '/applications/existing-app-id$') { return $null }
+            if ($Uri -match '/servicePrincipals\?') {
+                return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-sp-id'; appId = 'existing-client-id' }) }
+            }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $result = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        $result.Created | Should -Be $false
+        $result.TargetApplicationId | Should -Be 'existing-app-id'
+        Assert-MockCalled Invoke-MgGraphRequest -Scope It -ParameterFilter {
+            $Method -eq 'PATCH' -and $Uri -eq 'https://graph.microsoft.com/v1.0/applications/existing-app-id'
+        }
+    }
+
+    It 'applies App Role Assignments only when requested' {
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^https://graph\.microsoft\.com/v1\.0/applications\?') {
+                return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-app-id'; appId = 'existing-client-id'; displayName = 'Target App' }) }
+            }
+            if ($Uri -match '/servicePrincipals\?') {
+                return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-sp-id'; appId = 'existing-client-id' }) }
+            }
+            if ($Method -eq 'POST' -and $Uri -match '/appRoleAssignedTo$') { return $null }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $result = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -IncludeAppRoleAssignments -Confirm:$false
+
+        $result.AssignmentsAdded | Should -Be 1
+        Assert-MockCalled Invoke-MgGraphRequest -Scope It -ParameterFilter {
+            $Method -eq 'POST' -and $Uri -eq 'https://graph.microsoft.com/v1.0/servicePrincipals/existing-sp-id/appRoleAssignedTo'
+        }
+    }
+}
