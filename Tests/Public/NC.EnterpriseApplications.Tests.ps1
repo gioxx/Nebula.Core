@@ -427,4 +427,21 @@ Describe 'Import-EnterpriseApplication' {
 
         Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
     }
+
+    It 'stops early when Microsoft Graph is not connected' {
+        Mock Test-MgGraphConnection { $false }
+
+        Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -Confirm:$false
+
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
+    }
+
+    It 'errors when the input file contains invalid JSON' {
+        Set-Content -LiteralPath $inputPath -Value 'not valid json {{{'
+
+        Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -Confirm:$false
+
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' }
+    }
 }
