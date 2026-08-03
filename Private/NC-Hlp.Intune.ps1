@@ -571,8 +571,16 @@ function Invoke-NCGraphAllPagesCore {
             $response = Invoke-MgGraphRequest -Uri $nextLink -Method GET
             $requestCount++
 
-            if ($response.value) {
-                $allResults += $response.value
+            $hasValueProperty = $false
+            if ($response -is [hashtable] -or $response -is [System.Collections.IDictionary]) {
+                $hasValueProperty = $response.ContainsKey('value')
+            }
+            else {
+                $hasValueProperty = $null -ne $response.PSObject.Properties['value']
+            }
+
+            if ($hasValueProperty) {
+                $allResults += @($response.value)
             }
             else {
                 $allResults += $response
