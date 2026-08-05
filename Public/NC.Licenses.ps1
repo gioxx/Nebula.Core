@@ -387,10 +387,36 @@ function Copy-UserMsolAccountSku {
             return
         }
 
+        try {
+            $tenantSkus = Invoke-NCRetry -Action {
+                Get-MgSubscribedSku -All -ErrorAction Stop
+            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve tenant licenses" -OnError {
+                param($attempt, $max, $err)
+                $currentAttempt = if ($attempt) { $attempt } else { '?' }
+                $currentMax = if ($max) { $max } else { $maxAttempts }
+                Write-NCMessage "Failed to retrieve tenant licenses, attempt $currentAttempt of $currentMax." -Level ERROR
+            }
+        }
+        catch {
+            Write-NCMessage "Unable to retrieve tenant licenses after $maxAttempts attempts." -Level ERROR
+            return
+        }
+
+        $availabilityBySkuId = @{}
+        foreach ($sku in $tenantSkus) {
+            $skuIdString = [string]$sku.SkuId
+            if ([string]::IsNullOrWhiteSpace($skuIdString)) { continue }
+            $prepaidUnits = $sku.PrepaidUnits
+            $enabledUnits = if ($prepaidUnits) { [int]$prepaidUnits.Enabled } else { 0 }
+            $consumedUnits = if ($sku.ConsumedUnits -is [int]) { [int]$sku.ConsumedUnits } else { [int]0 }
+            $availabilityBySkuId[$skuIdString.ToUpperInvariant()] = [Math]::Max($enabledUnits - $consumedUnits, 0)
+        }
+
         $destinationSkuIds = if ($destinationLicenses) { $destinationLicenses.SkuId } else { @() }
         $addLicenses = @()
         $licenseNames = @()
         $skippedInvalid = @()
+        $namesNoAvailability = @()
 
         foreach ($lic in $sourceLicenses) {
             $skuIdString = [string]$lic.SkuId
@@ -408,6 +434,14 @@ function Copy-UserMsolAccountSku {
 
             if ($destinationSkuIds -contains $parsedGuid) {
                 Write-Verbose "Destination already has $($lic.SkuPartNumber); skipping add."
+                continue
+            }
+
+            $available = $availabilityBySkuId[$skuIdString.ToUpperInvariant()]
+            if ($null -eq $available) { $available = 0 }
+            if ($available -le 0) {
+                Write-NCMessage ("No available units for license {0} (available: {1}); skipping." -f $lic.SkuPartNumber, $available) -Level WARNING
+                $namesNoAvailability += $lic.SkuPartNumber
                 continue
             }
 
@@ -442,7 +476,12 @@ function Copy-UserMsolAccountSku {
         }
 
         if ($addLicenses.Count -eq 0) {
-            Write-NCMessage "Nothing to copy: destination already has all licenses from $($sourceUser.UserPrincipalName)." -Level WARNING
+            if ($namesNoAvailability.Count -gt 0) {
+                Write-NCMessage ("Nothing to copy: no available units for {0}." -f (($namesNoAvailability | Select-Object -Unique) -join ', ')) -Level WARNING
+            }
+            else {
+                Write-NCMessage "Nothing to copy: destination already has all licenses from $($sourceUser.UserPrincipalName)." -Level WARNING
+            }
             return
         }
 
@@ -467,6 +506,9 @@ function Copy-UserMsolAccountSku {
                 Write-NCMessage ("Failed to assign licenses to {0}, attempt {1} of {2}. {3}" -f $destinationUser.UserPrincipalName, $currentAttempt, $currentMax, $err.Exception.Message) -Level ERROR
             } | Out-Null
             Write-NCMessage "Copied licenses to $($destinationUser.UserPrincipalName): $($uniqueNames -join ', ')." -Level SUCCESS
+            if ($namesNoAvailability.Count -gt 0) {
+                Write-NCMessage ("Skipped license(s) with no available units: {0}" -f (($namesNoAvailability | Select-Object -Unique) -join ', ')) -Level WARNING
+            }
         }
         catch {
             Write-NCMessage "License copy to $($destinationUser.UserPrincipalName) failed: $($_.Exception.Message)" -Level ERROR
@@ -1784,9 +1826,35 @@ function Move-UserMsolAccountSku {
             }
         }
 
+        try {
+            $tenantSkus = Invoke-NCRetry -Action {
+                Get-MgSubscribedSku -All -ErrorAction Stop
+            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve tenant licenses" -OnError {
+                param($attempt, $max, $err)
+                $currentAttempt = if ($attempt) { $attempt } else { '?' }
+                $currentMax = if ($max) { $max } else { $maxAttempts }
+                Write-NCMessage "Failed to retrieve tenant licenses, attempt $currentAttempt of $currentMax." -Level ERROR
+            }
+        }
+        catch {
+            Write-NCMessage "Unable to retrieve tenant licenses after $maxAttempts attempts." -Level ERROR
+            return
+        }
+
+        $availabilityBySkuId = @{}
+        foreach ($sku in $tenantSkus) {
+            $skuIdString = [string]$sku.SkuId
+            if ([string]::IsNullOrWhiteSpace($skuIdString)) { continue }
+            $prepaidUnits = $sku.PrepaidUnits
+            $enabledUnits = if ($prepaidUnits) { [int]$prepaidUnits.Enabled } else { 0 }
+            $consumedUnits = if ($sku.ConsumedUnits -is [int]) { [int]$sku.ConsumedUnits } else { [int]0 }
+            $availabilityBySkuId[$skuIdString.ToUpperInvariant()] = [Math]::Max($enabledUnits - $consumedUnits, 0)
+        }
+
         $addLicenses = @()
         $removeSkuIds = @()
         $skippedInvalid = @()
+        $namesNoAvailability = @()
 
         foreach ($lic in $sourceLicenses) {
             $skuIdString = [string]$lic.SkuId
@@ -1802,11 +1870,21 @@ function Move-UserMsolAccountSku {
                 continue
             }
 
-            $removeSkuIds += $parsedGuid
             if ($destinationSkuIds -contains $parsedGuid) {
+                $removeSkuIds += $parsedGuid
                 Write-Verbose "Destination already has $($lic.SkuPartNumber); skipping add."
                 continue
             }
+
+            $available = $availabilityBySkuId[$skuIdString.ToUpperInvariant()]
+            if ($null -eq $available) { $available = 0 }
+            if ($available -le 0) {
+                Write-NCMessage ("No available units for license {0} (available: {1}); leaving it on the source." -f $lic.SkuPartNumber, $available) -Level WARNING
+                $namesNoAvailability += $lic.SkuPartNumber
+                continue
+            }
+
+            $removeSkuIds += $parsedGuid
 
             $validatedDisabled = @()
             if ($lic.DisabledPlans) {
@@ -1834,6 +1912,10 @@ function Move-UserMsolAccountSku {
 
         if ($skippedInvalid.Count -gt 0) {
             Write-NCMessage ("Skipped licenses with invalid IDs: {0}" -f ($skippedInvalid -join '; ')) -Level WARNING
+        }
+
+        if ($namesNoAvailability.Count -gt 0) {
+            Write-NCMessage ("Left on source (no available units on destination tenant): {0}" -f (($namesNoAvailability | Select-Object -Unique) -join ', ')) -Level WARNING
         }
 
         $licenseNames = $sourceLicenses | ForEach-Object {
