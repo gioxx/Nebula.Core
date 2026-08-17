@@ -162,6 +162,7 @@ ReleaseNotes = @'
 - Fix: `Add/Get/Remove-EntraGroupUser` now resolve invited Entra guests by external e-mail through a Graph-compatible fallback while preserving direct lookup for tenant members.
 - Fix: `Export-IntuneAppInventory` now normalizes cached `LastInventory` values through Nebula's configured date/time formatter so export output matches the single-device helper.
 - Fix: `Get-UserGroups` now falls back to Microsoft Graph resolution when Exchange mailbox lookup is not available, so Entra guest users can be queried without using the GUI.
+- Fix: `Connect-Nebula` now initializes Microsoft Graph before Exchange Online and uses a WAM-disabled EXO sign-in for the combined flow, avoiding the known cross-module authentication assembly and broker conflict.
 - Improve: `Get-MboxPermission` now shows the source mailbox `RecipientTypeDetails` value in the output heading.
 - Improve: `Get-UserGroups` keeps the existing Exchange-first behavior for regular users while handling guest identities more gracefully.
 - Improve: add `Get-IntuneAppPresence` for quick single-device app presence checks with one-row output, always include `LastInventory`, and return the matched app name in `AppName`.

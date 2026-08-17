@@ -121,7 +121,9 @@ function Connect-Nebula {
         Entry point to establish both Exchange Online and Microsoft Graph sessions.
     .DESCRIPTION
         Uses the private Test-* helpers to ensure Exchange Online and Microsoft Graph are connected,
-        optionally forcing reconnects, installing modules, or skipping the Graph portion.
+        connecting Microsoft Graph first so its authentication dependencies are loaded before
+        Exchange Online and using a WAM-disabled EXO sign-in for the combined flow. It can also
+        force reconnects, install modules, or skip Graph.
     .PARAMETER UserPrincipalName
         Optional explicit UPN for the Exchange Online connection.
     .PARAMETER GraphScopes
@@ -167,9 +169,24 @@ function Connect-Nebula {
         Write-NCMessage "Update check failed. $($_.Exception.Message)" -Level WARNING
     }
 
+    if (-not $SkipGraph) {
+        $graphConnected = Test-MgGraphConnection `
+            -Scopes $GraphScopes `
+            -TenantId $GraphTenantId `
+            -UseDeviceCode:$GraphDeviceCode.IsPresent `
+            -AutoInstall:$AutoInstall.IsPresent `
+            -ForceReconnect:$ForceReconnect.IsPresent `
+            -EnsureExchangeOnline:$false
+
+        if (-not $graphConnected) {
+            throw "Failed to establish Microsoft Graph session."
+        }
+    }
+
     $exoConnected = Test-EOLConnection -UserPrincipalName $UserPrincipalName `
         -AutoInstall:$AutoInstall.IsPresent `
-        -ForceReconnect:$ForceReconnect.IsPresent
+        -ForceReconnect:$ForceReconnect.IsPresent `
+        -DisableWAM:$(-not $SkipGraph)
 
     if (-not $exoConnected) {
         throw "Failed to establish Exchange Online session."
@@ -180,18 +197,6 @@ function Connect-Nebula {
             ExchangeOnline = $true
             MicrosoftGraph = $false
         }
-    }
-
-    $graphConnected = Test-MgGraphConnection `
-        -Scopes $GraphScopes `
-        -TenantId $GraphTenantId `
-        -UseDeviceCode:$GraphDeviceCode.IsPresent `
-        -AutoInstall:$AutoInstall.IsPresent `
-        -ForceReconnect:$ForceReconnect.IsPresent `
-        -EnsureExchangeOnline:$false
-
-    if (-not $graphConnected) {
-        throw "Failed to establish Microsoft Graph session."
     }
 
     return [pscustomobject]@{

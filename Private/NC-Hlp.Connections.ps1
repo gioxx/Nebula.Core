@@ -9,19 +9,23 @@ function Test-EOLConnection {
         Makes sure the Exchange Online session is ready to use.
     .DESCRIPTION
         Verifies that the ExchangeOnlineManagement module is present (installing it if asked),
-        checks the current session and, if necessary, reconnects with the detected user.
+        checks the current session and, if necessary, reconnects with the detected user. The
+        combined Connect-Nebula flow can disable WAM after Graph initializes its dependencies.
     .PARAMETER UserPrincipalName
         Optional explicit UPN to use when connecting. Defaults to Find-UserConnected.
     .PARAMETER AutoInstall
         Install the module automatically instead of prompting.
     .PARAMETER ForceReconnect
         Skip the quick connectivity probe and always reconnect.
+    .PARAMETER DisableWAM
+        Disable Web Account Manager for the EXO sign-in flow.
     #>
     [CmdletBinding()]
     param(
         [string]$UserPrincipalName,
         [switch]$AutoInstall,
-        [switch]$ForceReconnect
+        [switch]$ForceReconnect,
+        [switch]$DisableWAM
     )
 
     $moduleAvailable = @(Get-Module -Name ExchangeOnlineManagement -ListAvailable).Count -gt 0
@@ -79,10 +83,10 @@ function Test-EOLConnection {
 
     try {
         if ($resolvedUpn) {
-            Connect-EOL -UserPrincipalName $resolvedUpn -ErrorAction Stop
+            Connect-EOL -UserPrincipalName $resolvedUpn -DisableWAM:$DisableWAM.IsPresent -ErrorAction Stop
         }
         else {
-            Connect-EOL -ErrorAction Stop
+            Connect-EOL -DisableWAM:$DisableWAM.IsPresent -ErrorAction Stop
         }
 
         # Run a lightweight cmdlet to be sure the session is alive.
