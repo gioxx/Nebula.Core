@@ -244,7 +244,19 @@ function Get-LicenseSourceData {
             $currentCommitUtc = $remoteCommitUtc
         }
         catch {
-            throw "Downloading license file failed after $MaxAttempts attempts."
+            if (Test-Path -LiteralPath $cacheFile) {
+                try {
+                    $licenseItems = Get-Content -LiteralPath $cacheFile -Raw | ConvertFrom-Json
+                    $source = 'Cache (stale)'
+                    Write-NCMessage "Downloading license file ($CacheFileName) failed after $MaxAttempts attempts. Falling back to stale cache from $((Get-Item -LiteralPath $cacheFile).LastWriteTimeUtc.ToString('o'))." -Level WARNING
+                }
+                catch {
+                    throw "Downloading license file failed after $MaxAttempts attempts, and cached copy ($CacheFileName) could not be read."
+                }
+            }
+            else {
+                throw "Downloading license file failed after $MaxAttempts attempts."
+            }
         }
     }
 
