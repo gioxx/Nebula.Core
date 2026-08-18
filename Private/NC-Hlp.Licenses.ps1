@@ -147,6 +147,9 @@ function Get-LicenseSourceData {
     $tryParseUtc = {
         param($value)
         if (-not $value) { return $null }
+        if ($value -is [DateTime]) {
+            return $value.ToUniversalTime()
+        }
         try {
             return [DateTime]::ParseExact(
                 [string]$value,
