@@ -54,6 +54,12 @@ function Connect-EOL {
             ShowBanner            = $false
             SkipLoadingCmdletHelp = $true
         }
+
+        # Hide Connect-ExchangeOnline's cosmetic "WAM is enabled by default" notice unless the
+        # caller wants verbose diagnostics (e.g. while investigating WAM/broker issues).
+        if ($VerbosePreference -eq 'SilentlyContinue') {
+            $baseConnectParams.WarningAction = 'SilentlyContinue'
+        }
     }
 
     process {

@@ -151,20 +151,21 @@
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/icon.png'
 ReleaseNotes = @'
-- Fix: `Connect-EOL` now detects whether the installed `ExchangeOnlineManagement` version actually supports `-DisableWAM`/`-Device` (introduced in 3.7.2) before passing them to `Connect-ExchangeOnline`, instead of always forwarding them; this prevents a parameter-binding error when Exchange Online is intentionally pinned below 3.7.2 as a workaround for the Graph/EOL assembly clash, where WAM isn't the default and those parameters don't exist.
-- Fix: License catalog download (`Get-LicenseSourceData`) now falls back to the existing stale cache when GitHub is unreachable after all retry attempts, instead of failing outright; a warning reports the fallback and its cache age. The cache is then honored for the configured `LicenseCacheDays` (minimum 1 day) before retrying, instead of re-attempting the full download on every subsequent call.
-- Fix: `Copy-UserMsolAccountSku` and `Move-UserMsolAccountSku` now check tenant seat availability per SKU before assigning; a license with no available units is skipped (or left on the source, for `Move`) with a warning instead of failing the entire `Set-MgUserLicense` batch and copying/moving nothing.
 - Add: `Export-EnterpriseApplication`, `Import-EnterpriseApplication`, `Copy-EnterpriseApplication`, and `Compare-EnterpriseApplication` to snapshot, recreate, clone, and diff Enterprise Applications (App Registration + Service Principal) within the same Entra tenant, including optional App Role Assignment copying, owner sync, and CSV/JSON diff reports. Client secrets and certificates are never copied; only their metadata is captured for reporting.
-- Fix: `Compare-EnterpriseApplication`'s CSV report now renders non-scalar diff values (redirect URIs, permissions, app roles, owners) as readable JSON instead of an identical, uninformative string on both sides, and now honors the module's configured CSV encoding and delimiter.
-- Fix: `Set-NCEnterpriseApplicationFromSnapshot` no longer copies `identifierUris` (unique per tenant, caused Graph BadRequest on apps exposing an API); a warning reports the source value instead.
-- Fix: `Set-NCEnterpriseApplicationFromSnapshot` strips the read-only `redirectUriSettings` before writing `web`/`spa`/`publicClient`, avoiding a Graph BadRequest when both are sent together.
-- Fix: `Invoke-NCGraphAllPagesCore` now distinguishes a Graph collection with zero items from a non-paged single object instead of relying on truthiness, fixing phantom-item failures (e.g. an app with no owners) in downstream cmdlets like `Copy-EnterpriseApplication`.
-- Fix: `Set-NCEnterpriseApplicationFromSnapshot` now applies the Service Principal's `Tags` and `Homepage` on both create and update-in-place, so cloned apps correctly show up under Entra's "Enterprise applications" blade.
-- Fix: `Add/Remove-EntraGroupDevice`, `Add/Remove-EntraGroupOwner`, and `Add/Remove-EntraGroupUser` now support the positional form `<GroupName> <MemberIdentifier>` in addition to named parameters.
 - Fix: `Add/Get/Remove-EntraGroupUser` now resolve invited Entra guests by external e-mail through a Graph-compatible fallback while preserving direct lookup for tenant members.
+- Fix: `Add/Remove-EntraGroupDevice`, `Add/Remove-EntraGroupOwner`, and `Add/Remove-EntraGroupUser` now support the positional form `<GroupName> <MemberIdentifier>` in addition to named parameters.
+- Fix: `Compare-EnterpriseApplication`'s CSV report now renders non-scalar diff values (redirect URIs, permissions, app roles, owners) as readable JSON instead of an identical, uninformative string on both sides, and now honors the module's configured CSV encoding and delimiter.
+- Fix: `Connect-EOL` now detects whether the installed `ExchangeOnlineManagement` version actually supports `-DisableWAM`/`-Device` (introduced in 3.7.2) before passing them to `Connect-ExchangeOnline`, instead of always forwarding them; this prevents a parameter-binding error when Exchange Online is intentionally pinned below 3.7.2 as a workaround for the Graph/EOL assembly clash, where WAM isn't the default and those parameters don't exist.
+- Improve: `Connect-EOL` suppresses `Connect-ExchangeOnline`'s cosmetic "Sign in by Web Account Manager (WAM) is enabled by default" notice on every WAM sign-in, unless called with `-Verbose`; it never affected the existing WAM-failure detection, which inspects the thrown exception, not warnings.
+- Fix: `Connect-Nebula` now initializes Microsoft Graph before Exchange Online and uses a WAM-disabled EXO sign-in for the combined flow, avoiding the known cross-module authentication assembly and broker conflict.
+- Fix: `Copy-UserMsolAccountSku` and `Move-UserMsolAccountSku` now check tenant seat availability per SKU before assigning; a license with no available units is skipped (or left on the source, for `Move`) with a warning instead of failing the entire `Set-MgUserLicense` batch and copying/moving nothing.
 - Fix: `Export-IntuneAppInventory` now normalizes cached `LastInventory` values through Nebula's configured date/time formatter so export output matches the single-device helper.
 - Fix: `Get-UserGroups` now falls back to Microsoft Graph resolution when Exchange mailbox lookup is not available, so Entra guest users can be queried without using the GUI.
-- Fix: `Connect-Nebula` now initializes Microsoft Graph before Exchange Online and uses a WAM-disabled EXO sign-in for the combined flow, avoiding the known cross-module authentication assembly and broker conflict.
+- Fix: `Invoke-NCGraphAllPagesCore` now distinguishes a Graph collection with zero items from a non-paged single object instead of relying on truthiness, fixing phantom-item failures (e.g. an app with no owners) in downstream cmdlets like `Copy-EnterpriseApplication`.
+- Fix: `Set-NCEnterpriseApplicationFromSnapshot` no longer copies `identifierUris` (unique per tenant, caused Graph BadRequest on apps exposing an API); a warning reports the source value instead.
+- Fix: `Set-NCEnterpriseApplicationFromSnapshot` now applies the Service Principal's `Tags` and `Homepage` on both create and update-in-place, so cloned apps correctly show up under Entra's "Enterprise applications" blade.
+- Fix: `Set-NCEnterpriseApplicationFromSnapshot` strips the read-only `redirectUriSettings` before writing `web`/`spa`/`publicClient`, avoiding a Graph BadRequest when both are sent together.
+- Fix: License catalog download (`Get-LicenseSourceData`) now falls back to the existing stale cache when GitHub is unreachable after all retry attempts, instead of failing outright; a warning reports the fallback and its cache age. The cache is then honored for the configured `LicenseCacheDays` (minimum 1 day) before retrying, instead of re-attempting the full download on every subsequent call.
 - Improve: `Get-MboxPermission` now shows the source mailbox `RecipientTypeDetails` value in the output heading.
 - Improve: `Get-UserGroups` keeps the existing Exchange-first behavior for regular users while handling guest identities more gracefully.
 - Improve: add `Get-IntuneAppPresence` for quick single-device app presence checks with one-row output, always include `LastInventory`, and return the matched app name in `AppName`.
@@ -173,8 +174,8 @@ ReleaseNotes = @'
 - Improve: add culture-safe date parsing plus optional timezone-aware formatting through `DateTimeTimeZone`.
 - Improve: change the default CSV delimiter to comma for a more standard US-friendly baseline.
 - Improve: set the default user-facing date/time zone to `Eastern Standard Time` to align with the module's US baseline.
-- Improve: unify user-facing date formatting through Nebula's configured date/time patterns, including Intune inventory and license catalog outputs.
 - Improve: the Pester test suite (`Tests/Public/*.Tests.ps1`) now correctly scopes its fixtures inside `BeforeAll` blocks so tests run for real under Pester 5, instead of only succeeding at test discovery.
+- Improve: unify user-facing date formatting through Nebula's configured date/time patterns, including Intune inventory and license catalog outputs.
 '@
         }
     }
