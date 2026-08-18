@@ -72,22 +72,38 @@ function Connect-EOL {
             $connectParams.DelegatedOrganization = $DelegatedOrganization
         }
 
+        # -DisableWAM/-Device only exist on ExchangeOnlineManagement 3.7.2+ (WAM-by-default releases).
+        # Older, pinned installs don't expose them; passing them anyway would throw a parameter-binding error.
+        $exoCmd = Get-Command -Name Connect-ExchangeOnline -Module ExchangeOnlineManagement -ErrorAction SilentlyContinue
+        $supportsDisableWAM = $exoCmd -and $exoCmd.Parameters.ContainsKey('DisableWAM')
+        $supportsDevice = $exoCmd -and $exoCmd.Parameters.ContainsKey('Device')
+
         if ($DisableWAM.IsPresent) {
-            $connectParams.DisableWAM = $true
+            if ($supportsDisableWAM) {
+                $connectParams.DisableWAM = $true
+            }
+            else {
+                Write-Verbose "-DisableWAM requested but the installed ExchangeOnlineManagement version does not support it (pre-3.7.2, no WAM by default). Ignoring."
+            }
         }
 
         if ($Device.IsPresent) {
-            $connectParams.Device = $true
+            if ($supportsDevice) {
+                $connectParams.Device = $true
+            }
+            else {
+                Write-NCMessage "-Device requested but the installed ExchangeOnlineManagement version does not support it (pre-3.7.2). Falling back to the standard interactive sign-in." -Level WARNING
+            }
         }
 
-        $authMode = if ($Device.IsPresent) {
+        $authMode = if ($Device.IsPresent -and $supportsDevice) {
             'device code'
         }
-        elseif ($DisableWAM.IsPresent) {
+        elseif ($DisableWAM.IsPresent -and $supportsDisableWAM) {
             'interactive without WAM'
         }
         else {
-            'interactive (WAM)'
+            'interactive'
         }
 
         Write-NCMessage "Connecting to Exchange Online as $UserPrincipalName using $authMode ..." -Level INFO
@@ -96,7 +112,7 @@ function Connect-EOL {
             $session = Connect-ExchangeOnline @connectParams
         }
         catch {
-            $shouldRetryWithoutWam = (-not $DisableWAM.IsPresent) -and (-not $Device.IsPresent) -and (-not $NoWamFallback.IsPresent)
+            $shouldRetryWithoutWam = $supportsDisableWAM -and (-not $DisableWAM.IsPresent) -and (-not $Device.IsPresent) -and (-not $NoWamFallback.IsPresent)
             $exceptionText = $_ | Out-String
 
             if ($shouldRetryWithoutWam -and $exceptionText -match '(?i)(RuntimeBroker|Web Account Manager|\bWAM\b|Error Acquiring Token|NullReferenceException)') {
