@@ -160,6 +160,9 @@ function Connect-Nebula {
         Force reconnect (skip health checks) for both services.
     .PARAMETER SkipGraph
         Only establish Exchange Online; skip Microsoft Graph.
+    .PARAMETER GraphLoginHint
+        UPN passed as -LoginHint to Connect-MgGraph, helping the WAM broker resolve the target
+        account without repeatedly prompting. Defaults to UserPrincipalName when not specified.
     #>
     [CmdletBinding()]
     param(
@@ -169,7 +172,8 @@ function Connect-Nebula {
         [switch]$GraphDeviceCode,
         [switch]$AutoInstall,
         [switch]$ForceReconnect,
-        [switch]$SkipGraph
+        [switch]$SkipGraph,
+        [string]$GraphLoginHint
     )
 
     Write-NCMessage "Welcome to Nebula! Connecting, please wait ..." -Level INFO
@@ -192,13 +196,24 @@ function Connect-Nebula {
     }
 
     if (-not $SkipGraph) {
+        $graphLoginHint = if (-not [string]::IsNullOrWhiteSpace($GraphLoginHint)) {
+            $GraphLoginHint
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($UserPrincipalName)) {
+            $UserPrincipalName
+        }
+        else {
+            Find-UserConnected
+        }
+
         $graphConnected = Test-MgGraphConnection `
             -Scopes $GraphScopes `
             -TenantId $GraphTenantId `
             -UseDeviceCode:$GraphDeviceCode.IsPresent `
             -AutoInstall:$AutoInstall.IsPresent `
             -ForceReconnect:$ForceReconnect.IsPresent `
-            -EnsureExchangeOnline:$false
+            -EnsureExchangeOnline:$false `
+            -LoginHint $graphLoginHint
 
         if (-not $graphConnected) {
             throw "Failed to establish Microsoft Graph session."
@@ -388,12 +403,14 @@ function Get-NebulaConnections {
 function Update-NebulaConnections {
     <#
     .SYNOPSIS
-        Refreshes Nebula connections status for Exchange Online and Microsoft Graph.
+        Refreshes Nebula connections for Exchange Online and Microsoft Graph, repairing them if unhealthy.
     .DESCRIPTION
-        Explicit refresh entry point that runs the same checks used by Get-NebulaConnections,
-        including lightweight health probes (unless skipped), and returns the connection status.
+        Runs the same health probes as Get-NebulaConnections and, unless skipped, reconnects any
+        service found disconnected or unhealthy (stale/broken session) using the same detected user
+        and, for Microsoft Graph, the scopes already granted to the current session. Returns the
+        resulting connection status.
     .PARAMETER SkipHealthCheck
-        Skip probe calls and only report whether session contexts are currently present.
+        Skip probe/repair entirely and only report whether session contexts are currently present.
     .EXAMPLE
         Update-NebulaConnections
     .EXAMPLE
@@ -404,7 +421,43 @@ function Update-NebulaConnections {
         [switch]$SkipHealthCheck
     )
 
-    Get-NebulaConnections -SkipHealthCheck:$SkipHealthCheck.IsPresent
+    if ($SkipHealthCheck.IsPresent) {
+        return Get-NebulaConnections -SkipHealthCheck
+    }
+
+    $exoParams = @{}
+    try {
+        $exoUser = (Get-ConnectionInformation -ErrorAction Stop | Select-Object -First 1).UserPrincipalName
+        if (-not [string]::IsNullOrWhiteSpace($exoUser)) {
+            $exoParams.UserPrincipalName = $exoUser
+        }
+    }
+    catch {}
+
+    try {
+        Test-EOLConnection @exoParams | Out-Null
+    }
+    catch {
+        Write-NCMessage "Exchange Online repair attempt failed. $($_.Exception.Message)" -Level WARNING
+    }
+
+    $graphScopes = @()
+    try {
+        $graphScopes = @((Get-MgContext -ErrorAction Stop).Scopes | Where-Object { $_ })
+    }
+    catch {}
+    if (-not $graphScopes -or $graphScopes.Count -eq 0) {
+        $graphScopes = @('User.Read.All')
+    }
+
+    try {
+        Test-MgGraphConnection -Scopes $graphScopes -EnsureExchangeOnline:$false -LoginHint (Find-UserConnected) | Out-Null
+    }
+    catch {
+        Write-NCMessage "Microsoft Graph repair attempt failed. $($_.Exception.Message)" -Level WARNING
+    }
+
+    Get-NebulaConnections
 }
 
 Set-Alias -Name Leave-Nebula -Value Disconnect-Nebula
