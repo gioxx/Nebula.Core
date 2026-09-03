@@ -55,12 +55,8 @@ function Test-EOLConnection {
         }
     }
 
-    if (-not $PSBoundParameters.ContainsKey('UserPrincipalName') -or [string]::IsNullOrWhiteSpace($UserPrincipalName)) {
-        $resolvedUpn = Find-UserConnected
-    }
-    else {
-        $resolvedUpn = $UserPrincipalName
-    }
+    $explicitUpnRequested = $PSBoundParameters.ContainsKey('UserPrincipalName') -and -not [string]::IsNullOrWhiteSpace($UserPrincipalName)
+    $resolvedUpn = if ($explicitUpnRequested) { $UserPrincipalName } else { $null }
 
     if (-not $ForceReconnect.IsPresent) {
         try {
@@ -76,7 +72,13 @@ function Test-EOLConnection {
                 # Skip the UPN comparison rather than forcing an unnecessary reconnect.
             }
 
-            if ([string]::IsNullOrWhiteSpace($resolvedUpn) -or [string]::IsNullOrWhiteSpace($currentUpn) -or $currentUpn -eq $resolvedUpn) {
+            if (-not $explicitUpnRequested) {
+                # No explicit UPN was requested: keep whatever session is already active, whoever it belongs
+                # to, instead of forcing a reconnect to the Windows AD identity (Find-UserConnected).
+                return $true
+            }
+
+            if ([string]::IsNullOrWhiteSpace($currentUpn) -or $currentUpn -eq $resolvedUpn) {
                 return $true
             }
 
@@ -85,6 +87,10 @@ function Test-EOLConnection {
         catch {
             Write-NCMessage "Existing Exchange Online session not detected. Reconnecting ..." -Level WARNING
         }
+    }
+
+    if (-not $explicitUpnRequested -and [string]::IsNullOrWhiteSpace($resolvedUpn)) {
+        $resolvedUpn = Find-UserConnected
     }
 
     $resolvedUpn = if ([string]::IsNullOrWhiteSpace($resolvedUpn)) { $null } else { $resolvedUpn }
