@@ -159,6 +159,7 @@ ReleaseNotes = @'
 - Fix: `Connect-Nebula` now initializes Microsoft Graph before Exchange Online and uses a WAM-disabled EXO sign-in for the combined flow, avoiding the known cross-module authentication assembly and broker conflict.
 - Fix: `Copy-UserMsolAccountSku` and `Move-UserMsolAccountSku` now check tenant seat availability per SKU before assigning; a license with no available units is skipped (or left on the source, for `Move`) with a warning instead of failing the entire `Set-MgUserLicense` batch and copying/moving nothing.
 - Fix: `Export-IntuneAppInventory` now normalizes cached `LastInventory` values through Nebula's configured date/time formatter so export output matches the single-device helper.
+- Fix: `Get-NormalizedLicenseKey` now strips invisible Unicode format characters (e.g. zero-width spaces occasionally present in `SkuPartNumber` values returned by Graph for some tenants/SKUs, such as Windows 365) before building lookup keys, so those licenses correctly resolve against the catalog instead of showing up as unmapped.
 - Fix: `Get-UserGroups` now falls back to Microsoft Graph resolution when Exchange mailbox lookup is not available, so Entra guest users can be queried without using the GUI.
 - Fix: `Invoke-NCGraphAllPagesCore` now distinguishes a Graph collection with zero items from a non-paged single object instead of relying on truthiness, fixing phantom-item failures (e.g. an app with no owners) in downstream cmdlets like `Copy-EnterpriseApplication`.
 - Fix: `Set-NCEnterpriseApplicationFromSnapshot` no longer copies `identifierUris` (unique per tenant, caused Graph BadRequest on apps exposing an API); a warning reports the source value instead.
@@ -174,6 +175,7 @@ ReleaseNotes = @'
 - Improve: add `Search-EntraUser` to search users by display name, user principal name, or mail, including guest UPN fragments.
 - Improve: add culture-safe date parsing plus optional timezone-aware formatting through `DateTimeTimeZone`.
 - Improve: change the default CSV delimiter to comma for a more standard US-friendly baseline.
+- Improve: the `LicenseMapping` GitHub Action now also checks `JSON/M365_licenses_custom.json` for entries already covered by the official catalog and opens/updates a GitHub issue when it finds any, so stale custom mappings get flagged for removal.
 - Improve: set the default user-facing date/time zone to `Eastern Standard Time` to align with the module's US baseline.
 - Improve: the Pester test suite (`Tests/Public/*.Tests.ps1`) now correctly scopes its fixtures inside `BeforeAll` blocks so tests run for real under Pester 5, instead of only succeeding at test discovery.
 - Improve: unify user-facing date formatting through Nebula's configured date/time patterns, including Intune inventory and license catalog outputs.

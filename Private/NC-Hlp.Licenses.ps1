@@ -46,7 +46,9 @@ function Get-NormalizedLicenseKey {
     .SYNOPSIS
         Normalizes SKU identifiers for dictionary lookups.
     .DESCRIPTION
-        Returns $null for blank strings; otherwise uppercases and replaces whitespace, dots and dashes with underscores.
+        Returns $null for blank strings; otherwise strips invisible Unicode format characters (e.g. zero-width
+        spaces occasionally present in SkuPartNumber values returned by Graph for some tenants/SKUs), then
+        uppercases and replaces whitespace, dots and dashes with underscores.
     .PARAMETER Value
         SKU string to normalize.
     #>
@@ -57,7 +59,12 @@ function Get-NormalizedLicenseKey {
         return $null
     }
 
-    return (($Value -replace '[-\.\s]', '_').ToUpperInvariant())
+    $clean = $Value -replace '\p{Cf}', ''
+    if ([string]::IsNullOrWhiteSpace($clean)) {
+        return $null
+    }
+
+    return (($clean -replace '[-\.\s]', '_').ToUpperInvariant())
 }
 
 function New-LicenseLookup {
