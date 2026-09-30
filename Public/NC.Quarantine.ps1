@@ -172,6 +172,127 @@ function Export-QuarantineEml {
     }
 }
 
+function Get-QuarantineForMailbox {
+    <#
+    .SYNOPSIS
+        Lists quarantined messages for a mailbox, across all its SMTP aliases.
+    .DESCRIPTION
+        Resolves every SMTP address (primary and secondary) on the target mailbox and checks
+        quarantine for each one, since Get-QuarantineMessage -RecipientAddress only matches the
+        exact address a message was sent to.
+    .PARAMETER Identity
+        One or more mailbox identities (UPN, alias, email address, etc). Accepts pipeline input.
+    .PARAMETER IncludeReleased
+        Include messages already released (default hides them).
+    .PARAMETER Days
+        How many days back to search (default 15). Get-QuarantineMessage itself defaults to 7 days;
+        ignored when -StartReceivedDate is specified.
+    .PARAMETER StartReceivedDate
+        Explicit start of the search window. Overrides -Days.
+    .PARAMETER EndReceivedDate
+        Explicit end of the search window (default: now).
+    .EXAMPLE
+        Get-QuarantineForMailbox -Identity alice@contoso.com
+    .EXAMPLE
+        Get-QuarantineForMailbox -Identity alice@contoso.com -Days 30
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [string[]]$Identity,
+        [switch]$IncludeReleased,
+        [ValidateRange(1, 30)]
+        [int]$Days = 15,
+        [datetime]$StartReceivedDate,
+        [datetime]$EndReceivedDate
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $results = [System.Collections.Generic.List[object]]::new()
+
+        if (-not $PSBoundParameters.ContainsKey('EndReceivedDate')) {
+            $EndReceivedDate = Get-Date
+        }
+        if (-not $PSBoundParameters.ContainsKey('StartReceivedDate')) {
+            $StartReceivedDate = $EndReceivedDate.AddDays(-$Days)
+        }
+    }
+
+    process {
+        if (-not (Test-EOLConnection)) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Exchange Online Management module. Please check logs." -Level ERROR
+            return
+        }
+
+        foreach ($currentIdentity in $Identity) {
+            if ([string]::IsNullOrWhiteSpace($currentIdentity)) { continue }
+
+            try {
+                $mailbox = Get-Mailbox -Identity $currentIdentity -ErrorAction Stop
+            }
+            catch {
+                Write-NCMessage "Unable to resolve mailbox '$currentIdentity'. $($_.Exception.Message)" -Level ERROR
+                continue
+            }
+
+            $aliases = $mailbox.EmailAddresses |
+                Where-Object { $_ -like 'smtp:*' -or $_ -like 'SMTP:*' } |
+                ForEach-Object { $_ -replace '^smtp:|^SMTP:', '' } |
+                Select-Object -Unique
+
+            if (-not $aliases) {
+                Write-NCMessage "No SMTP addresses found on mailbox '$currentIdentity'." -Level WARNING
+                continue
+            }
+
+            foreach ($currentAlias in $aliases) {
+                Write-NCMessage ("Searching quarantined messages for {0} ..." -f $currentAlias) -Level INFO
+
+                try {
+                    $messages = Get-QuarantineMessage -RecipientAddress $currentAlias -StartReceivedDate $StartReceivedDate -EndReceivedDate $EndReceivedDate -ErrorAction Stop
+                }
+                catch {
+                    Write-NCMessage "Unable to retrieve messages for '$currentAlias'. $($_.Exception.Message)" -Level ERROR
+                    continue
+                }
+
+                foreach ($msg in $messages) {
+                    try {
+                        $details = Get-QuarantineMessage -Identity $msg.Identity -ErrorAction Stop
+                    }
+                    catch {
+                        Write-NCMessage "Unable to load message details for '$($msg.Identity)'. $($_.Exception.Message)" -Level ERROR
+                        continue
+                    }
+
+                    if (-not $IncludeReleased.IsPresent -and $details.Released) {
+                        continue
+                    }
+
+                    $results.Add([pscustomobject]@{
+                            Subject          = Format-OutputString -Value $details.Subject
+                            SenderAddress    = $details.SenderAddress
+                            RecipientAddress = $details.RecipientAddress
+                            ReceivedTime     = $details.ReceivedTime
+                            QuarantineTypes  = $details.QuarantineTypes
+                            Released         = $details.Released
+                            ReleasedUser     = $details.ReleasedUser
+                            MessageId        = $details.MessageId
+                            Identity         = $details.Identity
+                        }) | Out-Null
+                }
+            }
+        }
+    }
+
+    end {
+        Restore-ProgressAndInfoPreferences
+        $results
+    }
+}
+
 function Get-QuarantineFrom {
     <#
     .SYNOPSIS
