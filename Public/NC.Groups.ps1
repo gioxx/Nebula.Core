@@ -1120,69 +1120,47 @@ function Add-EntraGroupUser {
         }
 
         $results = [System.Collections.Generic.List[object]]::new()
-        $uniqueUsers = $users | Select-Object -Unique
+        $uniqueUsers = @($users | Select-Object -Unique)
+        $membersRefUrl = "/groups/$($resolvedGroup.Id)/members/`$ref"
+        Write-NCMessage "Processing $($uniqueUsers.Count) user(s) in Graph batches (20 per request) ..." -Level INFO
 
-        foreach ($user in $uniqueUsers) {
-            $userId = $null
-            $userLabel = $user
+        for ($offset = 0; $offset -lt $uniqueUsers.Count; $offset += 20) {
+            $chunk = @($uniqueUsers[$offset..([Math]::Min($offset + 20, $uniqueUsers.Count) - 1)])
+            $targets = @(Resolve-NCEntraGroupUserTarget -UserIdentifier $chunk -TreatInputAsId:$TreatInputAsId)
 
-            if ($TreatInputAsId.IsPresent -or $user -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-                $userId = $user
-            }
-            else {
-                $resolvedUser = $null
-                try {
-                    $resolvedUser = Get-MgUser -UserId $user -ErrorAction Stop
+            $approved = [System.Collections.Generic.List[object]]::new()
+            foreach ($target in $targets) {
+                if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add user '$($target.Label)'")) {
+                    $approved.Add($target)
                 }
-                catch {
-                    $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $user -PreferGraphIdentity
-                    if ($resolvedIdentifier) {
-                        try {
-                            $resolvedUser = Get-MgUser -UserId $resolvedIdentifier -ErrorAction Stop
-                        }
-                        catch {
-                            Write-NCMessage "Unable to resolve user '$user': $($_.Exception.Message)" -Level ERROR
-                            continue
-                        }
-                    }
-                    else {
-                        continue
-                    }
-                }
-
-                if (-not $resolvedUser) {
-                    Write-NCMessage "User '$user' not found." -Level WARNING
-                    continue
-                }
-
-                $userId = $resolvedUser.Id
-                $userLabel = if ($resolvedUser.UserPrincipalName) { $resolvedUser.UserPrincipalName } else { $resolvedUser.DisplayName }
             }
+            if ($approved.Count -eq 0) { continue }
 
-            if (-not $userId) {
-                Write-NCMessage "Unable to determine object ID for user '$user'." -Level ERROR
-                continue
-            }
+            $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'POST'; Url = $membersRefUrl; Body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $approved[$i].Id) } }
+                })
+            $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Adding users to $($resolvedGroup.DisplayName)")
 
-            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add user '$userLabel'")) {
+            for ($i = 0; $i -lt $approved.Count; $i++) {
+                $userId = $approved[$i].Id
+                $userLabel = $approved[$i].Label
+                $response = $responses[$i]
                 $status = 'Added'
-                try {
-                    New-MgGroupMember -GroupId $resolvedGroup.Id -DirectoryObjectId $userId -ErrorAction Stop | Out-Null
+
+                if ($response.Success) {
                     Write-NCMessage "Added user '$userLabel' to group '$($resolvedGroup.DisplayName)'." -Level SUCCESS
                 }
-                catch {
-                    if ($_.Exception.Message -match 'added object references already exist') {
-                        $status = 'Exists'
-                        Write-NCMessage "User '$userLabel' is already a member of '$($resolvedGroup.DisplayName)'." -Level WARNING
-                    }
-                    elseif ($_.Exception.Message -match 'on-premises mastered Directory Sync objects|currently undergoing migration') {
-                        $status = 'Failed'
-                        Write-NCMessage "Group '$($resolvedGroup.DisplayName)' is synchronized from on-premises AD, so membership can't be changed directly in Entra. Update the group in AD and let sync propagate the change." -Level ERROR
-                    }
-                    else {
-                        $status = 'Failed'
-                        Write-NCMessage "Failed to add user '$userLabel' to '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
-                    }
+                elseif ($response.ErrorMessage -match 'added object references already exist') {
+                    $status = 'Exists'
+                    Write-NCMessage "User '$userLabel' is already a member of '$($resolvedGroup.DisplayName)'." -Level WARNING
+                }
+                elseif ($response.ErrorMessage -match 'on-premises mastered Directory Sync objects|currently undergoing migration') {
+                    $status = 'Failed'
+                    Write-NCMessage "Group '$($resolvedGroup.DisplayName)' is synchronized from on-premises AD, so membership can't be changed directly in Entra. Update the group in AD and let sync propagate the change." -Level ERROR
+                }
+                else {
+                    $status = 'Failed'
+                    Write-NCMessage "Failed to add user '$userLabel' to '$($resolvedGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
                 }
 
                 if ($PassThru.IsPresent) {
@@ -3781,76 +3759,49 @@ function Remove-EntraGroupUser {
             }
         }
         else {
-            $uniqueUsers = $users | Select-Object -Unique
-
-            foreach ($user in $uniqueUsers) {
-                $userId = $null
-                $userLabel = $user
-
-                if ($TreatInputAsId.IsPresent -or $user -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-                    $userId = $user
-                }
-                else {
-                    $resolvedUser = $null
-                    try {
-                        $resolvedUser = Get-MgUser -UserId $user -ErrorAction Stop
-                    }
-                    catch {
-                        $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $user -PreferGraphIdentity
-                        if ($resolvedIdentifier) {
-                            try {
-                                $resolvedUser = Get-MgUser -UserId $resolvedIdentifier -ErrorAction Stop
-                            }
-                            catch {
-                                Write-NCMessage "Unable to resolve user '$user': $($_.Exception.Message)" -Level ERROR
-                                continue
-                            }
-                        }
-                        else {
-                            continue
-                        }
-                    }
-
-                    if (-not $resolvedUser) {
-                        Write-NCMessage "User '$user' not found." -Level WARNING
-                        continue
-                    }
-
-                    $userId = $resolvedUser.Id
-                    $userLabel = if ($resolvedUser.UserPrincipalName) { $resolvedUser.UserPrincipalName } else { $resolvedUser.DisplayName }
-                }
-
-                if (-not $userId) {
-                    Write-NCMessage "Unable to determine object ID for user '$user'." -Level ERROR
-                    continue
-                }
-
+            $uniqueUsers = @($users | Select-Object -Unique)
+            foreach ($target in @(Resolve-NCEntraGroupUserTarget -UserIdentifier $uniqueUsers -TreatInputAsId:$TreatInputAsId)) {
                 $usersToRemove.Add([pscustomobject]@{
-                        Id    = $userId
-                        Label = $userLabel
+                        Id    = $target.Id
+                        Label = $target.Label
                     }) | Out-Null
             }
         }
 
-        foreach ($entry in $usersToRemove) {
-            $userId = $entry.Id
-            $userLabel = $entry.Label
+        Write-NCMessage "Processing $($usersToRemove.Count) user(s) in Graph batches (20 per request) ..." -Level INFO
 
-            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Remove user '$userLabel'")) {
+        for ($offset = 0; $offset -lt $usersToRemove.Count; $offset += 20) {
+            $chunk = @($usersToRemove[$offset..([Math]::Min($offset + 20, $usersToRemove.Count) - 1)])
+
+            $approved = [System.Collections.Generic.List[object]]::new()
+            foreach ($entry in $chunk) {
+                if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Remove user '$($entry.Label)'")) {
+                    $approved.Add($entry)
+                }
+            }
+            if ($approved.Count -eq 0) { continue }
+
+            $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'DELETE'; Url = "/groups/$($resolvedGroup.Id)/members/$([uri]::EscapeDataString($approved[$i].Id))/`$ref" }
+                })
+            $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Removing users from $($resolvedGroup.DisplayName)")
+
+            for ($i = 0; $i -lt $approved.Count; $i++) {
+                $userId = $approved[$i].Id
+                $userLabel = $approved[$i].Label
+                $response = $responses[$i]
                 $status = 'Removed'
-                try {
-                    Remove-MgGroupMemberByRef -GroupId $resolvedGroup.Id -DirectoryObjectId $userId -ErrorAction Stop
+
+                if ($response.Success) {
                     Write-NCMessage "Removed user '$userLabel' from group '$($resolvedGroup.DisplayName)'." -Level SUCCESS
                 }
-                catch {
-                    if ($_.Exception.Message -match 'could not find member' -or $_.Exception.Message -match 'does not exist') {
-                        $status = 'NotFound'
-                        Write-NCMessage "User '$userLabel' is not a member of '$($resolvedGroup.DisplayName)'" -Level WARNING
-                    }
-                    else {
-                        $status = 'Failed'
-                        Write-NCMessage "Failed to remove user '$userLabel' from '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
-                    }
+                elseif ($response.Status -eq 404 -or $response.ErrorMessage -match 'could not find member' -or $response.ErrorMessage -match 'does not exist') {
+                    $status = 'NotFound'
+                    Write-NCMessage "User '$userLabel' is not a member of '$($resolvedGroup.DisplayName)'" -Level WARNING
+                }
+                else {
+                    $status = 'Failed'
+                    Write-NCMessage "Failed to remove user '$userLabel' from '$($resolvedGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
                 }
 
                 if ($PassThru.IsPresent) {

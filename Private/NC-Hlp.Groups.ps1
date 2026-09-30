@@ -126,3 +126,55 @@ function Resolve-NCEntraOwner {
         Label = [string]$ownerLabel
     }
 }
+
+function Resolve-NCEntraGroupUserTarget {
+    <#
+    .SYNOPSIS
+        Resolves group-membership user inputs to object IDs with batched Graph lookups.
+    .DESCRIPTION
+        Object IDs (or every input when -TreatInputAsId is set) pass through unchanged. Other inputs are
+        resolved through Resolve-NCGraphUserBatch; inputs that cannot be resolved are skipped (the resolver
+        already reported them).
+    .PARAMETER UserIdentifier
+        UPNs, mail addresses, display names or object IDs.
+    .PARAMETER TreatInputAsId
+        Treat every input as an object ID.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$UserIdentifier,
+        [switch]$TreatInputAsId
+    )
+
+    $guidPattern = '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    $isId = { param($value) $TreatInputAsId.IsPresent -or $value -match $guidPattern }
+
+    $lookup = @($UserIdentifier | Where-Object { -not (& $isId $_) })
+    $resolved = if ($lookup.Count -gt 0) {
+        Resolve-NCGraphUserBatch -Identifier $lookup -Property @('id', 'userPrincipalName', 'displayName')
+    }
+    else {
+        @{}
+    }
+
+    foreach ($user in $UserIdentifier) {
+        if (& $isId $user) {
+            [pscustomobject]@{ Input = $user; Id = $user; Label = $user }
+            continue
+        }
+
+        $match = $resolved[$user]
+        if (-not $match) {
+            continue
+        }
+        if (-not $match.id) {
+            Write-NCMessage "Unable to determine object ID for user '$user'." -Level ERROR
+            continue
+        }
+
+        $label = if ($match.userPrincipalName) { $match.userPrincipalName } else { $match.displayName }
+        [pscustomobject]@{ Input = $user; Id = $match.id; Label = $label }
+    }
+}
