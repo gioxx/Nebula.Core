@@ -510,6 +510,7 @@ Describe 'Entra group owner batching' {
         $script:ownerDirectCalls.Clear()
         $script:ownerWriteAnswer = { param($request) @{ status = 204 } }
         $script:ownerDirectAnswer = { param($uri) @{ value = @() } }
+        $script:ownerDirectAsObject = $false
         Mock Invoke-MgGraphRequest {
             if ($Uri -like '*$batch') {
                 $payload = $Body | ConvertFrom-Json
@@ -528,8 +529,10 @@ Describe 'Entra group owner batching' {
             }
             else {
                 $script:ownerDirectCalls.Add("$Method $Uri")
-                # The real cmdlet output is a dictionary; the functions read it as an object, so hand back an object.
-                (& $script:ownerDirectAnswer $Uri) | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+                # Like the real cmdlet, direct calls return (case-insensitive) hashtables; one test asks for objects instead.
+                $answer = & $script:ownerDirectAnswer $Uri
+                if ($script:ownerDirectAsObject) { return ($answer | ConvertTo-Json -Depth 6 | ConvertFrom-Json) }
+                $answer
             }
         }
     }
@@ -675,6 +678,15 @@ Describe 'Entra group owner batching' {
             $result.Status | Should -Be @('Exists', 'Exists', 'Failed')
             Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Owner 'o1@contoso.com' is already an owner of 'Group dst'." -and $Level -eq 'WARNING' }
             Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Failed to copy owner 'o3@contoso.com' to 'Group dst': denied" -and $Level -eq 'ERROR' }
+        }
+
+        It 'still reads owner responses returned as objects' {
+            $script:ownerDirectAsObject = $true
+            $result = @(Copy-EntraGroupOwner -SourceGroupId 'src' -DestinationGroupId 'dst' -PassThru -Confirm:$false)
+
+            $script:ownerBatchSizes[0] | Should -Be @('POST /groups/id-dst/owners/$ref', 'POST /groups/id-dst/owners/$ref')
+            $result.Status | Should -Be @('Added', 'Exists', 'Added')
+            $result[0].OwnerName | Should -Be 'o1@contoso.com'
         }
 
         It 'does not send writes with -WhatIf' {

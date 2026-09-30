@@ -14,12 +14,45 @@ function Get-NCGraphObjectLabel {
         return $null
     }
 
-    $props = $InputObject.PSObject.Properties
-    if ($props['userPrincipalName'] -and $InputObject.userPrincipalName) { return [string]$InputObject.userPrincipalName }
-    if ($props['displayName'] -and $InputObject.displayName) { return [string]$InputObject.displayName }
-    if ($props['appDisplayName'] -and $InputObject.appDisplayName) { return [string]$InputObject.appDisplayName }
-    if ($props['id'] -and $InputObject.id) { return [string]$InputObject.id }
+    foreach ($name in @('userPrincipalName', 'displayName', 'appDisplayName', 'id')) {
+        $value = Get-NCGraphItemValue -InputObject $InputObject -Name $name
+        if ($value) { return [string]$value }
+    }
     return [string]$InputObject
+}
+
+function Test-NCGraphItemProperty {
+    <#
+    .SYNOPSIS
+        Tells whether a Graph item (Hashtable from Invoke-MgGraphRequest, or object) carries a property.
+    #>
+    [CmdletBinding()]
+    param(
+        [object]$InputObject,
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if ($null -eq $InputObject) { return $false }
+    if ($InputObject -is [System.Collections.IDictionary]) { return [bool]$InputObject.Contains($Name) }
+    return ($null -ne $InputObject.PSObject.Properties[$Name])
+}
+
+function Get-NCGraphItemValue {
+    <#
+    .SYNOPSIS
+        Reads a property of a Graph item (Hashtable from Invoke-MgGraphRequest, or object); $null when absent.
+    #>
+    [CmdletBinding()]
+    param(
+        [object]$InputObject,
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if (-not (Test-NCGraphItemProperty -InputObject $InputObject -Name $Name)) { return $null }
+    if ($InputObject -is [System.Collections.IDictionary]) { return $InputObject[$Name] }
+    return $InputObject.PSObject.Properties[$Name].Value
 }
 
 function Resolve-NCEntraGroup {

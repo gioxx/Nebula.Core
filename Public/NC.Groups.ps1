@@ -395,7 +395,7 @@ function Remove-EntraGroupOwner {
             try {
                 $ownerResponse = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($resolvedGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName" -Method GET
                 $ownerItems = @()
-                if ($ownerResponse -and $ownerResponse.PSObject.Properties['value']) {
+                if ($ownerResponse -and (Test-NCGraphItemProperty -InputObject $ownerResponse -Name 'value')) {
                     $ownerItems = @($ownerResponse.value)
                 }
                 elseif ($ownerResponse) {
@@ -408,7 +408,7 @@ function Remove-EntraGroupOwner {
             }
 
             foreach ($ownerItem in $ownerItems) {
-                $ownerId = if ($ownerItem.PSObject.Properties['id']) { [string]$ownerItem.id } else { $null }
+                $ownerId = [string](Get-NCGraphItemValue -InputObject $ownerItem -Name 'id')
                 if ([string]::IsNullOrWhiteSpace($ownerId)) {
                     continue
                 }
@@ -573,7 +573,7 @@ function Copy-EntraGroupOwner {
     try {
         $ownerResponse = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($sourceGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName" -Method GET
         $sourceOwners = @()
-        if ($ownerResponse -and $ownerResponse.PSObject.Properties['value']) {
+        if ($ownerResponse -and (Test-NCGraphItemProperty -InputObject $ownerResponse -Name 'value')) {
             $sourceOwners = @($ownerResponse.value)
         }
         elseif ($ownerResponse) {
@@ -593,7 +593,7 @@ function Copy-EntraGroupOwner {
     try {
         $destinationOwnerResponse = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($destinationGroup.Id)/owners?`$select=id" -Method GET
         $destinationOwners = @()
-        if ($destinationOwnerResponse -and $destinationOwnerResponse.PSObject.Properties['value']) {
+        if ($destinationOwnerResponse -and (Test-NCGraphItemProperty -InputObject $destinationOwnerResponse -Name 'value')) {
             $destinationOwners = @($destinationOwnerResponse.value)
         }
         elseif ($destinationOwnerResponse) {
@@ -610,7 +610,7 @@ function Copy-EntraGroupOwner {
     $entries = [System.Collections.Generic.List[object]]::new()
 
     foreach ($ownerItem in $sourceOwners) {
-        $ownerId = if ($ownerItem.PSObject.Properties['id']) { [string]$ownerItem.id } else { $null }
+        $ownerId = [string](Get-NCGraphItemValue -InputObject $ownerItem -Name 'id')
         if ([string]::IsNullOrWhiteSpace($ownerId)) {
             continue
         }
@@ -935,7 +935,7 @@ function Copy-EntraGroup {
 
             $ownerPending = [System.Collections.Generic.List[object]]::new()
             foreach ($owner in $sourceOwners) {
-                $ownerId = if ($owner.PSObject.Properties['id']) { [string]$owner.id } else { $null }
+                $ownerId = [string](Get-NCGraphItemValue -InputObject $owner -Name 'id')
                 if ([string]::IsNullOrWhiteSpace($ownerId)) {
                     continue
                 }
@@ -1005,7 +1005,7 @@ function Copy-EntraGroup {
 
             $memberPending = [System.Collections.Generic.List[object]]::new()
             foreach ($member in $sourceMembers) {
-                $memberId = if ($member.PSObject.Properties['id']) { [string]$member.id } else { $null }
+                $memberId = [string](Get-NCGraphItemValue -InputObject $member -Name 'id')
                 if ([string]::IsNullOrWhiteSpace($memberId)) {
                     continue
                 }
