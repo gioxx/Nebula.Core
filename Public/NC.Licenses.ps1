@@ -360,38 +360,27 @@ function Copy-UserMsolAccountSku {
             return
         }
 
-        $resolvedSource = Find-UserRecipient -UserPrincipalName $SourceUserPrincipalName -PreferGraphIdentity
-        $resolvedDestination = Find-UserRecipient -UserPrincipalName $DestinationUserPrincipalName -PreferGraphIdentity
+        Write-NCMessage "Processing 2 user(s) in Graph batches (20 per request) ..." -Level INFO
+        $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $resolvedUsers = Resolve-NCGraphUserBatch -Identifier @($SourceUserPrincipalName, $DestinationUserPrincipalName) -Property @('id', 'userPrincipalName', 'displayName', 'usageLocation') -FailedIdentifier $failedUsers
 
-        try {
-            if ($resolvedSource) {
-                $sourceUser = Get-MgUser -UserId $resolvedSource -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
+        $sourceUser = $resolvedUsers[$SourceUserPrincipalName.Trim()]
+        if (-not $sourceUser -or -not $sourceUser.id) {
+            if (-not $failedUsers.Contains($SourceUserPrincipalName.Trim())) {
+                Write-NCMessage "Unable to retrieve source user $($SourceUserPrincipalName): user not found." -Level ERROR
             }
-            else {
-                $sourceUser = Get-MgUser -UserId $SourceUserPrincipalName -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
-                $resolvedSource = $sourceUser.Id
-            }
-        }
-        catch {
-            Write-NCMessage "Unable to retrieve source user $($SourceUserPrincipalName): $($_.Exception.Message)" -Level ERROR
             return
         }
 
-        try {
-            if ($resolvedDestination) {
-                $destinationUser = Get-MgUser -UserId $resolvedDestination -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
+        $destinationUser = $resolvedUsers[$DestinationUserPrincipalName.Trim()]
+        if (-not $destinationUser -or -not $destinationUser.id) {
+            if (-not $failedUsers.Contains($DestinationUserPrincipalName.Trim())) {
+                Write-NCMessage "Unable to retrieve destination user $($DestinationUserPrincipalName): user not found." -Level ERROR
             }
-            else {
-                $destinationUser = Get-MgUser -UserId $DestinationUserPrincipalName -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
-                $resolvedDestination = $destinationUser.Id
-            }
-        }
-        catch {
-            Write-NCMessage "Unable to retrieve destination user $($DestinationUserPrincipalName): $($_.Exception.Message)" -Level ERROR
             return
         }
 
-        if ($resolvedSource -eq $resolvedDestination) {
+        if ([string]$sourceUser.id -eq [string]$destinationUser.id) {
             Write-NCMessage "Source and destination users are the same. Aborting." -Level ERROR
             return
         }
@@ -407,18 +396,17 @@ function Copy-UserMsolAccountSku {
             return $value.Trim().ToUpperInvariant()
         }
 
-        $currentUsage = & $normalizeUsageLocation $destinationUser.UsageLocation
+        $currentUsage = & $normalizeUsageLocation $destinationUser.usageLocation
         $desiredUsage = & $normalizeUsageLocation $defaultUsageLocation
 
         if ($desiredUsage -and $desiredUsage -ne $currentUsage) {
             $targetUsage = $defaultUsageLocation
             try {
-                Update-MgUser -UserId $destinationUser.Id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
-                $destinationUser.UsageLocation = $targetUsage
-                Write-Verbose "Usage location set to $targetUsage for $($destinationUser.UserPrincipalName)."
+                Update-MgUser -UserId $destinationUser.id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
+                Write-Verbose "Usage location set to $targetUsage for $($destinationUser.userPrincipalName)."
             }
             catch {
-                Write-NCMessage "Unable to set usage location ($targetUsage) for $($destinationUser.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
+                Write-NCMessage "Unable to set usage location ($targetUsage) for $($destinationUser.userPrincipalName): $($_.Exception.Message)" -Level ERROR
                 return
             }
         }
@@ -443,33 +431,29 @@ function Copy-UserMsolAccountSku {
         }
         $maxAttempts = 3
 
-        try {
-            $sourceLicenses = Invoke-NCRetry -Action {
-                Get-MgUserLicenseDetail -UserId $sourceUser.Id -ErrorAction Stop
-            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve licenses for $($sourceUser.UserPrincipalName)" -OnError {
-                param($attempt, $max, $err)
-                $currentAttempt = if ($attempt) { $attempt } else { '?' }
-                $currentMax = if ($max) { $max } else { $maxAttempts }
-                Write-NCMessage "Failed to retrieve licenses for $($sourceUser.UserPrincipalName), attempt $currentAttempt of $currentMax." -Level ERROR
-            }
+        $licenseDetailRequests = @(
+            @{ Id = 'l0'; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString([string]$sourceUser.id))/licenseDetails" }
+            @{ Id = 'l1'; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString([string]$destinationUser.id))/licenseDetails" }
+        )
+        $licenseDetailResults = @(Invoke-NCGraphBatchCollection -Requests $licenseDetailRequests -Activity 'Reading user licenses')
+
+        if (-not $licenseDetailResults[0].Success) {
+            Write-NCMessage "Failed to retrieve licenses for $($sourceUser.userPrincipalName) after $maxAttempts attempts." -Level ERROR
+            Write-Verbose $licenseDetailResults[0].ErrorMessage
+            return
         }
-        catch {
-            Write-NCMessage "Failed to retrieve licenses for $($sourceUser.UserPrincipalName) after $maxAttempts attempts." -Level ERROR
+        $sourceLicenses = if ($null -ne $licenseDetailResults[0].Items) { @($licenseDetailResults[0].Items) } else { @() }
+
+        if ($sourceLicenses.Count -eq 0) {
+            Write-NCMessage "Source user $($sourceUser.userPrincipalName) has no licenses to copy." -Level WARNING
             return
         }
 
-        if (-not $sourceLicenses -or $sourceLicenses.Count -eq 0) {
-            Write-NCMessage "Source user $($sourceUser.UserPrincipalName) has no licenses to copy." -Level WARNING
+        if (-not $licenseDetailResults[1].Success) {
+            Write-NCMessage "Unable to read destination licenses for $($destinationUser.userPrincipalName): $($licenseDetailResults[1].ErrorMessage)" -Level ERROR
             return
         }
-
-        try {
-            $destinationLicenses = Get-MgUserLicenseDetail -UserId $destinationUser.Id -ErrorAction Stop
-        }
-        catch {
-            Write-NCMessage "Unable to read destination licenses for $($destinationUser.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
-            return
-        }
+        $destinationLicenses = if ($null -ne $licenseDetailResults[1].Items) { @($licenseDetailResults[1].Items) } else { @() }
 
         try {
             $tenantSkus = Invoke-NCRetry -Action {
@@ -496,7 +480,11 @@ function Copy-UserMsolAccountSku {
             $availabilityBySkuId[$skuIdString.ToUpperInvariant()] = [Math]::Max($enabledUnits - $consumedUnits, 0)
         }
 
-        $destinationSkuIds = if ($destinationLicenses) { $destinationLicenses.SkuId } else { @() }
+        $destinationSkuIds = @()
+        foreach ($destSku in $destinationLicenses) {
+            $parsedSku = [guid]::Empty
+            if ([guid]::TryParse([string]$destSku.SkuId, [ref]$parsedSku)) { $destinationSkuIds += $parsedSku }
+        }
         $addLicenses = @()
         $licenseNames = @()
         $skippedInvalid = @()
@@ -564,38 +552,38 @@ function Copy-UserMsolAccountSku {
                 Write-NCMessage ("Nothing to copy: no available units for {0}." -f (($namesNoAvailability | Select-Object -Unique) -join ', ')) -Level WARNING
             }
             else {
-                Write-NCMessage "Nothing to copy: destination already has all licenses from $($sourceUser.UserPrincipalName)." -Level WARNING
+                Write-NCMessage "Nothing to copy: destination already has all licenses from $($sourceUser.userPrincipalName)." -Level WARNING
             }
             return
         }
 
         $uniqueNames = $licenseNames | Select-Object -Unique
-        $actionSummary = "Copy licenses ($($uniqueNames -join ', ')) from $($sourceUser.UserPrincipalName) to $($destinationUser.UserPrincipalName)"
+        $actionSummary = "Copy licenses ($($uniqueNames -join ', ')) from $($sourceUser.userPrincipalName) to $($destinationUser.userPrincipalName)"
 
         if ($skippedInvalid.Count -gt 0) {
             Write-NCMessage ("Skipped licenses with invalid IDs: {0}" -f ($skippedInvalid -join '; ')) -Level WARNING
         }
 
-        if (-not $PSCmdlet.ShouldProcess($destinationUser.UserPrincipalName, $actionSummary)) {
+        if (-not $PSCmdlet.ShouldProcess($destinationUser.userPrincipalName, $actionSummary)) {
             return
         }
 
         try {
             Invoke-NCRetry -Action {
-                Set-MgUserLicense -UserId $destinationUser.Id -AddLicenses $addLicenses -RemoveLicenses @() -ErrorAction Stop
-            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "assign licenses to $($destinationUser.UserPrincipalName)" -OnError {
+                Set-MgUserLicense -UserId $destinationUser.id -AddLicenses $addLicenses -RemoveLicenses @() -ErrorAction Stop
+            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "assign licenses to $($destinationUser.userPrincipalName)" -OnError {
                 param($attempt, $max, $err)
                 $currentAttempt = if ($attempt) { $attempt } else { '?' }
                 $currentMax = if ($max) { $max } else { $maxAttempts }
-                Write-NCMessage ("Failed to assign licenses to {0}, attempt {1} of {2}. {3}" -f $destinationUser.UserPrincipalName, $currentAttempt, $currentMax, $err.Exception.Message) -Level ERROR
+                Write-NCMessage ("Failed to assign licenses to {0}, attempt {1} of {2}. {3}" -f $destinationUser.userPrincipalName, $currentAttempt, $currentMax, $err.Exception.Message) -Level ERROR
             } | Out-Null
-            Write-NCMessage "Copied licenses to $($destinationUser.UserPrincipalName): $($uniqueNames -join ', ')." -Level SUCCESS
+            Write-NCMessage "Copied licenses to $($destinationUser.userPrincipalName): $($uniqueNames -join ', ')." -Level SUCCESS
             if ($namesNoAvailability.Count -gt 0) {
                 Write-NCMessage ("Skipped license(s) with no available units: {0}" -f (($namesNoAvailability | Select-Object -Unique) -join ', ')) -Level WARNING
             }
         }
         catch {
-            Write-NCMessage "License copy to $($destinationUser.UserPrincipalName) failed: $($_.Exception.Message)" -Level ERROR
+            Write-NCMessage "License copy to $($destinationUser.userPrincipalName) failed: $($_.Exception.Message)" -Level ERROR
         }
     }
     finally {
@@ -1845,28 +1833,28 @@ function Move-UserMsolAccountSku {
             return
         }
 
-        $resolvedSource = Find-UserRecipient -UserPrincipalName $SourceUserPrincipalName -PreferGraphIdentity
-        $resolvedDestination = Find-UserRecipient -UserPrincipalName $DestinationUserPrincipalName -PreferGraphIdentity
+        Write-NCMessage "Processing 2 user(s) in Graph batches (20 per request) ..." -Level INFO
+        $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $resolvedUsers = Resolve-NCGraphUserBatch -Identifier @($SourceUserPrincipalName, $DestinationUserPrincipalName) -Property @('id', 'userPrincipalName', 'displayName', 'usageLocation') -FailedIdentifier $failedUsers
 
-        if (-not $resolvedSource) {
-            Write-NCMessage "Unable to resolve source user recipient for $SourceUserPrincipalName" -Level ERROR
+        $sourceUser = $resolvedUsers[$SourceUserPrincipalName.Trim()]
+        if (-not $sourceUser -or -not $sourceUser.id) {
+            if (-not $failedUsers.Contains($SourceUserPrincipalName.Trim())) {
+                Write-NCMessage "Unable to resolve source user recipient for $SourceUserPrincipalName" -Level ERROR
+            }
             return
         }
-        if (-not $resolvedDestination) {
-            Write-NCMessage "Unable to resolve destination user recipient for $DestinationUserPrincipalName" -Level ERROR
+
+        $destinationUser = $resolvedUsers[$DestinationUserPrincipalName.Trim()]
+        if (-not $destinationUser -or -not $destinationUser.id) {
+            if (-not $failedUsers.Contains($DestinationUserPrincipalName.Trim())) {
+                Write-NCMessage "Unable to resolve destination user recipient for $DestinationUserPrincipalName" -Level ERROR
+            }
             return
         }
-        if ($resolvedSource -eq $resolvedDestination) {
+
+        if ([string]$sourceUser.id -eq [string]$destinationUser.id) {
             Write-NCMessage "Source and destination users are the same. Aborting." -Level ERROR
-            return
-        }
-
-        try {
-            $sourceUser = Get-MgUser -UserId $resolvedSource -Property Id, UserPrincipalName, DisplayName, UsageLocation -ErrorAction Stop
-            $destinationUser = Get-MgUser -UserId $resolvedDestination -Property Id, UserPrincipalName, DisplayName, UsageLocation -ErrorAction Stop
-        }
-        catch {
-            Write-NCMessage "Unable to retrieve users: $($_.Exception.Message)" -Level ERROR
             return
         }
 
@@ -1881,18 +1869,17 @@ function Move-UserMsolAccountSku {
             return $value.Trim().ToUpperInvariant()
         }
 
-        $currentUsage = & $normalizeUsageLocation $destinationUser.UsageLocation
+        $currentUsage = & $normalizeUsageLocation $destinationUser.usageLocation
         $desiredUsage = & $normalizeUsageLocation $defaultUsageLocation
 
         if ($desiredUsage -and $desiredUsage -ne $currentUsage) {
             $targetUsage = $defaultUsageLocation
             try {
-                Update-MgUser -UserId $destinationUser.Id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
-                $destinationUser.UsageLocation = $targetUsage
-                Write-Verbose "Usage location set to $targetUsage for $($destinationUser.UserPrincipalName)."
+                Update-MgUser -UserId $destinationUser.id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
+                Write-Verbose "Usage location set to $targetUsage for $($destinationUser.userPrincipalName)."
             }
             catch {
-                Write-NCMessage "Unable to set usage location ($targetUsage) for $($destinationUser.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
+                Write-NCMessage "Unable to set usage location ($targetUsage) for $($destinationUser.userPrincipalName): $($_.Exception.Message)" -Level ERROR
                 return
             }
         }
@@ -1917,33 +1904,29 @@ function Move-UserMsolAccountSku {
         }
         $maxAttempts = 3
 
-        try {
-            $sourceLicenses = Invoke-NCRetry -Action {
-                Get-MgUserLicenseDetail -UserId $sourceUser.Id -ErrorAction Stop
-            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve licenses for $($sourceUser.UserPrincipalName)" -OnError {
-                param($attempt, $max, $err)
-                $currentAttempt = if ($attempt) { $attempt } else { '?' }
-                $currentMax = if ($max) { $max } else { $maxAttempts }
-                Write-NCMessage "Failed to retrieve licenses for $($sourceUser.UserPrincipalName), attempt $currentAttempt of $currentMax." -Level ERROR
-            }
+        $licenseDetailRequests = @(
+            @{ Id = 'l0'; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString([string]$sourceUser.id))/licenseDetails" }
+            @{ Id = 'l1'; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString([string]$destinationUser.id))/licenseDetails" }
+        )
+        $licenseDetailResults = @(Invoke-NCGraphBatchCollection -Requests $licenseDetailRequests -Activity 'Reading user licenses')
+
+        if (-not $licenseDetailResults[0].Success) {
+            Write-NCMessage "Failed to retrieve licenses for $($sourceUser.userPrincipalName) after $maxAttempts attempts." -Level ERROR
+            Write-Verbose $licenseDetailResults[0].ErrorMessage
+            return
         }
-        catch {
-            Write-NCMessage "Failed to retrieve licenses for $($sourceUser.UserPrincipalName) after $maxAttempts attempts." -Level ERROR
+        $sourceLicenses = if ($null -ne $licenseDetailResults[0].Items) { @($licenseDetailResults[0].Items) } else { @() }
+
+        if ($sourceLicenses.Count -eq 0) {
+            Write-NCMessage "Source user $($sourceUser.userPrincipalName) has no licenses to move." -Level WARNING
             return
         }
 
-        if (-not $sourceLicenses -or $sourceLicenses.Count -eq 0) {
-            Write-NCMessage "Source user $($sourceUser.UserPrincipalName) has no licenses to move." -Level WARNING
+        if (-not $licenseDetailResults[1].Success) {
+            Write-NCMessage "Unable to read destination licenses for $($destinationUser.userPrincipalName): $($licenseDetailResults[1].ErrorMessage)" -Level ERROR
             return
         }
-
-        try {
-            $destinationLicenses = Get-MgUserLicenseDetail -UserId $destinationUser.Id -ErrorAction Stop
-        }
-        catch {
-            Write-NCMessage "Unable to read destination licenses for $($destinationUser.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
-            return
-        }
+        $destinationLicenses = if ($null -ne $licenseDetailResults[1].Items) { @($licenseDetailResults[1].Items) } else { @() }
 
         $destinationSkuIds = @()
         if ($destinationLicenses) {
@@ -2038,7 +2021,7 @@ function Move-UserMsolAccountSku {
         }
 
         if ($addLicenses.Count -eq 0 -and $removeSkuIds.Count -eq 0) {
-            Write-NCMessage "Nothing to move between $($sourceUser.UserPrincipalName) and $($destinationUser.UserPrincipalName)." -Level WARNING
+            Write-NCMessage "Nothing to move between $($sourceUser.userPrincipalName) and $($destinationUser.userPrincipalName)." -Level WARNING
             return
         }
 
@@ -2057,26 +2040,26 @@ function Move-UserMsolAccountSku {
             }
             if ($name) { $name } else { $_.SkuPartNumber }
         }
-        $actionSummary = "Move licenses ($($licenseNames -join ', ')) from $($sourceUser.UserPrincipalName) to $($destinationUser.UserPrincipalName)"
+        $actionSummary = "Move licenses ($($licenseNames -join ', ')) from $($sourceUser.userPrincipalName) to $($destinationUser.userPrincipalName)"
 
-        if (-not $PSCmdlet.ShouldProcess($destinationUser.UserPrincipalName, $actionSummary)) {
+        if (-not $PSCmdlet.ShouldProcess($destinationUser.userPrincipalName, $actionSummary)) {
             return
         }
 
         if ($addLicenses.Count -gt 0) {
             try {
                 Invoke-NCRetry -Action {
-                    Set-MgUserLicense -UserId $destinationUser.Id -AddLicenses $addLicenses -RemoveLicenses @() -ErrorAction Stop
-                } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "assign licenses to $($destinationUser.UserPrincipalName)" -OnError {
+                    Set-MgUserLicense -UserId $destinationUser.id -AddLicenses $addLicenses -RemoveLicenses @() -ErrorAction Stop
+                } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "assign licenses to $($destinationUser.userPrincipalName)" -OnError {
                     param($attempt, $max, $err)
                     $currentAttempt = if ($attempt) { $attempt } else { '?' }
                     $currentMax = if ($max) { $max } else { $maxAttempts }
-                    Write-NCMessage ("Failed to assign licenses to {0}, attempt {1} of {2}. {3}" -f $destinationUser.UserPrincipalName, $currentAttempt, $currentMax, $err.Exception.Message) -Level ERROR
+                    Write-NCMessage ("Failed to assign licenses to {0}, attempt {1} of {2}. {3}" -f $destinationUser.userPrincipalName, $currentAttempt, $currentMax, $err.Exception.Message) -Level ERROR
                 } | Out-Null
-                Write-NCMessage "Assigned licenses to $($destinationUser.UserPrincipalName)." -Level SUCCESS
+                Write-NCMessage "Assigned licenses to $($destinationUser.userPrincipalName)." -Level SUCCESS
             }
             catch {
-                Write-NCMessage "License assignment to $($destinationUser.UserPrincipalName) failed. Aborting removal from source. $($_.Exception.Message)" -Level ERROR
+                Write-NCMessage "License assignment to $($destinationUser.userPrincipalName) failed. Aborting removal from source. $($_.Exception.Message)" -Level ERROR
                 return
             }
         }
@@ -2084,17 +2067,17 @@ function Move-UserMsolAccountSku {
         if ($removeSkuIds.Count -gt 0) {
             try {
                 Invoke-NCRetry -Action {
-                    Set-MgUserLicense -UserId $sourceUser.Id -AddLicenses @() -RemoveLicenses ($removeSkuIds | Select-Object -Unique) -ErrorAction Stop
-                } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "remove licenses from $($sourceUser.UserPrincipalName)" -OnError {
+                    Set-MgUserLicense -UserId $sourceUser.id -AddLicenses @() -RemoveLicenses ($removeSkuIds | Select-Object -Unique) -ErrorAction Stop
+                } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "remove licenses from $($sourceUser.userPrincipalName)" -OnError {
                     param($attempt, $max, $err)
                     $currentAttempt = if ($attempt) { $attempt } else { '?' }
                     $currentMax = if ($max) { $max } else { $maxAttempts }
-                    Write-NCMessage ("Failed to remove licenses from {0}, attempt {1} of {2}. {3}" -f $sourceUser.UserPrincipalName, $currentAttempt, $currentMax, $err.Exception.Message) -Level ERROR
+                    Write-NCMessage ("Failed to remove licenses from {0}, attempt {1} of {2}. {3}" -f $sourceUser.userPrincipalName, $currentAttempt, $currentMax, $err.Exception.Message) -Level ERROR
                 } | Out-Null
-                Write-NCMessage "Removed licenses from $($sourceUser.UserPrincipalName)." -Level SUCCESS
+                Write-NCMessage "Removed licenses from $($sourceUser.userPrincipalName)." -Level SUCCESS
             }
             catch {
-                Write-NCMessage "Failed to remove licenses from $($sourceUser.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
+                Write-NCMessage "Failed to remove licenses from $($sourceUser.userPrincipalName): $($_.Exception.Message)" -Level ERROR
             }
         }
     }

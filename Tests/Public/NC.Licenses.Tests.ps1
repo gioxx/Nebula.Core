@@ -27,6 +27,8 @@ BeforeAll {
     function New-File { param($Path) $Path }
     function Get-MgUser { [CmdletBinding()] param($Filter, $ConsistencyLevel, $CountVariable, [switch]$All, $Property) }
     function Get-MgEnvironment { param([string]$Name) }
+    function Update-MgUser { [CmdletBinding()] param($UserId, $UsageLocation) }
+    function Set-MgUserLicense { [CmdletBinding()] param($UserId, $AddLicenses, $RemoveLicenses) }
 
     # Builds a $batch response by asking $Responder for each sub-request ({ param($request) @{ status; body } }).
     function New-TestBatchResponse {
@@ -297,5 +299,70 @@ Describe 'License assignment batching' {
         $rows[0].DisplayName | Should -Be 'User 1'
         $rows[44].UserPrincipalName | Should -Be 'user45@contoso.com'
         ($rows.Licenses | Select-Object -Unique) | Should -Be 'ENTERPRISEPACK'
+    }
+
+    Context 'Copy and Move user licenses' {
+        BeforeEach {
+            Mock Update-MgUser {}
+            Mock Set-MgUserLicense {}
+            Mock Invoke-MgGraphRequest {
+                New-TestBatchResponse -Body $Body -Responder {
+                    param($request)
+                    $url = [string]$request.url
+                    if ($url -like '/users/ghost*') { return @{ status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'missing' } } } }
+                    if ($url -match '^/users/src%40contoso\.com') { return @{ status = 200; body = @{ id = 'idsrc'; userPrincipalName = 'src@contoso.com'; displayName = 'Src'; usageLocation = 'IT' } } }
+                    if ($url -match '^/users/dst%40contoso\.com') { return @{ status = 200; body = @{ id = 'iddst'; userPrincipalName = 'dst@contoso.com'; displayName = 'Dst'; usageLocation = 'IT' } } }
+                    if ($url -match '^/users/idsrc/licenseDetails') { return @{ status = 200; body = @{ value = @(@{ skuId = $global:skuId; skuPartNumber = 'ENTERPRISEPACK' }) } } }
+                    if ($url -match '^/users/iddst/licenseDetails') { return @{ status = 200; body = @{ value = @() } } }
+                    @{ status = 500 }
+                }
+            }
+        }
+
+        It 'Copy-UserMsolAccountSku uses 2 Graph calls before the write' {
+            Copy-UserMsolAccountSku -Source 'src@contoso.com' -Destination 'dst@contoso.com' -Confirm:$false
+
+            Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
+            Should -Invoke Set-MgUserLicense -Times 1 -Exactly -Scope It -ParameterFilter { $UserId -eq 'iddst' }
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'SUCCESS' -and $Message -like 'Copied licenses to dst@contoso.com*' }
+        }
+
+        It 'Copy-UserMsolAccountSku reports a missing source once and stops' {
+            Copy-UserMsolAccountSku -Source 'ghost@contoso.com' -Destination 'dst@contoso.com' -Confirm:$false
+
+            Should -Invoke Set-MgUserLicense -Times 0 -Exactly -Scope It
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like 'Unable to retrieve source user ghost@contoso.com*' }
+        }
+
+        It 'Copy-UserMsolAccountSku aborts when source and destination are the same' {
+            Copy-UserMsolAccountSku -Source 'src@contoso.com' -Destination 'SRC@contoso.com' -Confirm:$false
+
+            Should -Invoke Set-MgUserLicense -Times 0 -Exactly -Scope It
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq 'Source and destination users are the same. Aborting.' }
+        }
+
+        It 'Move-UserMsolAccountSku uses 2 Graph calls before the writes and removes from the source after the assignment' {
+            Move-UserMsolAccountSku -Source 'src@contoso.com' -Destination 'dst@contoso.com' -Confirm:$false
+
+            Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
+            Should -Invoke Set-MgUserLicense -Times 1 -Exactly -Scope It -ParameterFilter { $UserId -eq 'iddst' }
+            Should -Invoke Set-MgUserLicense -Times 1 -Exactly -Scope It -ParameterFilter { $UserId -eq 'idsrc' }
+        }
+
+        It 'Move-UserMsolAccountSku does not remove from the source when the destination assignment fails' {
+            Mock Set-MgUserLicense { throw 'assign denied' }
+            Move-UserMsolAccountSku -Source 'src@contoso.com' -Destination 'dst@contoso.com' -Confirm:$false
+
+            Should -Invoke Set-MgUserLicense -Times 1 -Exactly -Scope It
+            Should -Invoke Set-MgUserLicense -Times 0 -Exactly -Scope It -ParameterFilter { $UserId -eq 'idsrc' }
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like 'License assignment to dst@contoso.com failed. Aborting removal from source.*' }
+        }
+
+        It 'Move-UserMsolAccountSku reports a missing destination once' {
+            Move-UserMsolAccountSku -Source 'src@contoso.com' -Destination 'ghost@contoso.com' -Confirm:$false
+
+            Should -Invoke Set-MgUserLicense -Times 0 -Exactly -Scope It
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -eq 'Unable to resolve destination user recipient for ghost@contoso.com' }
+        }
     }
 }
