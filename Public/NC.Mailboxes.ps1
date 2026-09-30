@@ -1072,6 +1072,23 @@ function Get-UserLastSeen {
         $queue = [System.Collections.Generic.List[object]]::new()
         $state = @{ StartLineWritten = $false }
 
+        # Normalizes every sign-in timestamp form to a UTC-kind [datetime] (as the Graph SDK models do).
+        $toUtc = {
+            param($Value)
+            if ($null -eq $Value) { return $null }
+            if ($Value -is [datetimeoffset]) { return $Value.UtcDateTime }
+            if ($Value -is [datetime]) {
+                switch ($Value.Kind) {
+                    'Utc' { return $Value }
+                    'Local' { return $Value.ToUniversalTime() }
+                    default { return [datetime]::SpecifyKind($Value, [DateTimeKind]::Utc) }
+                }
+            }
+            $text = [string]$Value
+            if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+            return [datetime]::Parse($text, [Globalization.CultureInfo]::InvariantCulture, ([Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal))
+        }
+
         $flush = {
             if ($queue.Count -eq 0) { return }
             $items = @($queue)
@@ -1109,12 +1126,8 @@ function Get-UserLastSeen {
                         if ($response.Success) {
                             # Only the first page (20 entries, newest first) is read: it holds the latest sign-in.
                             foreach ($signIn in @($response.Body.value)) {
-                                $created = $signIn.createdDateTime
+                                $created = & $toUtc $signIn.createdDateTime
                                 if ($null -eq $created) { continue }
-                                if ($created -is [datetimeoffset]) { $created = $created.LocalDateTime }
-                                elseif ($created -isnot [datetime]) {
-                                    $created = [datetime]::Parse([string]$created, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime()
-                                }
                                 if ($null -eq $lastSignIn -or $created -gt $lastSignIn) { $lastSignIn = $created }
                             }
                         }

@@ -113,6 +113,7 @@ Describe 'Sign-in log batching' {
                 }
             }
             Mock Get-MailboxStatisticsSafe { [pscustomobject]@{ LastUserActionTime = [datetime]'2026-01-10T08:00:00' } }
+            $global:SignInDates = @('2026-02-01T10:00:00Z', '2026-01-20T10:00:00Z')
             Mock Invoke-MgGraphRequest {
                 New-TestBatchResponse -Body $Body -Responder {
                     param($request)
@@ -121,10 +122,7 @@ Describe 'Sign-in log batching' {
                         $n = [int]$Matches[1]
                         if ($n -eq 3) { return @{ status = 403; body = @{ error = @{ code = 'Forbidden'; message = 'denied' } } } }
                         if ($n -eq 4) { return @{ status = 200; body = @{ value = @() } } }
-                        return @{ status = 200; body = @{ value = @(
-                                    @{ createdDateTime = '2026-02-01T10:00:00Z' },
-                                    @{ createdDateTime = '2026-01-20T10:00:00Z' }
-                                ) } }
+                        return @{ status = 200; body = @{ value = @(foreach ($d in $global:SignInDates) { @{ createdDateTime = $d } }) } }
                     }
                     @{ status = 500 }
                 }
@@ -148,11 +146,38 @@ Describe 'Sign-in log batching' {
             $result = @('user1@contoso.com' | Get-UserLastSeen)
             $result[0].PSObject.Properties.Name | Should -Be @('DisplayName', 'PrimarySmtpAddress', 'LastUserActionTime', 'LastInteractiveSignIn', 'LastSeen', 'Source')
             $result[0].LastInteractiveSignIn | Should -BeOfType ([datetime])
-            $result[0].LastInteractiveSignIn.ToUniversalTime() | Should -Be ([datetime]::SpecifyKind([datetime]'2026-02-01T10:00:00', 'Utc'))
+            $result[0].LastInteractiveSignIn.Kind | Should -Be 'Utc'
+            $result[0].LastInteractiveSignIn | Should -Be ([datetime]::SpecifyKind([datetime]'2026-02-01T10:00:00', 'Utc'))
             $result[0].LastSeen | Should -Be $result[0].LastInteractiveSignIn
             $result[0].Source | Should -Be 'MailboxAction,SignInLog'
         }
 
+        It 'picks the latest sign-in even when the page is not newest-first' {
+            $global:SignInDates = @('2026-02-01T10:00:00Z', '2026-03-05T12:30:00Z', '2026-01-20T10:00:00Z')
+            $result = @('user1@contoso.com' | Get-UserLastSeen)
+            $result[0].LastInteractiveSignIn.Kind | Should -Be 'Utc'
+            $result[0].LastInteractiveSignIn | Should -Be ([datetime]::SpecifyKind([datetime]'2026-03-05T12:30:00', 'Utc'))
+        }
+
+        It 'normalizes datetime (Local) and datetimeoffset values to UTC' {
+            $local = [datetime]::SpecifyKind([datetime]'2026-04-01T09:00:00', 'Local')
+            $global:SignInDates = @($local, [datetimeoffset]::new(2026, 2, 1, 10, 0, 0, [timespan]::FromHours(2)))
+            $result = @('user1@contoso.com' | Get-UserLastSeen)
+            $result[0].LastInteractiveSignIn.Kind | Should -Be 'Utc'
+            $result[0].LastInteractiveSignIn | Should -Be $local.ToUniversalTime()
+
+            $global:SignInDates = @([datetimeoffset]::new(2026, 2, 1, 10, 0, 0, [timespan]::FromHours(2)))
+            $result = @('user1@contoso.com' | Get-UserLastSeen)
+            $result[0].LastInteractiveSignIn.Kind | Should -Be 'Utc'
+            $result[0].LastInteractiveSignIn | Should -Be ([datetime]::SpecifyKind([datetime]'2026-02-01T08:00:00', 'Utc'))
+        }
+
+        It 'treats an unspecified-kind datetime as UTC' {
+            $global:SignInDates = @([datetime]::SpecifyKind([datetime]'2026-02-01T10:00:00', 'Unspecified'))
+            $result = @('user1@contoso.com' | Get-UserLastSeen)
+            $result[0].LastInteractiveSignIn.Kind | Should -Be 'Utc'
+            $result[0].LastInteractiveSignIn | Should -Be ([datetime]::SpecifyKind([datetime]'2026-02-01T10:00:00', 'Utc'))
+        }
         It 'requests the encoded userId filter with top 20' {
             $null = 'user7@contoso.com' | Get-UserLastSeen
             $global:SeenRequests[0].url | Should -Be '/auditLogs/signIns?$filter=userId%20eq%20%27id7%27&$top=20'
