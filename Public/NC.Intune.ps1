@@ -333,9 +333,53 @@ function Export-IntuneAppInventory {
                 }
             }
             if ($FilterByPlatform -ne "All") {
-                $devices = $devices | Where-Object { $_.operatingSystem -like "$FilterByPlatform*" }
+                $devices = @($devices | Where-Object { $_.operatingSystem -like "$FilterByPlatform*" })
             }
             Write-NCMessage "Managed devices retrieved: $($devices.Count)" -Level INFO
+
+            $lastInventoryFailed = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+            # Reads missing last-sync dates for the given devices in Graph batches (v1.0, 20 per request).
+            $loadLastInventory = {
+                param([string[]]$DeviceIds)
+
+                if (-not $LastInventory) {
+                    return
+                }
+
+                $missing = @($DeviceIds | Where-Object {
+                        -not [string]::IsNullOrWhiteSpace($_) -and
+                        -not ($lastInventoryCache.ContainsKey($_) -and -not [string]::IsNullOrWhiteSpace([string]$lastInventoryCache[$_])) -and
+                        -not $lastInventoryFailed.Contains($_)
+                    } | Select-Object -Unique)
+                if ($missing.Count -eq 0) {
+                    return
+                }
+
+                $detailRequests = @(for ($i = 0; $i -lt $missing.Count; $i++) {
+                        @{ Id = "l$i"; Method = 'GET'; Url = "/deviceManagement/managedDevices/$([uri]::EscapeDataString($missing[$i]))?`$select=lastSyncDateTime" }
+                    })
+                $detailResponses = @(Invoke-NCGraphBatch -Requests $detailRequests -ApiVersion 'v1.0' -Activity 'Reading last inventory dates')
+                for ($i = 0; $i -lt $missing.Count; $i++) {
+                    $detailResponse = $detailResponses[$i]
+                    $detailError = $detailResponse.ErrorMessage
+                    if ($detailResponse.Success) {
+                        try {
+                            $lastInventoryValue = $detailResponse.Body.lastSyncDateTime
+                            if (-not [string]::IsNullOrWhiteSpace([string]$lastInventoryValue)) {
+                                $lastInventoryCache[$missing[$i]] = Format-NCDateTime -Value $lastInventoryValue -AsLocalTime
+                            }
+                        }
+                        catch {
+                            $detailError = $_.Exception.Message
+                        }
+                    }
+                    if ($detailError) {
+                        $null = $lastInventoryFailed.Add($missing[$i])
+                        Write-NCMessage "Unable to read last inventory date for device $($missing[$i]): $detailError" -Level WARNING
+                    }
+                }
+            }
 
             function Get-NCIntuneManagedDeviceLastInventory {
                 param(
@@ -351,52 +395,70 @@ function Export-IntuneAppInventory {
                     return [string]$lastInventoryCache[$DeviceId]
                 }
 
-                try {
-                    $deviceDetailsUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$DeviceId?`$select=lastSyncDateTime"
-                    $deviceDetails = Invoke-MgGraphRequest -Uri $deviceDetailsUri -Method GET -ErrorAction Stop
-                    $lastInventoryValue = $deviceDetails.lastSyncDateTime
-
-                    if (-not [string]::IsNullOrWhiteSpace([string]$lastInventoryValue)) {
-                        $normalizedLastInventory = Format-NCDateTime -Value $lastInventoryValue -AsLocalTime
-                        $lastInventoryCache[$DeviceId] = $normalizedLastInventory
-                        return $normalizedLastInventory
-                    }
-
-                    return $null
-                }
-                catch {
-                    Write-NCMessage "Unable to read last inventory date for device ${DeviceId}: $($_.Exception.Message)" -Level WARNING
-                    return $null
-                }
+                return $null
             }
 
             # Build app --> device mapping from Detected Apps
             $appDeviceMap = @{}
             $processed = 0
 
-            foreach ($device in $devices) {
-                $processed++
+            if ($devices.Count -gt 0) {
+                Write-NCMessage "Processing $($devices.Count) device(s) in Graph batches (20 per request) ..." -Level INFO
+            }
+
+            for ($offset = 0; $offset -lt $devices.Count -and -not $aborted; $offset += 20) {
+                $deviceChunk = @($devices[$offset..([Math]::Min($offset + 20, $devices.Count) - 1)])
 
                 $Percentage = Get-NCProgressPercent -Current $processed -Total $devices.Count
-                Write-Progress -Activity "Reading Detected Apps" -Status "$($device.deviceName) - $processed / $($devices.Count) devices - $Percentage%" -PercentComplete $Percentage
+                Write-Progress -Activity "Reading Detected Apps" -Status "$($deviceChunk[0].deviceName) - $processed / $($devices.Count) devices - $Percentage%" -PercentComplete $Percentage
 
-                try {
-                    $deviceAppsUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$($device.id)?`$expand=detectedApps"
-                    $deviceWithApps = Invoke-MgGraphRequest -Uri $deviceAppsUri -Method GET -ErrorAction Stop
-                    
-                    foreach ($app in ($deviceWithApps.detectedApps | Where-Object { $_.displayName -like $ApplicationName })) {
-                        Write-Progress -Activity "Reading Detected Apps" -Status "$($device.deviceName) / $($app.displayName) - $processed / $($devices.Count) devices - $Percentage%" -PercentComplete $Percentage
-                        if ($MinimumVersion -and $app.version) {
-                            if (-not (Test-NCIntuneVersionAtLeast -CurrentVersion $app.version -MinimumVersion $MinimumVersion)) {
-                                continue
+                $appRequests = @(for ($i = 0; $i -lt $deviceChunk.Count; $i++) {
+                        @{ Id = "d$i"; Method = 'GET'; Url = "/deviceManagement/managedDevices/$([uri]::EscapeDataString([string]$deviceChunk[$i].id))?`$expand=detectedApps" }
+                    })
+                $appResponses = @(Invoke-NCGraphBatch -Requests $appRequests -ApiVersion 'beta' -Activity 'Reading detected apps')
+
+                # Matching apps per device (after name and version filters), then last-sync dates for the matched devices in one go
+                $matchedApps = @{}
+                for ($i = 0; $i -lt $deviceChunk.Count; $i++) {
+                    if (-not $appResponses[$i].Success) { continue }
+                    $matchedApps[$i] = @(foreach ($app in ($appResponses[$i].Body.detectedApps | Where-Object { $_.displayName -like $ApplicationName })) {
+                            if ($MinimumVersion -and $app.version) {
+                                if (-not (Test-NCIntuneVersionAtLeast -CurrentVersion $app.version -MinimumVersion $MinimumVersion)) {
+                                    continue
+                                }
                             }
+                            $app
+                        })
+                }
+                if ($LastInventory) {
+                    & $loadLastInventory -DeviceIds @(for ($i = 0; $i -lt $deviceChunk.Count; $i++) {
+                            if ($matchedApps.ContainsKey($i) -and $matchedApps[$i].Count -gt 0) { [string]$deviceChunk[$i].id }
+                        })
+                }
+
+                for ($i = 0; $i -lt $deviceChunk.Count; $i++) {
+                    $device = $deviceChunk[$i]
+                    $processed++
+                    $Percentage = Get-NCProgressPercent -Current $processed -Total $devices.Count
+
+                    if (-not $appResponses[$i].Success) {
+                        Write-NCMessage "Error reading apps for $($device.deviceName): $($appResponses[$i].ErrorMessage)" -Level WARNING
+                        $consecutiveErrors++
+                        if ($MaxConsecutiveErrors -gt 0 -and $consecutiveErrors -ge $MaxConsecutiveErrors) {
+                            $aborted = $true
+                            break
                         }
+                        continue
+                    }
+
+                    foreach ($app in $matchedApps[$i]) {
+                        Write-Progress -Activity "Reading Detected Apps" -Status "$($device.deviceName) / $($app.displayName) - $processed / $($devices.Count) devices - $Percentage%" -PercentComplete $Percentage
 
                         $key = $app.displayName
                         if (-not $appDeviceMap.ContainsKey($key)) {
                             $appDeviceMap[$key] = [ordered]@{ Devices = @(); Versions = @{}; Publishers = @{} }
                         }
-                        
+
                         $deviceRow = [ordered]@{
                             DeviceId   = $device.id
                             DeviceName = $device.deviceName
@@ -410,38 +472,15 @@ function Export-IntuneAppInventory {
                             $deviceRow.LastInventory = Get-NCIntuneManagedDeviceLastInventory -DeviceId $device.id
                         }
                         $appDeviceMap[$key].Devices += $deviceRow
-                        
-                        if ($app.version) { 
+
+                        if ($app.version) {
                             $appDeviceMap[$key].Versions[$app.version] = ($appDeviceMap[$key].Versions[$app.version] + 1)
                         }
-                        
-                        if ($app.publisher) { 
+
+                        if ($app.publisher) {
                             $appDeviceMap[$key].Publishers[$app.publisher] = ($appDeviceMap[$key].Publishers[$app.publisher] + 1)
                         }
                     }
-                    Start-Sleep -Milliseconds 40
-                }
-                catch {
-                    if ($_.Exception.Message -like "*429*") {
-                        Write-NCMessage "`nRate limit hit, waiting 60 seconds ..." -Level INFO
-                        Start-Sleep -Seconds 60
-                        $processed--
-
-                        $Percentage = Get-NCProgressPercent -Current $processed -Total $devices.Count
-                        Write-Progress -Activity "Reading Detected Apps" -Status "Waiting after rate limit ... - $processed / $($devices.Count) devices - $Percentage%" -PercentComplete $Percentage
-
-                        continue
-                    }
-                    Write-NCMessage "Error reading apps for $($device.deviceName): $($_.Exception.Message)" -Level WARNING
-                    $consecutiveErrors++
-                    if ($MaxConsecutiveErrors -gt 0 -and $consecutiveErrors -ge $MaxConsecutiveErrors) {
-                        $aborted = $true
-                        break
-                    }
-                }
-
-                if ($aborted) {
-                    break
                 }
             }
             Write-Progress -Activity "Reading Detected Apps" -Completed
@@ -460,7 +499,11 @@ function Export-IntuneAppInventory {
 
                     $statusUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($app.id)/deviceStatuses"
                     $statuses = @(Invoke-NCGraphAllPagesCore -Uri $statusUri)
-                    
+                    if ($LastInventory) {
+                        $statusDeviceIds = @($statuses | Where-Object { -not ($OnlySuccessfulInstalls -and $_.installState -ne "installed") } | ForEach-Object { [string]$_.deviceId } | Where-Object { $devices.id -contains $_ })
+                        & $loadLastInventory -DeviceIds $statusDeviceIds
+                    }
+
                     foreach ($s in $statuses) {
                         if ($OnlySuccessfulInstalls -and $s.installState -ne "installed") {
                             continue
