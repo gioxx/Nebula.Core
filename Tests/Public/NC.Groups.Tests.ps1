@@ -473,3 +473,266 @@ Describe 'Entra group device batching' {
         Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Failed to remove device '11111111-1111-1111-1111-111111111111' from 'Group': denied" -and $Level -eq 'ERROR' }
     }
 }
+
+Describe 'Entra group owner batching' {
+    BeforeAll {
+        function Get-MgGroupMember {
+            param(
+                [string]$GroupId,
+                [switch]$All
+            )
+        }
+        $group = [pscustomobject]@{ Id = 'group-id'; DisplayName = 'Group'; OnPremisesSyncEnabled = $false }
+        $guid1 = '11111111-1111-1111-1111-111111111111'
+        $script:ownerBatchSizes = [System.Collections.Generic.List[object]]::new()
+        $script:ownerDirectCalls = [System.Collections.Generic.List[string]]::new()
+    }
+
+    BeforeEach {
+        Mock Test-MgGraphConnection { $true }
+        Mock Add-EmptyLine {}
+        Mock Write-NCMessage {}
+        Mock Write-Progress {}
+        Mock Start-Sleep {}
+        Mock Get-MgContext { [pscustomobject]@{ Environment = 'Global' } }
+        Mock Get-MgGroup { $group }
+        $script:ownerBatchSizes.Clear()
+        $script:ownerDirectCalls.Clear()
+        $script:ownerWriteAnswer = { param($request) @{ status = 204 } }
+        $script:ownerDirectAnswer = { param($uri) @{ value = @() } }
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -like '*$batch') {
+                $payload = $Body | ConvertFrom-Json
+                $script:ownerBatchSizes.Add(@($payload.requests | ForEach-Object { "$($_.method) $($_.url)" }))
+                New-TestBatchResponse -Body $Body -Responder {
+                    param($request)
+                    if ($request.method -eq 'GET') {
+                        $name = [uri]::UnescapeDataString($request.url) -replace '^/users/([^?]+)\?.*$', '$1'
+                        if ($name -like 'ghost*') {
+                            return @{ status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'not found' } } }
+                        }
+                        return @{ status = 200; body = @{ id = "id-$name"; userPrincipalName = $name; displayName = "Name $name" } }
+                    }
+                    & $script:ownerWriteAnswer $request
+                }
+            }
+            else {
+                $script:ownerDirectCalls.Add("$Method $Uri")
+                # The real cmdlet output is a dictionary; the functions read it as an object, so hand back an object.
+                (& $script:ownerDirectAnswer $Uri) | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+            }
+        }
+    }
+
+    Context 'Resolve-NCEntraOwnerBatch' {
+        It 'resolves UPNs in one batch and keeps the Resolve-NCEntraOwner shape' {
+            $result = @(Resolve-NCEntraOwnerBatch -OwnerIdentifier @('a@contoso.com', 'b@contoso.com'))
+
+            Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly -Scope It
+            $result.Count | Should -Be 2
+            $result[0].Id | Should -Be 'id-a@contoso.com'
+            $result[0].Label | Should -Be 'a@contoso.com'
+            ($result[0].PSObject.Properties.Name -join ',') | Should -Be 'Id,Label'
+        }
+
+        It 'passes unresolvable GUIDs through as placeholders like Resolve-NCEntraOwner' {
+            Mock Invoke-MgGraphRequest {
+                New-TestBatchResponse -Body $Body -Responder { param($request) @{ status = 404; body = @{ error = @{ code = 'x'; message = 'nope' } } } }
+            }
+
+            $result = @(Resolve-NCEntraOwnerBatch -OwnerIdentifier @($guid1) -TreatInputAsId)
+
+            $result[0].Id | Should -Be $guid1
+            $result[0].Label | Should -Be $guid1
+        }
+
+        It 'hands inputs that fail the batch lookup to Resolve-NCEntraOwner and keeps input order' {
+            Mock Resolve-NCEntraOwner { [pscustomobject]@{ Id = 'sp-id'; Label = 'App' } }
+
+            $result = @(Resolve-NCEntraOwnerBatch -OwnerIdentifier @('a@contoso.com', 'ghost@contoso.com', 'b@contoso.com'))
+
+            $result.Label | Should -Be @('a@contoso.com', 'App', 'b@contoso.com')
+            Should -Invoke Resolve-NCEntraOwner -Times 1 -Exactly -Scope It -ParameterFilter { $OwnerIdentifier -eq 'ghost@contoso.com' }
+        }
+
+        It 'prints the original not-found warning exactly once' {
+            Mock Get-MgUser { throw 'not found' }
+            Mock Find-UserRecipient { $null }
+
+            $result = @(Resolve-NCEntraOwnerBatch -OwnerIdentifier @('ghost@contoso.com'))
+
+            $result.Count | Should -Be 0
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Owner 'ghost@contoso.com' not found." -and $Level -eq 'WARNING' }
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It
+        }
+    }
+
+    Context 'Add-EntraGroupOwner' {
+        It 'adds 3 UPN owners with one resolve batch and one add batch' {
+            $result = @(Add-EntraGroupOwner -GroupName 'Group' -OwnerIdentifier 'a@contoso.com', 'b@contoso.com', 'c@contoso.com' -PassThru -Confirm:$false)
+
+            Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
+            $script:ownerBatchSizes[1] | Should -Be @('POST /groups/group-id/owners/$ref', 'POST /groups/group-id/owners/$ref', 'POST /groups/group-id/owners/$ref')
+            $result.Status | Should -Be @('Added', 'Added', 'Added')
+            ($result[0].PSObject.Properties.Name -join ',') | Should -Be 'GroupName,GroupId,OwnerName,OwnerId,Status'
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Added owner 'a@contoso.com' to group 'Group'." -and $Level -eq 'SUCCESS' }
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq 'Processing 3 owner(s) in Graph batches (20 per request) ...' -and $Level -eq 'INFO' }
+        }
+
+        It 'reports Exists and Failed with the original messages' {
+            $script:ownerWriteAnswer = {
+                param($request)
+                if ($request.body.'@odata.id' -like '*id-old@contoso.com') {
+                    return @{ status = 400; body = @{ error = @{ code = 'Request_BadRequest'; message = 'One or more added object references already exist for the following modified properties: owners.' } } }
+                }
+                @{ status = 403; body = @{ error = @{ code = 'Authorization_RequestDenied'; message = 'denied' } } }
+            }
+
+            $result = @(Add-EntraGroupOwner -GroupName 'Group' -OwnerIdentifier 'old@contoso.com', 'bad@contoso.com' -PassThru -Confirm:$false)
+
+            $result.Status | Should -Be @('Exists', 'Failed')
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Owner 'old@contoso.com' is already an owner of 'Group'." -and $Level -eq 'WARNING' }
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Failed to add owner 'bad@contoso.com' to 'Group': denied" -and $Level -eq 'ERROR' }
+        }
+
+        It 'does not send writes with -WhatIf' {
+            Add-EntraGroupOwner -GroupName 'Group' -OwnerIdentifier 'a@contoso.com' -WhatIf
+
+            Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly -Scope It
+        }
+    }
+
+    Context 'Remove-EntraGroupOwner' {
+        It 'removes listed owners with one resolve batch and one DELETE batch' {
+            $result = @(Remove-EntraGroupOwner -GroupName 'Group' -OwnerIdentifier 'a@contoso.com', 'b@contoso.com' -PassThru -Confirm:$false)
+
+            Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
+            $script:ownerBatchSizes[1] | Should -Be @('DELETE /groups/group-id/owners/id-a%40contoso.com/$ref', 'DELETE /groups/group-id/owners/id-b%40contoso.com/$ref')
+            $result.Status | Should -Be @('Removed', 'Removed')
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Removed owner 'a@contoso.com' from group 'Group'." -and $Level -eq 'SUCCESS' }
+        }
+
+        It 'reports NotFound and Failed with the original messages' {
+            $script:ownerWriteAnswer = {
+                param($request)
+                if ($request.url -like '*id-gone%40contoso.com*') {
+                    return @{ status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'Resource does not exist' } } }
+                }
+                @{ status = 403; body = @{ error = @{ code = 'Authorization_RequestDenied'; message = 'denied' } } }
+            }
+
+            $result = @(Remove-EntraGroupOwner -GroupName 'Group' -OwnerIdentifier 'gone@contoso.com', 'bad@contoso.com' -PassThru -Confirm:$false)
+
+            $result.Status | Should -Be @('NotFound', 'Failed')
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Owner 'gone@contoso.com' is not an owner of 'Group'." -and $Level -eq 'WARNING' }
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Failed to remove owner 'bad@contoso.com' from 'Group': denied" -and $Level -eq 'ERROR' }
+        }
+    }
+
+    Context 'Copy-EntraGroupOwner' {
+        BeforeEach {
+            Mock Get-MgGroup { [pscustomobject]@{ Id = "id-$GroupId"; DisplayName = "Group $GroupId" } } -ParameterFilter { $GroupId }
+            $script:ownerDirectAnswer = {
+                param($uri)
+                if ($uri -like '*/groups/id-src/owners*') {
+                    return @{ value = @(@{ id = 'o1'; userPrincipalName = 'o1@contoso.com' }, @{ id = 'o2'; userPrincipalName = 'o2@contoso.com' }, @{ id = 'o3'; userPrincipalName = 'o3@contoso.com' }) }
+                }
+                @{ value = @(@{ id = 'o2' }) }
+            }
+        }
+
+        It 'sends one batch with only the missing owners' {
+            $result = @(Copy-EntraGroupOwner -SourceGroupId 'src' -DestinationGroupId 'dst' -PassThru -Confirm:$false)
+
+            $script:ownerBatchSizes.Count | Should -Be 1
+            $script:ownerBatchSizes[0] | Should -Be @('POST /groups/id-dst/owners/$ref', 'POST /groups/id-dst/owners/$ref')
+            $result.Status | Should -Be @('Added', 'Exists', 'Added')
+            ($result[0].PSObject.Properties.Name -join ',') | Should -Be 'SourceGroup,DestinationGroup,OwnerName,OwnerId,Status'
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Copied owner 'o1@contoso.com' to 'Group dst'." -and $Level -eq 'SUCCESS' }
+        }
+
+        It 'reports Exists and Failed returned by the batch' {
+            $script:ownerWriteAnswer = {
+                param($request)
+                if ($request.body.'@odata.id' -like '*/o1') {
+                    return @{ status = 400; body = @{ error = @{ code = 'Request_BadRequest'; message = 'object references already exist' } } }
+                }
+                @{ status = 403; body = @{ error = @{ code = 'Authorization_RequestDenied'; message = 'denied' } } }
+            }
+
+            $result = @(Copy-EntraGroupOwner -SourceGroupId 'src' -DestinationGroupId 'dst' -PassThru -Confirm:$false)
+
+            $result.Status | Should -Be @('Exists', 'Exists', 'Failed')
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Owner 'o1@contoso.com' is already an owner of 'Group dst'." -and $Level -eq 'WARNING' }
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Failed to copy owner 'o3@contoso.com' to 'Group dst': denied" -and $Level -eq 'ERROR' }
+        }
+
+        It 'does not send writes with -WhatIf' {
+            Copy-EntraGroupOwner -SourceGroupId 'src' -DestinationGroupId 'dst' -WhatIf
+
+            $script:ownerBatchSizes.Count | Should -Be 0
+        }
+    }
+
+    Context 'Copy-EntraGroup' {
+        BeforeEach {
+            Mock Get-MgGroup {
+                $gid = $GroupId -replace '^id-', ''
+                [pscustomobject]@{ Id = "id-$gid"; DisplayName = "Group $gid"; Description = $null; GroupTypes = @(); MailEnabled = $false; SecurityEnabled = $true; OnPremisesSyncEnabled = $false; IsAssignableToRole = $false }
+            } -ParameterFilter { $GroupId }
+            Mock Get-MgGroupMember {
+                if ($GroupId -eq 'id-src') {
+                    1..25 | ForEach-Object { [pscustomobject]@{ Id = "m$_"; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.user'; displayName = "User $_" } } }
+                }
+            }
+            $script:ownerDirectAnswer = { param($uri) @{ value = @() } }
+        }
+
+        It 'sends 25 member adds as 2 batches of 20 and 5' {
+            $result = Copy-EntraGroup -SourceGroupId 'src' -DestinationGroupId 'dst' -SkipOwners -PassThru -Confirm:$false
+
+            $script:ownerBatchSizes.Count | Should -Be 2
+            $script:ownerBatchSizes[0].Count | Should -Be 20
+            $script:ownerBatchSizes[1].Count | Should -Be 5
+            $script:ownerBatchSizes[0][0] | Should -Be 'POST /groups/id-dst/members/$ref'
+            $result.MembersCopied | Should -Be 25
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Copied User 'User 1' to 'Group dst'." -and $Level -eq 'SUCCESS' }
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq 'Processing 25 member(s) in Graph batches (20 per request) ...' -and $Level -eq 'INFO' }
+        }
+
+        It 'counts Exists as skipped and reports failures with the original messages' {
+            $script:ownerWriteAnswer = {
+                param($request)
+                if ($request.body.'@odata.id' -like '*/m1') {
+                    return @{ status = 400; body = @{ error = @{ code = 'Request_BadRequest'; message = 'object references already exist' } } }
+                }
+                if ($request.body.'@odata.id' -like '*/m2') {
+                    return @{ status = 403; body = @{ error = @{ code = 'Authorization_RequestDenied'; message = 'denied' } } }
+                }
+                @{ status = 204 }
+            }
+
+            $result = Copy-EntraGroup -SourceGroupId 'src' -DestinationGroupId 'dst' -SkipOwners -PassThru -Confirm:$false
+
+            $result.MembersCopied | Should -Be 23
+            $result.MembersSkipped | Should -Be 1
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "User 'User 1' is already a member of 'Group dst'." -and $Level -eq 'WARNING' }
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Failed to copy User 'User 2' to 'Group dst': denied" -and $Level -eq 'ERROR' }
+        }
+
+        It 'batches owner adds' {
+            $script:ownerDirectAnswer = {
+                param($uri)
+                if ($uri -like '*/groups/id-src/owners*') { return @{ value = @(@{ id = 'o1'; userPrincipalName = 'o1@contoso.com' }, @{ id = 'o2'; userPrincipalName = 'o2@contoso.com' }) } }
+                @{ value = @() }
+            }
+
+            $result = Copy-EntraGroup -SourceGroupId 'src' -DestinationGroupId 'dst' -SkipMembers -PassThru -Confirm:$false
+
+            $script:ownerBatchSizes.Count | Should -Be 1
+            $script:ownerBatchSizes[0] | Should -Be @('POST /groups/id-dst/owners/$ref', 'POST /groups/id-dst/owners/$ref')
+            $result.OwnersCopied | Should -Be 2
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Copied owner 'o1@contoso.com' to 'Group dst'." -and $Level -eq 'SUCCESS' }
+        }
+    }
+}

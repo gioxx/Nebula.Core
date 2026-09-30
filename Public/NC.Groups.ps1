@@ -238,30 +238,42 @@ function Add-EntraGroupOwner {
         }
 
         $results = [System.Collections.Generic.List[object]]::new()
-        $uniqueOwners = $owners | Select-Object -Unique
+        $uniqueOwners = @($owners | Select-Object -Unique)
+        $ownersRefUrl = "/groups/$([uri]::EscapeDataString([string]$resolvedGroup.Id))/owners/`$ref"
+        Write-NCMessage "Processing $($uniqueOwners.Count) owner(s) in Graph batches (20 per request) ..." -Level INFO
 
-        foreach ($owner in $uniqueOwners) {
-            $resolvedOwner = Resolve-NCEntraOwner -OwnerIdentifier $owner -TreatInputAsId:$TreatInputAsId
-            if (-not $resolvedOwner) {
-                continue
+        for ($offset = 0; $offset -lt $uniqueOwners.Count; $offset += 20) {
+            $chunk = @($uniqueOwners[$offset..([Math]::Min($offset + 20, $uniqueOwners.Count) - 1)])
+            $targets = @(Resolve-NCEntraOwnerBatch -OwnerIdentifier $chunk -TreatInputAsId:$TreatInputAsId)
+
+            $approved = [System.Collections.Generic.List[object]]::new()
+            foreach ($target in $targets) {
+                if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add owner '$($target.Label)'")) {
+                    $approved.Add($target)
+                }
             }
+            if ($approved.Count -eq 0) { continue }
 
-            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add owner '$($resolvedOwner.Label)'")) {
+            $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'POST'; Url = $ownersRefUrl; Body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $approved[$i].Id) } }
+                })
+            $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Adding owners to $($resolvedGroup.DisplayName)")
+
+            for ($i = 0; $i -lt $approved.Count; $i++) {
+                $resolvedOwner = $approved[$i]
+                $response = $responses[$i]
                 $status = 'Added'
-                try {
-                    $body = @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$($resolvedOwner.Id)" } | ConvertTo-Json -Depth 3
-                    Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($resolvedGroup.Id)/owners/`$ref" -Method POST -Body $body -ContentType 'application/json' | Out-Null
+
+                if ($response.Success) {
                     Write-NCMessage "Added owner '$($resolvedOwner.Label)' to group '$($resolvedGroup.DisplayName)'." -Level SUCCESS
                 }
-                catch {
-                    if ($_.Exception.Message -match 'already exist' -or $_.Exception.Message -match 'exists') {
-                        $status = 'Exists'
-                        Write-NCMessage "Owner '$($resolvedOwner.Label)' is already an owner of '$($resolvedGroup.DisplayName)'." -Level WARNING
-                    }
-                    else {
-                        $status = 'Failed'
-                        Write-NCMessage "Failed to add owner '$($resolvedOwner.Label)' to '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
-                    }
+                elseif ($response.ErrorMessage -match 'already exist' -or $response.ErrorMessage -match 'exists') {
+                    $status = 'Exists'
+                    Write-NCMessage "Owner '$($resolvedOwner.Label)' is already an owner of '$($resolvedGroup.DisplayName)'." -Level WARNING
+                }
+                else {
+                    $status = 'Failed'
+                    Write-NCMessage "Failed to add owner '$($resolvedOwner.Label)' to '$($resolvedGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
                 }
 
                 if ($PassThru.IsPresent) {
@@ -413,14 +425,9 @@ function Remove-EntraGroupOwner {
             }
         }
         else {
-            $uniqueOwners = $owners | Select-Object -Unique
+            $uniqueOwners = @($owners | Select-Object -Unique)
 
-            foreach ($owner in $uniqueOwners) {
-                $resolvedOwner = Resolve-NCEntraOwner -OwnerIdentifier $owner -TreatInputAsId:$TreatInputAsId
-                if (-not $resolvedOwner) {
-                    continue
-                }
-
+            foreach ($resolvedOwner in @(Resolve-NCEntraOwnerBatch -OwnerIdentifier $uniqueOwners -TreatInputAsId:$TreatInputAsId)) {
                 $ownersToRemove.Add([pscustomobject]@{
                         Id    = $resolvedOwner.Id
                         Label = $resolvedOwner.Label
@@ -428,22 +435,41 @@ function Remove-EntraGroupOwner {
             }
         }
 
-        foreach ($entry in $ownersToRemove) {
-            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Remove owner '$($entry.Label)'")) {
+        if ($ownersToRemove.Count -gt 0) {
+            Write-NCMessage "Processing $($ownersToRemove.Count) owner(s) in Graph batches (20 per request) ..." -Level INFO
+        }
+
+        for ($offset = 0; $offset -lt $ownersToRemove.Count; $offset += 20) {
+            $chunk = @($ownersToRemove[$offset..([Math]::Min($offset + 20, $ownersToRemove.Count) - 1)])
+
+            $approved = [System.Collections.Generic.List[object]]::new()
+            foreach ($entry in $chunk) {
+                if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Remove owner '$($entry.Label)'")) {
+                    $approved.Add($entry)
+                }
+            }
+            if ($approved.Count -eq 0) { continue }
+
+            $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'DELETE'; Url = "/groups/$([uri]::EscapeDataString([string]$resolvedGroup.Id))/owners/$([uri]::EscapeDataString([string]$approved[$i].Id))/`$ref" }
+                })
+            $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Removing owners from $($resolvedGroup.DisplayName)")
+
+            for ($i = 0; $i -lt $approved.Count; $i++) {
+                $entry = $approved[$i]
+                $response = $responses[$i]
                 $status = 'Removed'
-                try {
-                    Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($resolvedGroup.Id)/owners/$($entry.Id)/`$ref" -Method DELETE | Out-Null
+
+                if ($response.Success) {
                     Write-NCMessage "Removed owner '$($entry.Label)' from group '$($resolvedGroup.DisplayName)'." -Level SUCCESS
                 }
-                catch {
-                    if ($_.Exception.Message -match 'could not find' -or $_.Exception.Message -match 'does not exist') {
-                        $status = 'NotFound'
-                        Write-NCMessage "Owner '$($entry.Label)' is not an owner of '$($resolvedGroup.DisplayName)'." -Level WARNING
-                    }
-                    else {
-                        $status = 'Failed'
-                        Write-NCMessage "Failed to remove owner '$($entry.Label)' from '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
-                    }
+                elseif ($response.ErrorMessage -match 'could not find' -or $response.ErrorMessage -match 'does not exist') {
+                    $status = 'NotFound'
+                    Write-NCMessage "Owner '$($entry.Label)' is not an owner of '$($resolvedGroup.DisplayName)'." -Level WARNING
+                }
+                else {
+                    $status = 'Failed'
+                    Write-NCMessage "Failed to remove owner '$($entry.Label)' from '$($resolvedGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
                 }
 
                 if ($PassThru.IsPresent) {
@@ -581,6 +607,7 @@ function Copy-EntraGroupOwner {
 
     $destinationOwnerIds = @($destinationOwners | ForEach-Object { [string]$_.id })
     $results = [System.Collections.Generic.List[object]]::new()
+    $entries = [System.Collections.Generic.List[object]]::new()
 
     foreach ($ownerItem in $sourceOwners) {
         $ownerId = if ($ownerItem.PSObject.Properties['id']) { [string]$ownerItem.id } else { $null }
@@ -588,45 +615,63 @@ function Copy-EntraGroupOwner {
             continue
         }
 
-        $ownerLabel = Get-NCGraphObjectLabel -InputObject $ownerItem
-        if ($destinationOwnerIds -contains $ownerId) {
-            if ($PassThru.IsPresent) {
-                $results.Add([pscustomobject][ordered]@{
-                        SourceGroup      = $sourceGroup.DisplayName
-                        DestinationGroup = $destinationGroup.DisplayName
-                        OwnerName        = $ownerLabel
-                        OwnerId          = $ownerId
-                        Status           = 'Exists'
-                    }) | Out-Null
-            }
-            continue
-        }
+        $entries.Add([pscustomobject]@{
+                Id     = $ownerId
+                Label  = (Get-NCGraphObjectLabel -InputObject $ownerItem)
+                Status = if ($destinationOwnerIds -contains $ownerId) { 'Exists' } else { $null }
+                Send   = $false
+            })
+    }
 
-        if ($PSCmdlet.ShouldProcess($destinationGroup.DisplayName, "Copy owner '$ownerLabel' from '$($sourceGroup.DisplayName)'")) {
-            $status = 'Added'
-            try {
-                $body = @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$ownerId" } | ConvertTo-Json -Depth 3
-                Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($destinationGroup.Id)/owners/`$ref" -Method POST -Body $body -ContentType 'application/json' | Out-Null
-                Write-NCMessage "Copied owner '$ownerLabel' to '$($destinationGroup.DisplayName)'." -Level SUCCESS
-            }
-            catch {
-                if ($_.Exception.Message -match 'already exist' -or $_.Exception.Message -match 'exists') {
-                    $status = 'Exists'
+    $pending = [System.Collections.Generic.List[object]]::new()
+    foreach ($entry in $entries) {
+        if ($entry.Status -eq 'Exists') { continue }
+        if ($PSCmdlet.ShouldProcess($destinationGroup.DisplayName, "Copy owner '$($entry.Label)' from '$($sourceGroup.DisplayName)'")) {
+            $entry.Send = $true
+            $pending.Add($entry)
+        }
+    }
+
+    if ($pending.Count -gt 0) {
+        $ownersRefUrl = "/groups/$([uri]::EscapeDataString([string]$destinationGroup.Id))/owners/`$ref"
+        Write-NCMessage "Processing $($pending.Count) owner(s) in Graph batches (20 per request) ..." -Level INFO
+
+        for ($offset = 0; $offset -lt $pending.Count; $offset += 20) {
+            $approved = @($pending[$offset..([Math]::Min($offset + 20, $pending.Count) - 1)])
+            $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'POST'; Url = $ownersRefUrl; Body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $approved[$i].Id) } }
+                })
+            $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Copying owners to $($destinationGroup.DisplayName)")
+
+            for ($i = 0; $i -lt $approved.Count; $i++) {
+                $ownerLabel = $approved[$i].Label
+                $response = $responses[$i]
+
+                if ($response.Success) {
+                    $approved[$i].Status = 'Added'
+                    Write-NCMessage "Copied owner '$ownerLabel' to '$($destinationGroup.DisplayName)'." -Level SUCCESS
+                }
+                elseif ($response.ErrorMessage -match 'already exist' -or $response.ErrorMessage -match 'exists') {
+                    $approved[$i].Status = 'Exists'
                     Write-NCMessage "Owner '$ownerLabel' is already an owner of '$($destinationGroup.DisplayName)'." -Level WARNING
                 }
                 else {
-                    $status = 'Failed'
-                    Write-NCMessage "Failed to copy owner '$ownerLabel' to '$($destinationGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
+                    $approved[$i].Status = 'Failed'
+                    Write-NCMessage "Failed to copy owner '$ownerLabel' to '$($destinationGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
                 }
             }
+        }
+    }
 
-            if ($PassThru.IsPresent) {
+    if ($PassThru.IsPresent) {
+        foreach ($entry in $entries) {
+            if ($entry.Status -eq 'Exists' -or $entry.Send) {
                 $results.Add([pscustomobject][ordered]@{
                         SourceGroup      = $sourceGroup.DisplayName
                         DestinationGroup = $destinationGroup.DisplayName
-                        OwnerName        = $ownerLabel
-                        OwnerId          = $ownerId
-                        Status           = $status
+                        OwnerName        = $entry.Label
+                        OwnerId          = $entry.Id
+                        Status           = $entry.Status
                     }) | Out-Null
             }
         }
@@ -888,6 +933,7 @@ function Copy-EntraGroup {
                 return
             }
 
+            $ownerPending = [System.Collections.Generic.List[object]]::new()
             foreach ($owner in $sourceOwners) {
                 $ownerId = if ($owner.PSObject.Properties['id']) { [string]$owner.id } else { $null }
                 if ([string]::IsNullOrWhiteSpace($ownerId)) {
@@ -899,20 +945,35 @@ function Copy-EntraGroup {
                     continue
                 }
 
-                $ownerLabel = Get-NCGraphObjectLabel -InputObject $owner
-                try {
-                    $body = @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$ownerId" } | ConvertTo-Json -Depth 3
-                    Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($destinationGroup.Id)/owners/`$ref" -Method POST -Body $body -ContentType 'application/json' | Out-Null
-                    $ownerCopied++
-                    Write-NCMessage "Copied owner '$ownerLabel' to '$($destinationGroup.DisplayName)'." -Level SUCCESS
-                }
-                catch {
-                    if ($_.Exception.Message -match 'already exist' -or $_.Exception.Message -match 'exists') {
-                        $ownerSkipped++
-                        Write-NCMessage "Owner '$ownerLabel' is already an owner of '$($destinationGroup.DisplayName)'." -Level WARNING
-                    }
-                    else {
-                        Write-NCMessage "Failed to copy owner '$ownerLabel' to '$($destinationGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
+                $ownerPending.Add([pscustomobject]@{ Id = $ownerId; Label = (Get-NCGraphObjectLabel -InputObject $owner) })
+            }
+
+            if ($ownerPending.Count -gt 0) {
+                $ownersRefUrl = "/groups/$([uri]::EscapeDataString([string]$destinationGroup.Id))/owners/`$ref"
+                Write-NCMessage "Processing $($ownerPending.Count) owner(s) in Graph batches (20 per request) ..." -Level INFO
+
+                for ($offset = 0; $offset -lt $ownerPending.Count; $offset += 20) {
+                    $approved = @($ownerPending[$offset..([Math]::Min($offset + 20, $ownerPending.Count) - 1)])
+                    $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                            @{ Id = "m$i"; Method = 'POST'; Url = $ownersRefUrl; Body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $approved[$i].Id) } }
+                        })
+                    $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Copying owners to $($destinationGroup.DisplayName)")
+
+                    for ($i = 0; $i -lt $approved.Count; $i++) {
+                        $ownerLabel = $approved[$i].Label
+                        $response = $responses[$i]
+
+                        if ($response.Success) {
+                            $ownerCopied++
+                            Write-NCMessage "Copied owner '$ownerLabel' to '$($destinationGroup.DisplayName)'." -Level SUCCESS
+                        }
+                        elseif ($response.ErrorMessage -match 'already exist' -or $response.ErrorMessage -match 'exists') {
+                            $ownerSkipped++
+                            Write-NCMessage "Owner '$ownerLabel' is already an owner of '$($destinationGroup.DisplayName)'." -Level WARNING
+                        }
+                        else {
+                            Write-NCMessage "Failed to copy owner '$ownerLabel' to '$($destinationGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
+                        }
                     }
                 }
             }
@@ -942,6 +1003,7 @@ function Copy-EntraGroup {
                 return 'DirectoryObject'
             }
 
+            $memberPending = [System.Collections.Generic.List[object]]::new()
             foreach ($member in $sourceMembers) {
                 $memberId = if ($member.PSObject.Properties['id']) { [string]$member.id } else { $null }
                 if ([string]::IsNullOrWhiteSpace($memberId)) {
@@ -957,19 +1019,36 @@ function Copy-EntraGroup {
                 $memberType = if ($memberProps.ContainsKey('@odata.type')) { & $resolveType $memberProps['@odata.type'] } else { 'DirectoryObject' }
                 $memberLabel = if ($memberProps.ContainsKey('displayName')) { $memberProps.displayName } elseif ($memberProps.ContainsKey('userPrincipalName')) { $memberProps.userPrincipalName } else { $memberId }
 
-                try {
-                    $body = @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$memberId" } | ConvertTo-Json -Depth 3
-                    Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($destinationGroup.Id)/members/`$ref" -Method POST -Body $body -ContentType 'application/json' | Out-Null
-                    $memberCopied++
-                    Write-NCMessage "Copied $memberType '$memberLabel' to '$($destinationGroup.DisplayName)'." -Level SUCCESS
-                }
-                catch {
-                    if ($_.Exception.Message -match 'already exist' -or $_.Exception.Message -match 'exists') {
-                        $memberSkipped++
-                        Write-NCMessage "$memberType '$memberLabel' is already a member of '$($destinationGroup.DisplayName)'." -Level WARNING
-                    }
-                    else {
-                        Write-NCMessage "Failed to copy $memberType '$memberLabel' to '$($destinationGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
+                $memberPending.Add([pscustomobject]@{ Id = $memberId; Type = $memberType; Label = $memberLabel })
+            }
+
+            if ($memberPending.Count -gt 0) {
+                $membersRefUrl = "/groups/$([uri]::EscapeDataString([string]$destinationGroup.Id))/members/`$ref"
+                Write-NCMessage "Processing $($memberPending.Count) member(s) in Graph batches (20 per request) ..." -Level INFO
+
+                for ($offset = 0; $offset -lt $memberPending.Count; $offset += 20) {
+                    $approved = @($memberPending[$offset..([Math]::Min($offset + 20, $memberPending.Count) - 1)])
+                    $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                            @{ Id = "m$i"; Method = 'POST'; Url = $membersRefUrl; Body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $approved[$i].Id) } }
+                        })
+                    $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Copying members to $($destinationGroup.DisplayName)")
+
+                    for ($i = 0; $i -lt $approved.Count; $i++) {
+                        $memberType = $approved[$i].Type
+                        $memberLabel = $approved[$i].Label
+                        $response = $responses[$i]
+
+                        if ($response.Success) {
+                            $memberCopied++
+                            Write-NCMessage "Copied $memberType '$memberLabel' to '$($destinationGroup.DisplayName)'." -Level SUCCESS
+                        }
+                        elseif ($response.ErrorMessage -match 'already exist' -or $response.ErrorMessage -match 'exists') {
+                            $memberSkipped++
+                            Write-NCMessage "$memberType '$memberLabel' is already a member of '$($destinationGroup.DisplayName)'." -Level WARNING
+                        }
+                        else {
+                            Write-NCMessage "Failed to copy $memberType '$memberLabel' to '$($destinationGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
+                        }
                     }
                 }
             }

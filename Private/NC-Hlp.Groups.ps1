@@ -248,3 +248,67 @@ function Resolve-NCEntraDeviceTargetBatch {
         [pscustomobject]@{ Input = $value; Id = [string]$device.id; Label = $device.displayName }
     }
 }
+
+function Resolve-NCEntraOwnerBatch {
+    <#
+    .SYNOPSIS
+        Resolves owner inputs with batched Graph lookups, matching Resolve-NCEntraOwner.
+    .DESCRIPTION
+        Every input is looked up with GET /users/{input} in $batch requests. Inputs that Resolve-NCEntraOwner
+        treats as object IDs (GUIDs, or every input with -TreatInputAsId) fall back to an ID-only placeholder
+        when the lookup fails, exactly like Resolve-NCEntraOwner. Any other input the batch could not resolve
+        as a user is handed to Resolve-NCEntraOwner, which keeps its alias/display-name handling and its
+        messages. The batch itself never prints for a failed lookup, so an input is reported at most once.
+        Output objects have the same properties as Resolve-NCEntraOwner (Id, Label), in input order.
+    .PARAMETER OwnerIdentifier
+        UPNs, mail addresses, display names or object IDs.
+    .PARAMETER TreatInputAsId
+        Treat every input as an object ID.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$OwnerIdentifier,
+        [switch]$TreatInputAsId
+    )
+
+    $guidPattern = '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    $inputs = @($OwnerIdentifier | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($inputs.Count -eq 0) {
+        return
+    }
+
+    $requests = @(for ($i = 0; $i -lt $inputs.Count; $i++) {
+            @{ Id = "o$i"; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString($inputs[$i].Trim()))?`$select=id,userPrincipalName,displayName" }
+        })
+    $lookup = @{}
+    foreach ($result in @(Invoke-NCGraphBatch -Requests $requests -Activity 'Resolving owners')) {
+        $lookup[$result.Id] = $result
+    }
+
+    for ($i = 0; $i -lt $inputs.Count; $i++) {
+        $original = $inputs[$i]
+        $trimmed = $original.Trim()
+        $isId = $TreatInputAsId.IsPresent -or ($trimmed -match $guidPattern)
+        $result = $lookup["o$i"]
+
+        if ($result -and $result.Success) {
+            $owner = $result.Body
+            if (-not $owner -or -not $owner.id) {
+                Write-NCMessage "Unable to determine object ID for owner '$original'." -Level ERROR
+                continue
+            }
+            $ownerLabel = if ($owner.userPrincipalName) { $owner.userPrincipalName } elseif ($owner.displayName) { $owner.displayName } else { $owner.id }
+            [pscustomobject]@{ Id = [string]$owner.id; Label = [string]$ownerLabel }
+            continue
+        }
+
+        if ($isId) {
+            [pscustomobject]@{ Id = $trimmed; Label = $trimmed }
+            continue
+        }
+
+        Resolve-NCEntraOwner -OwnerIdentifier $original
+    }
+}
