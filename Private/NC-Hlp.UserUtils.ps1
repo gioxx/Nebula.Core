@@ -106,16 +106,28 @@ function Find-UserRecipient {
                 $queries += "startswith(userPrincipalName,'$escaped@')"
             }
 
-            $matchedUsers = @()
-            foreach ($query in $queries) {
-                try {
-                    $matchedUsers = @(Get-MgUser -Filter $query -All -Property Id, UserPrincipalName, Mail, DisplayName -ErrorAction Stop)
-                    if ($matchedUsers.Count -gt 0) {
-                        break
+            $requests = @(for ($i = 0; $i -lt $queries.Count; $i++) {
+                    @{
+                        Id     = "q$i"
+                        Method = 'GET'
+                        Url    = '/users?$filter=' + [uri]::EscapeDataString($queries[$i]) + '&$select=id,userPrincipalName,mail,displayName'
                     }
-                }
-                catch {
-                    continue
+                })
+
+            # One batch for every candidate query; the first query (in order) with results wins.
+            # A failed sub-request counts as "no results".
+            $matchedUsers = @()
+            foreach ($result in @(Invoke-NCGraphBatchCollection -Requests $requests -Activity 'Resolving user')) {
+                if ($result.Success -and @($result.Items).Count -gt 0) {
+                    $matchedUsers = @($result.Items | ForEach-Object {
+                            [pscustomobject]@{
+                                Id                = $_.id
+                                UserPrincipalName = $_.userPrincipalName
+                                Mail              = $_.mail
+                                DisplayName       = $_.displayName
+                            }
+                        })
+                    break
                 }
             }
 
