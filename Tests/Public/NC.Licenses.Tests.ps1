@@ -68,6 +68,7 @@ Describe 'License assignment batching' {
         $global:SeenRequests = [System.Collections.Generic.List[object]]::new()
         $global:UsageLocationForUsers = 'IT'
         $global:PatchFailsFor = ''
+        $global:UsageLocationOverride = @{}
     }
 
     BeforeAll {
@@ -81,7 +82,7 @@ Describe 'License assignment batching' {
                     $url = [string]$request.url
                     if ($request.method -eq 'GET' -and $url -match '^/users/user(\d+)%40contoso\.com') {
                         $n = $Matches[1]
-                        $loc = if ($global:UsageLocationForUsers) { $global:UsageLocationForUsers } else { $null }
+                        $loc = if ($global:UsageLocationOverride.ContainsKey($n)) { $global:UsageLocationOverride[$n] } elseif ($global:UsageLocationForUsers) { $global:UsageLocationForUsers } else { $null }
                         return @{ status = 200; body = @{ id = "id$n"; userPrincipalName = "user$n@contoso.com"; displayName = "User $n"; usageLocation = $loc } }
                     }
                     if ($request.method -eq 'GET' -and $url -match '^/users/(id\d+)/licenseDetails') {
@@ -265,6 +266,17 @@ Describe 'License assignment batching' {
         Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
             $Level -eq 'ERROR' -and $Message -eq 'Unable to set usage location (DE) for user2@contoso.com: denied'
         }
+    }
+
+    It 'Set-UserUsageLocation -PassThru keeps input order when skipped and updated users are mixed' {
+        $global:UsageLocationForUsers = ''
+        $global:UsageLocationOverride = @{ '2' = 'DE'; '4' = 'DE' }
+        $global:PatchFailsFor = 'id3'
+        Set-LicenseGraphMock
+        $result = @(New-Upns 5 | Set-UserUsageLocation -UsageLocation DE -PassThru -Confirm:$false)
+
+        ($result.UserPrincipalName -join ',') | Should -Be 'user1@contoso.com,user2@contoso.com,user4@contoso.com,user5@contoso.com'
+        ($result.Action -join ',') | Should -Be 'Updated,Skipped,Skipped,Updated'
     }
 
     It 'Export-MsolAccountSku reads license details for 45 licensed users in 3 batch calls' {

@@ -2483,6 +2483,7 @@ function Set-UserUsageLocation {
 
                 # (b) Decide per user: skip or confirm.
                 $approved = [System.Collections.Generic.List[object]]::new()
+                $slots = [System.Collections.Generic.List[object]]::new()
                 foreach ($upn in $chunk) {
                     $counter++
                     $user = $resolvedUsers[$upn.Trim()]
@@ -2497,7 +2498,7 @@ function Set-UserUsageLocation {
                     if ($currentUsage -eq $targetUsage) {
                         $skippedCount++
                         if ($PassThru.IsPresent) {
-                            $results.Add([pscustomobject]@{
+                            $slots.Add([pscustomobject]@{
                                     UserPrincipalName     = $user.userPrincipalName
                                     DisplayName           = $user.displayName
                                     PreviousUsageLocation = $user.usageLocation
@@ -2513,39 +2514,45 @@ function Set-UserUsageLocation {
                         continue
                     }
 
-                    $approved.Add($user) | Out-Null
+                    $approved.Add([pscustomobject]@{ User = $user; Slot = $slots.Count }) | Out-Null
+                    $slots.Add($null) | Out-Null
                 }
-                if ($approved.Count -eq 0) { continue }
 
                 # (c) Update the approved users in one batch.
-                $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
-                        @{
-                            Id     = "m$i"
-                            Method = 'PATCH'
-                            Url    = "/users/$([uri]::EscapeDataString([string]$approved[$i].id))"
-                            Body   = @{ usageLocation = $targetUsage }
-                        }
-                    })
-                $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity 'Updating usage location')
-                for ($i = 0; $i -lt $approved.Count; $i++) {
-                    $user = $approved[$i]
-                    $response = $responses[$i]
-                    if ($response.Success) {
-                        $updatedCount++
-                        if ($PassThru.IsPresent) {
-                            $results.Add([pscustomobject]@{
+                if ($approved.Count -gt 0) {
+                    $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                            @{
+                                Id     = "m$i"
+                                Method = 'PATCH'
+                                Url    = "/users/$([uri]::EscapeDataString([string]$approved[$i].User.id))"
+                                Body   = @{ usageLocation = $targetUsage }
+                            }
+                        })
+                    $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity 'Updating usage location')
+                    for ($i = 0; $i -lt $approved.Count; $i++) {
+                        $user = $approved[$i].User
+                        $response = $responses[$i]
+                        if ($response.Success) {
+                            $updatedCount++
+                            if ($PassThru.IsPresent) {
+                                $slots[$approved[$i].Slot] = [pscustomobject]@{
                                     UserPrincipalName     = $user.userPrincipalName
                                     DisplayName           = $user.displayName
                                     PreviousUsageLocation = $user.usageLocation
                                     UsageLocation         = $targetUsage
                                     Action                = 'Updated'
-                                }) | Out-Null
+                                }
+                            }
+                            Write-Verbose "Usage location set to $targetUsage for $($user.userPrincipalName)."
                         }
-                        Write-Verbose "Usage location set to $targetUsage for $($user.userPrincipalName)."
+                        else {
+                            Write-NCMessage "Unable to set usage location ($targetUsage) for $($user.userPrincipalName): $($response.ErrorMessage)" -Level ERROR
+                        }
                     }
-                    else {
-                        Write-NCMessage "Unable to set usage location ($targetUsage) for $($user.userPrincipalName): $($response.ErrorMessage)" -Level ERROR
-                    }
+                }
+
+                foreach ($slot in $slots) {
+                    if ($null -ne $slot) { $results.Add($slot) | Out-Null }
                 }
             }
 
