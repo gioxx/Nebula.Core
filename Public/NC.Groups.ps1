@@ -102,59 +102,43 @@ function Add-EntraGroupDevice {
         }
 
         $results = [System.Collections.Generic.List[object]]::new()
-        $uniqueDevices = $devices | Select-Object -Unique
+        $uniqueDevices = @($devices | Select-Object -Unique)
+        $membersRefUrl = "/groups/$([uri]::EscapeDataString([string]$resolvedGroup.Id))/members/`$ref"
+        Write-NCMessage "Processing $($uniqueDevices.Count) device(s) in Graph batches (20 per request) ..." -Level INFO
 
-        foreach ($device in $uniqueDevices) {
-            $deviceId = $null
-            $deviceLabel = $device
+        for ($offset = 0; $offset -lt $uniqueDevices.Count; $offset += 20) {
+            $chunk = @($uniqueDevices[$offset..([Math]::Min($offset + 20, $uniqueDevices.Count) - 1)])
+            $targets = @(Resolve-NCEntraDeviceTargetBatch -DeviceIdentifier $chunk -TreatInputAsId:$TreatInputAsId)
 
-            if ($TreatInputAsId.IsPresent -or $device -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-                $deviceId = $device
+            $approved = [System.Collections.Generic.List[object]]::new()
+            foreach ($target in $targets) {
+                if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add device '$($target.Label)'")) {
+                    $approved.Add($target)
+                }
             }
-            else {
-                $escapedDevice = $device.Replace("'", "''")
-                try {
-                    $deviceMatches = Get-MgDevice -Filter "displayName eq '$escapedDevice'" -All -ErrorAction Stop
-                }
-                catch {
-                    Write-NCMessage "Unable to resolve device '$device': $($_.Exception.Message)" -Level ERROR
-                    continue
-                }
+            if ($approved.Count -eq 0) { continue }
 
-                if (-not $deviceMatches -or $deviceMatches.Count -eq 0) {
-                    Write-NCMessage "Device '$device' not found" -Level WARNING
-                    continue
-                }
+            $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'POST'; Url = $membersRefUrl; Body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $approved[$i].Id) } }
+                })
+            $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Adding devices to $($resolvedGroup.DisplayName)")
 
-                if ($deviceMatches.Count -gt 1) {
-                    Write-NCMessage "Multiple devices matched '$device'. Using the first result ($($deviceMatches[0].DisplayName))" -Level WARNING
-                }
-
-                $selected = $deviceMatches | Select-Object -First 1
-                $deviceId = $selected.Id
-                $deviceLabel = $selected.DisplayName
-            }
-
-            if (-not $deviceId) {
-                Write-NCMessage "Unable to determine object ID for device '$device'." -Level ERROR
-                continue
-            }
-
-            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add device '$deviceLabel'")) {
+            for ($i = 0; $i -lt $approved.Count; $i++) {
+                $deviceId = $approved[$i].Id
+                $deviceLabel = $approved[$i].Label
+                $response = $responses[$i]
                 $status = 'Added'
-                try {
-                    New-MgGroupMember -GroupId $resolvedGroup.Id -DirectoryObjectId $deviceId -ErrorAction Stop | Out-Null
+
+                if ($response.Success) {
                     Write-NCMessage "Added device '$deviceLabel' to group '$($resolvedGroup.DisplayName)'" -Level SUCCESS
                 }
-                catch {
-                    if ($_.Exception.Message -match 'added object references already exist') {
-                        $status = 'Exists'
-                        Write-NCMessage "Device '$deviceLabel' is already a member of '$($resolvedGroup.DisplayName)'" -Level WARNING
-                    }
-                    else {
-                        $status = 'Failed'
-                        Write-NCMessage "Failed to add device '$deviceLabel' to '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
-                    }
+                elseif ($response.ErrorMessage -match 'added object references already exist') {
+                    $status = 'Exists'
+                    Write-NCMessage "Device '$deviceLabel' is already a member of '$($resolvedGroup.DisplayName)'" -Level WARNING
+                }
+                else {
+                    $status = 'Failed'
+                    Write-NCMessage "Failed to add device '$deviceLabel' to '$($resolvedGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
                 }
 
                 if ($PassThru.IsPresent) {
@@ -3500,70 +3484,52 @@ function Remove-EntraGroupDevice {
             }
         }
         else {
-            $uniqueDevices = $devices | Select-Object -Unique
-
-            foreach ($device in $uniqueDevices) {
-                $deviceId = $null
-                $deviceLabel = $device
-
-                if ($TreatInputAsId.IsPresent -or $device -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-                    $deviceId = $device
-                }
-                else {
-                    $escapedDevice = $device.Replace("'", "''")
-                    try {
-                        $deviceMatches = Get-MgDevice -Filter "displayName eq '$escapedDevice'" -All -ErrorAction Stop
-                    }
-                    catch {
-                        Write-NCMessage "Unable to resolve device '$device': $($_.Exception.Message)" -Level ERROR
-                        continue
-                    }
-
-                    if (-not $deviceMatches -or $deviceMatches.Count -eq 0) {
-                        Write-NCMessage "Device '$device' not found" -Level WARNING
-                        continue
-                    }
-
-                    if ($deviceMatches.Count -gt 1) {
-                        Write-NCMessage "Multiple devices matched '$device'. Using the first result ($($deviceMatches[0].DisplayName))" -Level WARNING
-                    }
-
-                    $selected = $deviceMatches | Select-Object -First 1
-                    $deviceId = $selected.Id
-                    $deviceLabel = $selected.DisplayName
-                }
-
-                if (-not $deviceId) {
-                    Write-NCMessage "Unable to determine object ID for device '$device'." -Level ERROR
-                    continue
-                }
-
+            $uniqueDevices = @($devices | Select-Object -Unique)
+            foreach ($target in @(Resolve-NCEntraDeviceTargetBatch -DeviceIdentifier $uniqueDevices -TreatInputAsId:$TreatInputAsId)) {
                 $devicesToRemove.Add([pscustomobject]@{
-                        Id    = $deviceId
-                        Label = $deviceLabel
+                        Id    = $target.Id
+                        Label = $target.Label
                     }) | Out-Null
             }
         }
 
-        foreach ($entry in $devicesToRemove) {
-            $deviceId = $entry.Id
-            $deviceLabel = $entry.Label
+        if ($devicesToRemove.Count -gt 0) {
+            Write-NCMessage "Processing $($devicesToRemove.Count) device(s) in Graph batches (20 per request) ..." -Level INFO
+        }
+        $groupPath = "/groups/$([uri]::EscapeDataString([string]$resolvedGroup.Id))"
 
-            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Remove device '$deviceLabel'")) {
+        for ($offset = 0; $offset -lt $devicesToRemove.Count; $offset += 20) {
+            $chunk = @($devicesToRemove[$offset..([Math]::Min($offset + 20, $devicesToRemove.Count) - 1)])
+
+            $approved = [System.Collections.Generic.List[object]]::new()
+            foreach ($entry in $chunk) {
+                if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Remove device '$($entry.Label)'")) {
+                    $approved.Add($entry)
+                }
+            }
+            if ($approved.Count -eq 0) { continue }
+
+            $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'DELETE'; Url = "$groupPath/members/$([uri]::EscapeDataString([string]$approved[$i].Id))/`$ref" }
+                })
+            $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Removing devices from $($resolvedGroup.DisplayName)")
+
+            for ($i = 0; $i -lt $approved.Count; $i++) {
+                $deviceId = $approved[$i].Id
+                $deviceLabel = $approved[$i].Label
+                $response = $responses[$i]
                 $status = 'Removed'
-                try {
-                    Remove-MgGroupMemberByRef -GroupId $resolvedGroup.Id -DirectoryObjectId $deviceId -ErrorAction Stop
+
+                if ($response.Success) {
                     Write-NCMessage "Removed device '$deviceLabel' from group '$($resolvedGroup.DisplayName)'" -Level SUCCESS
                 }
-                catch {
-                    if ($_.Exception.Message -match 'could not find member' -or $_.Exception.Message -match 'does not exist') {
-                        $status = 'NotFound'
-                        Write-NCMessage "Device '$deviceLabel' is not a member of '$($resolvedGroup.DisplayName)'" -Level WARNING
-                    }
-                    else {
-                        $status = 'Failed'
-                        Write-NCMessage "Failed to remove device '$deviceLabel' from '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
-                    }
+                elseif ($response.Status -eq 404 -or $response.ErrorMessage -match 'could not find member' -or $response.ErrorMessage -match 'does not exist') {
+                    $status = 'NotFound'
+                    Write-NCMessage "Device '$deviceLabel' is not a member of '$($resolvedGroup.DisplayName)'" -Level WARNING
+                }
+                else {
+                    $status = 'Failed'
+                    Write-NCMessage "Failed to remove device '$deviceLabel' from '$($resolvedGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
                 }
 
                 if ($PassThru.IsPresent) {

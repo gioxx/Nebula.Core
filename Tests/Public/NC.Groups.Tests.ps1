@@ -304,3 +304,172 @@ Describe 'Entra group user identity resolution' {
         Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "User 'member@contoso.com' is not a member of 'Group'" -and $Level -eq 'WARNING' }
     }
 }
+
+Describe 'Entra group device batching' {
+    BeforeAll {
+        $group = [pscustomobject]@{ Id = 'group-id'; DisplayName = 'Group'; OnPremisesSyncEnabled = $false }
+    }
+
+    BeforeEach {
+        Mock Test-MgGraphConnection { $true }
+        Mock Add-EmptyLine {}
+        Mock Write-NCMessage {}
+        Mock Write-Progress {}
+        Mock Start-Sleep {}
+        Mock Get-MgContext { [pscustomobject]@{ Environment = 'Global' } }
+        Mock Get-MgGroup { $group }
+    }
+
+    It 'adds devices resolved by display name with one lookup batch and one add batch' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                if ($request.method -eq 'GET') {
+                    $decoded = [uri]::UnescapeDataString($request.url)
+                    $name = $decoded -replace "^/devices\?\`$filter=displayName eq '([^']+)'.*$", '$1'
+                    return @{ status = 200; body = @{ value = @(@{ id = "id-$name"; displayName = $name }) } }
+                }
+                @{ status = 204 }
+            }
+        }
+        $devices = @(1..14 | ForEach-Object { "PC$_" })
+
+        $devices | Add-EntraGroupDevice -GroupName 'Group' -Confirm:$false
+
+        Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
+    }
+
+    It 'reports Added with the device label and the original message' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                if ($request.method -eq 'GET') { return @{ status = 200; body = @{ value = @(@{ id = 'dev-id'; displayName = 'PC1' }) } } }
+                if ($request.method -eq 'POST' -and $request.url -eq '/groups/group-id/members/$ref' -and $request.body.'@odata.id' -like '*dev-id') { return @{ status = 204 } }
+                @{ status = 500 }
+            }
+        }
+
+        $result = Add-EntraGroupDevice -GroupName 'Group' -DeviceIdentifier 'PC1' -PassThru -Confirm:$false
+
+        $result.Status | Should -Be 'Added'
+        $result.MemberId | Should -Be 'dev-id'
+        $result.MemberType | Should -Be 'Device'
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Added device 'PC1' to group 'Group'" -and $Level -eq 'SUCCESS' }
+    }
+
+    It 'reports Exists when the device is already a member' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                @{ status = 400; body = @{ error = @{ code = 'Request_BadRequest'; message = 'One or more added object references already exist for the following modified properties: ''members''.' } } }
+            }
+        }
+
+        $result = Add-EntraGroupDevice -GroupName 'Group' -DeviceIdentifier '11111111-1111-1111-1111-111111111111' -PassThru -Confirm:$false
+
+        $result.Status | Should -Be 'Exists'
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Device '11111111-1111-1111-1111-111111111111' is already a member of 'Group'" -and $Level -eq 'WARNING' }
+    }
+
+    It 'reports Failed with the Graph error message' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                @{ status = 403; body = @{ error = @{ code = 'Authorization_RequestDenied'; message = 'denied' } } }
+            }
+        }
+
+        $result = Add-EntraGroupDevice -GroupName 'Group' -DeviceIdentifier '11111111-1111-1111-1111-111111111111' -PassThru -Confirm:$false
+
+        $result.Status | Should -Be 'Failed'
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Failed to add device '11111111-1111-1111-1111-111111111111' to 'Group': denied" -and $Level -eq 'ERROR' }
+    }
+
+    It 'warns when a device is not found and when several match' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                if ($request.method -eq 'GET') {
+                    if ($request.url -like '*Ghost*') { return @{ status = 200; body = @{ value = @() } } }
+                    return @{ status = 200; body = @{ value = @(@{ id = 'first-id'; displayName = 'Twin' }, @{ id = 'second-id'; displayName = 'Twin' }) } }
+                }
+                @{ status = 204 }
+            }
+        }
+
+        $result = @('Ghost', 'Twin' | Add-EntraGroupDevice -GroupName 'Group' -PassThru -Confirm:$false)
+
+        $result.Count | Should -Be 1
+        $result[0].MemberId | Should -Be 'first-id'
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Device 'Ghost' not found" -and $Level -eq 'WARNING' }
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Multiple devices matched 'Twin'. Using the first result (Twin)" -and $Level -eq 'WARNING' }
+    }
+
+    It 'reports a lookup failure for a device name' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                @{ status = 403; body = @{ error = @{ code = 'Authorization_RequestDenied'; message = 'denied' } } }
+            }
+        }
+
+        Add-EntraGroupDevice -GroupName 'Group' -DeviceIdentifier 'PC1' -Confirm:$false
+
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Unable to resolve device 'PC1': denied" -and $Level -eq 'ERROR' }
+    }
+
+    It 'does not send writes with -WhatIf' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder { param($request) @{ status = 200; body = @{ value = @(@{ id = 'dev-id'; displayName = 'PC1' }) } } }
+        }
+
+        Add-EntraGroupDevice -GroupName 'Group' -DeviceIdentifier 'PC1' -WhatIf
+
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly -Scope It
+    }
+
+    It 'removes devices with one batched DELETE per chunk' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                if ($request.method -eq 'GET') { return @{ status = 200; body = @{ value = @(@{ id = 'dev-id'; displayName = 'PC1' }) } } }
+                if ($request.method -eq 'DELETE' -and $request.url -eq '/groups/group-id/members/dev-id/$ref') { return @{ status = 204 } }
+                @{ status = 500 }
+            }
+        }
+
+        $result = Remove-EntraGroupDevice -GroupName 'Group' -DeviceIdentifier 'PC1' -PassThru -Confirm:$false
+
+        Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
+        $result.Status | Should -Be 'Removed'
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Removed device 'PC1' from group 'Group'" -and $Level -eq 'SUCCESS' }
+    }
+
+    It 'reports devices that are not members as NotFound' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                @{ status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = "Resource 'x' does not exist or one of its queried reference-property objects are not present." } } }
+            }
+        }
+
+        $result = Remove-EntraGroupDevice -GroupName 'Group' -DeviceIdentifier '11111111-1111-1111-1111-111111111111' -PassThru -Confirm:$false
+
+        $result.Status | Should -Be 'NotFound'
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Device '11111111-1111-1111-1111-111111111111' is not a member of 'Group'" -and $Level -eq 'WARNING' }
+    }
+
+    It 'reports a failed removal with the Graph error message' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                @{ status = 403; body = @{ error = @{ code = 'Authorization_RequestDenied'; message = 'denied' } } }
+            }
+        }
+
+        $result = Remove-EntraGroupDevice -GroupName 'Group' -DeviceIdentifier '11111111-1111-1111-1111-111111111111' -PassThru -Confirm:$false
+
+        $result.Status | Should -Be 'Failed'
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Failed to remove device '11111111-1111-1111-1111-111111111111' from 'Group': denied" -and $Level -eq 'ERROR' }
+    }
+}

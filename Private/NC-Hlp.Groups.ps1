@@ -178,3 +178,73 @@ function Resolve-NCEntraGroupUserTarget {
         [pscustomobject]@{ Input = $user; Id = $match.id; Label = $label }
     }
 }
+
+function Resolve-NCEntraDeviceTargetBatch {
+    <#
+    .SYNOPSIS
+        Resolves device inputs (object IDs or display names) with batched Graph lookups.
+    .DESCRIPTION
+        Object IDs (or every input when -TreatInputAsId is set) pass through unchanged. Display names are
+        looked up with batched GET /devices requests; inputs that cannot be resolved are reported and skipped.
+        When several devices match a name the first one is used (with a warning).
+    .PARAMETER DeviceIdentifier
+        Device object IDs or display names.
+    .PARAMETER TreatInputAsId
+        Treat every input as an object ID.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$DeviceIdentifier,
+        [switch]$TreatInputAsId
+    )
+
+    $guidPattern = '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    $requests = [System.Collections.Generic.List[object]]::new()
+    for ($i = 0; $i -lt $DeviceIdentifier.Count; $i++) {
+        $value = $DeviceIdentifier[$i]
+        if ($TreatInputAsId.IsPresent -or $value -match $guidPattern) { continue }
+        $filter = "displayName eq '$($value.Replace("'", "''"))'"
+        $requests.Add(@{ Id = "d$i"; Method = 'GET'; Url = "/devices?`$filter=$([uri]::EscapeDataString($filter))&`$select=id,displayName,deviceId" })
+    }
+
+    $lookup = @{}
+    if ($requests.Count -gt 0) {
+        foreach ($result in @(Invoke-NCGraphBatchCollection -Requests @($requests) -Activity 'Resolving devices')) {
+            $lookup[$result.Id] = $result
+        }
+    }
+
+    for ($i = 0; $i -lt $DeviceIdentifier.Count; $i++) {
+        $value = $DeviceIdentifier[$i]
+        if ($TreatInputAsId.IsPresent -or $value -match $guidPattern) {
+            [pscustomobject]@{ Input = $value; Id = $value; Label = $value }
+            continue
+        }
+
+        $result = $lookup["d$i"]
+        if (-not $result.Success) {
+            Write-NCMessage "Unable to resolve device '$value': $($result.ErrorMessage)" -Level ERROR
+            continue
+        }
+
+        $found = @($result.Items)
+        if ($found.Count -eq 0) {
+            Write-NCMessage "Device '$value' not found" -Level WARNING
+            continue
+        }
+
+        if ($found.Count -gt 1) {
+            Write-NCMessage "Multiple devices matched '$value'. Using the first result ($($found[0].displayName))" -Level WARNING
+        }
+
+        $device = $found[0]
+        if (-not $device.id) {
+            Write-NCMessage "Unable to determine object ID for device '$value'." -Level ERROR
+            continue
+        }
+
+        [pscustomobject]@{ Input = $value; Id = [string]$device.id; Label = $device.displayName }
+    }
+}
