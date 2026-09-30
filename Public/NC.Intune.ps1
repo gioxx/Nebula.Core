@@ -918,18 +918,36 @@ function New-IntuneAppBasedGroup {
 
             $appDeviceMap = @{}
             $processedDevices = 0
+            $batchNoticeWritten = $false
 
             Write-NCMessage "Scanning device applications ..." -Level INFO
-            foreach ($device in $devices) {
-                $processedDevices++
+            if ($devices.Count -gt 0) {
+                Write-NCMessage "Processing $($devices.Count) device(s) in Graph batches (20 per request) ..." -Level INFO
+                $batchNoticeWritten = $true
+            }
 
-                $Percentage = Get-NCProgressPercent -Current $processed -Total $devices.Count
-                Write-Progress -Activity 'Processing Devices' -Status "$($device.deviceName) - $processedDevices of $($devices.Count) devices - $Percentage%" -PercentComplete $Percentage
+            for ($offset = 0; $offset -lt $devices.Count; $offset += 20) {
+                $deviceChunk = @($devices[$offset..([Math]::Min($offset + 20, $devices.Count) - 1)])
 
-                try {
-                    $deviceAppsUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$($device.id)?`$select=id,deviceName,operatingSystem,userPrincipalName,azureADDeviceId,azureActiveDirectoryDeviceId&`$expand=detectedApps"
-                    $deviceWithApps = Invoke-MgGraphRequest -Uri $deviceAppsUri -Method GET
+                $Percentage = Get-NCProgressPercent -Current $processedDevices -Total $devices.Count
+                Write-Progress -Activity 'Processing Devices' -Status "$($deviceChunk[0].deviceName) - $processedDevices of $($devices.Count) devices - $Percentage%" -PercentComplete $Percentage
 
+                $appRequests = @(for ($i = 0; $i -lt $deviceChunk.Count; $i++) {
+                        @{ Id = "d$i"; Method = 'GET'; Url = "/deviceManagement/managedDevices/$([uri]::EscapeDataString([string]$deviceChunk[$i].id))?`$select=id,deviceName,operatingSystem,userPrincipalName,azureADDeviceId,azureActiveDirectoryDeviceId&`$expand=detectedApps" }
+                    })
+                $appResponses = @(Invoke-NCGraphBatch -Requests $appRequests -ApiVersion 'beta' -Activity 'Reading detected apps')
+
+                for ($i = 0; $i -lt $deviceChunk.Count; $i++) {
+                    $device = $deviceChunk[$i]
+                    $processedDevices++
+                    $Percentage = Get-NCProgressPercent -Current $processedDevices -Total $devices.Count
+
+                    if (-not $appResponses[$i].Success) {
+                        Write-NCMessage "Error processing device $($device.deviceName): $($appResponses[$i].ErrorMessage)" -Level WARNING
+                        continue
+                    }
+
+                    $deviceWithApps = $appResponses[$i].Body
                     if ($deviceWithApps.detectedApps) {
                         foreach ($app in $deviceWithApps.detectedApps) {
                             if ($app.displayName -like $ApplicationName) {
@@ -983,18 +1001,6 @@ function New-IntuneAppBasedGroup {
                             }
                         }
                     }
-
-                    Start-Sleep -Milliseconds 50
-                }
-                catch {
-                    if ($_.Exception.Message -like '*429*') {
-                        Write-NCMessage "Rate limit hit, waiting 60 seconds ..." -Level INFO
-                        Start-Sleep -Seconds 60
-                        $processedDevices--
-                        continue
-                    }
-
-                    Write-NCMessage "Error processing device $($device.deviceName): $($_.Exception.Message)" -Level WARNING
                 }
             }
 
@@ -1005,15 +1011,36 @@ function New-IntuneAppBasedGroup {
                 $appsUri = 'https://graph.microsoft.com/beta/deviceAppManagement/mobileApps'
                 $deployedApps = @(Invoke-NCGraphAllPagesCore -Uri $appsUri)
 
-                foreach ($app in $deployedApps) {
-                    if ($app.displayName -like $ApplicationName) {
-                        $appType = Get-NCIntuneAppTypeFromODataType -ODataType ([string]$app.'@odata.type')
-                        if ($FilterByType -ne 'All' -and $appType -ne $FilterByType) {
-                            continue
+                $deployedCandidates = @(foreach ($app in $deployedApps) {
+                        if ($app.displayName -like $ApplicationName) {
+                            $candidateType = Get-NCIntuneAppTypeFromODataType -ODataType ([string]$app.'@odata.type')
+                            if ($FilterByType -ne 'All' -and $candidateType -ne $FilterByType) {
+                                continue
+                            }
+                            [pscustomobject]@{ App = $app; AppType = $candidateType }
+                        }
+                    })
+
+                if ($deployedCandidates.Count -gt 0 -and -not $batchNoticeWritten) {
+                    Write-NCMessage "Processing $($deployedCandidates.Count) app(s) in Graph batches (20 per request) ..." -Level INFO
+                    $batchNoticeWritten = $true
+                }
+
+                for ($offset = 0; $offset -lt $deployedCandidates.Count; $offset += 20) {
+                    $candidateChunk = @($deployedCandidates[$offset..([Math]::Min($offset + 20, $deployedCandidates.Count) - 1)])
+                    $statusRequests = @(for ($i = 0; $i -lt $candidateChunk.Count; $i++) {
+                            @{ Id = "s$i"; Method = 'GET'; Url = "/deviceAppManagement/mobileApps/$([uri]::EscapeDataString([string]$candidateChunk[$i].App.id))/deviceStatuses" }
+                        })
+                    $statusResponses = @(Invoke-NCGraphBatchCollection -Requests $statusRequests -ApiVersion 'beta' -Activity 'Reading app deployment status')
+
+                    for ($i = 0; $i -lt $candidateChunk.Count; $i++) {
+                        if (-not $statusResponses[$i].Success) {
+                            throw [System.InvalidOperationException]::new([string]$statusResponses[$i].ErrorMessage)
                         }
 
-                        $statusUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($app.id)/deviceStatuses"
-                        $deviceStatuses = @(Invoke-NCGraphAllPagesCore -Uri $statusUri)
+                        $app = $candidateChunk[$i].App
+                        $appType = $candidateChunk[$i].AppType
+                        $deviceStatuses = @($statusResponses[$i].Items)
 
                         foreach ($status in $deviceStatuses) {
                             if ($OnlySuccessfulInstalls.IsPresent -and $status.installState -ne 'installed') {
@@ -1099,31 +1126,126 @@ function New-IntuneAppBasedGroup {
                 }
             }
 
-            $processedApps = 0
+            # Device and group names per target (targets without devices are skipped)
+            $targetInfos = [System.Collections.Generic.List[object]]::new()
             foreach ($target in $groupTargets) {
-                $processedApps++
-                $appName = $target.AppName
-                $appInfo = $target
                 $uniqueDeviceIds = @(
-                    $appInfo.Devices |
+                    $target.Devices |
                         ForEach-Object { Get-NCCoreProperty -Object $_ -Names @('DeviceId', 'deviceId', 'Id', 'id') } |
                         Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
                         Select-Object -Unique
                 )
-                $deviceCount = $uniqueDeviceIds.Count
 
-                if ($deviceCount -eq 0) {
+                if ($uniqueDeviceIds.Count -eq 0) {
+                    $targetInfos.Add($null)
                     continue
                 }
 
                 if ($useExplicitGroupName) {
-                    $groupName = Get-NCIntuneAppBasedGroupName -GroupName $GroupName
-                    $groupDescription = 'Devices matching selected Intune apps (Created via Nebula.Core)'
+                    $targetGroupName = Get-NCIntuneAppBasedGroupName -GroupName $GroupName
+                    $targetGroupDescription = 'Devices matching selected Intune apps (Created via Nebula.Core)'
                 }
                 else {
-                    $groupName = Get-NCIntuneAppBasedGroupName -AppName $appName -GroupPrefix $GroupPrefix -GroupSuffix $GroupSuffix
-                    $groupDescription = "Devices with $appName installed (Created via Nebula.Core)"
+                    $targetGroupName = Get-NCIntuneAppBasedGroupName -AppName $target.AppName -GroupPrefix $GroupPrefix -GroupSuffix $GroupSuffix
+                    $targetGroupDescription = "Devices with $($target.AppName) installed (Created via Nebula.Core)"
                 }
+
+                $targetInfos.Add([pscustomobject]@{
+                        UniqueDeviceIds  = $uniqueDeviceIds
+                        GroupName        = $targetGroupName
+                        GroupDescription = $targetGroupDescription
+                    })
+            }
+
+            # Existing groups are looked up for all targets in Graph batches
+            $groupLookup = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $groupLookupFailed = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            if (-not $DryRun.IsPresent) {
+                $lookupNames = @($targetInfos | Where-Object { $_ } | ForEach-Object { $_.GroupName } | Select-Object -Unique)
+                if ($lookupNames.Count -gt 0 -and -not $batchNoticeWritten) {
+                    Write-NCMessage "Processing $($lookupNames.Count) group(s) in Graph batches (20 per request) ..." -Level INFO
+                    $batchNoticeWritten = $true
+                }
+
+                if ($lookupNames.Count -gt 0) {
+                    $groupRequests = @(for ($i = 0; $i -lt $lookupNames.Count; $i++) {
+                            $groupFilter = "displayName eq '$($lookupNames[$i].Replace("'", "''"))'"
+                            @{ Id = "g$i"; Method = 'GET'; Url = "/groups?`$filter=$([uri]::EscapeDataString($groupFilter))&`$select=id,displayName" }
+                        })
+                    $groupResponses = @(Invoke-NCGraphBatchCollection -Requests $groupRequests -ApiVersion 'v1.0' -Activity 'Looking up existing groups')
+                    for ($i = 0; $i -lt $lookupNames.Count; $i++) {
+                        if ($groupResponses[$i].Success) {
+                            $groupLookup[$lookupNames[$i]] = @($groupResponses[$i].Items) | Select-Object -First 1
+                        }
+                        else {
+                            $null = $groupLookupFailed.Add($lookupNames[$i])
+                        }
+                    }
+                }
+            }
+
+            # Membership writes (one POST/DELETE per device inside the batch, per-device outcome)
+            $memberStats = @{ Added = 0; Removed = 0 }
+            $addGroupMembers = {
+                param([string]$GroupId, [string]$GroupLabel, [object[]]$Members, [string]$FailureFormat)
+
+                $addRequests = @(for ($i = 0; $i -lt $Members.Count; $i++) {
+                        @{ Id = "m$i"; Method = 'POST'; Url = "/groups/$([uri]::EscapeDataString($GroupId))/members/`$ref"; Body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id ([string]$Members[$i].EntraDeviceId)) } }
+                    })
+                $addResponses = @(Invoke-NCGraphBatch -Requests $addRequests -Activity "Adding devices to $GroupLabel")
+
+                for ($i = 0; $i -lt $Members.Count; $i++) {
+                    $memberLabel = $Members[$i].DeviceName
+                    if ($addResponses[$i].Success) {
+                        $memberStats.Added++
+                        Write-Verbose "Added device '$memberLabel' to group '$GroupLabel'"
+                    }
+                    elseif ($addResponses[$i].ErrorMessage -match 'added object references already exist') {
+                        Write-NCMessage "Device '$memberLabel' is already a member of '$GroupLabel'" -Level WARNING
+                    }
+                    else {
+                        Write-NCMessage ($FailureFormat -f $memberLabel, $addResponses[$i].ErrorMessage) -Level ERROR
+                    }
+                }
+            }
+            $removeGroupMembers = {
+                param([string]$GroupId, [string]$GroupLabel, [object[]]$MemberIds, [hashtable]$MemberNames)
+
+                $removeRequests = @(for ($i = 0; $i -lt $MemberIds.Count; $i++) {
+                        @{ Id = "r$i"; Method = 'DELETE'; Url = "/groups/$([uri]::EscapeDataString($GroupId))/members/$([uri]::EscapeDataString([string]$MemberIds[$i]))/`$ref" }
+                    })
+                $removeResponses = @(Invoke-NCGraphBatch -Requests $removeRequests -Activity "Removing members from $GroupLabel")
+
+                for ($i = 0; $i -lt $MemberIds.Count; $i++) {
+                    if ($removeResponses[$i].Success) {
+                        $memberStats.Removed++
+                    }
+                    elseif ($removeResponses[$i].Status -eq 404) {
+                        Write-Verbose "Member '$($MemberIds[$i])' is no longer a member of '$GroupLabel'"
+                    }
+                    else {
+                        $removeLabel = if ($MemberNames.ContainsKey([string]$MemberIds[$i])) { $MemberNames[[string]$MemberIds[$i]] } else { [string]$MemberIds[$i] }
+                        Write-NCMessage "Failed to remove device '$removeLabel' from '$GroupLabel': $($removeResponses[$i].ErrorMessage)" -Level ERROR
+                    }
+                }
+            }
+
+            $processedApps = 0
+            for ($targetIndex = 0; $targetIndex -lt $groupTargets.Count; $targetIndex++) {
+                $target = $groupTargets[$targetIndex]
+                $processedApps++
+                $appName = $target.AppName
+                $appInfo = $target
+                $targetInfo = $targetInfos[$targetIndex]
+
+                if (-not $targetInfo) {
+                    continue
+                }
+
+                $uniqueDeviceIds = $targetInfo.UniqueDeviceIds
+                $deviceCount = $uniqueDeviceIds.Count
+                $groupName = $targetInfo.GroupName
+                $groupDescription = $targetInfo.GroupDescription
 
                 $Percentage = ($processedApps / [Math]::Max($groupTargets.Count, 1)) * 100
                 Write-Progress -Activity 'Processing App Groups' -Status "$appName / $groupName - $processedApps of $($groupTargets.Count) groups - $Percentage%" -PercentComplete $Percentage
@@ -1145,12 +1267,11 @@ function New-IntuneAppBasedGroup {
                 }
 
                 $existingGroup = $null
-                try {
-                    $groupFilter = "displayName eq '$($groupName.Replace("'", "''"))'"
-                    $existingGroup = Get-MgGroup -Filter $groupFilter -All -ErrorAction Stop | Select-Object -First 1
-                }
-                catch {
+                if ($groupLookupFailed.Contains($groupName)) {
                     Write-NCMessage "No existing group found with name: $groupName" -Level WARNING
+                }
+                elseif ($groupLookup.ContainsKey($groupName)) {
+                    $existingGroup = $groupLookup[$groupName]
                 }
 
                 if ($existingGroup -and -not $UpdateExisting.IsPresent) {
@@ -1158,31 +1279,21 @@ function New-IntuneAppBasedGroup {
                     continue
                 }
 
-                $memberIds = @()
                 $entraDevices = @()
-                $processedMembers = 0
-
-                foreach ($deviceId in $uniqueDeviceIds) {
-                    $processedMembers++
-
-                    try {
-                        $Percentage = Get-NCProgressPercent -Current $processed -Total $uniqueDeviceIds.Count
-                        $resolution = Resolve-NCIntuneManagedDeviceEntraMember -ManagedDevices $devices -DeviceId $deviceId
-                        $deviceLabel = if ($resolution -and -not [string]::IsNullOrWhiteSpace($resolution.DeviceName)) { $resolution.DeviceName } else { [string]$deviceId }
-                        Write-Progress -Activity 'Resolving Entra Devices' -Status "$deviceLabel - $processedMembers of $($uniqueDeviceIds.Count) devices - $Percentage%" -PercentComplete $Percentage
-
-                        if ($resolution) {
-                            $memberIds += "https://graph.microsoft.com/v1.0/directoryObjects/$($resolution.EntraDeviceId)"
+                try {
+                    Write-Progress -Activity 'Resolving Entra Devices' -Status "$groupName - $deviceCount devices" -PercentComplete 0
+                    foreach ($resolved in @(Resolve-NCIntuneManagedDeviceEntraMembers -ManagedDevices $devices -DeviceIds @($uniqueDeviceIds))) {
+                        if ($resolved.Resolution) {
                             $entraDevices += @{
-                                IntuneDeviceId = $resolution.IntuneDeviceId
-                                EntraDeviceId  = $resolution.EntraDeviceId
-                                DeviceName     = $resolution.DeviceName
+                                IntuneDeviceId = $resolved.Resolution.IntuneDeviceId
+                                EntraDeviceId  = $resolved.Resolution.EntraDeviceId
+                                DeviceName     = $resolved.Resolution.DeviceName
                             }
                         }
                     }
-                    catch {
-                        Write-NCMessage "Error looking up Entra ID device for $($deviceId): $($_.Exception.Message)" -Level ERROR
-                    }
+                }
+                catch {
+                    Write-NCMessage "Error looking up Entra ID devices for group $($groupName): $($_.Exception.Message)" -Level ERROR
                 }
 
                 Write-Progress -Activity 'Resolving Entra Devices' -Completed
@@ -1193,33 +1304,27 @@ function New-IntuneAppBasedGroup {
                             $currentMembersUri = "https://graph.microsoft.com/v1.0/groups/$($existingGroup.id)/members"
                             $currentMembers = @(Invoke-NCGraphAllPagesCore -Uri $currentMembersUri)
                             $currentMemberIds = $currentMembers | ForEach-Object { $_.id }
+                            $currentMemberNames = @{}
+                            foreach ($currentMember in $currentMembers) {
+                                if ($currentMember.id -and $currentMember.displayName) { $currentMemberNames[[string]$currentMember.id] = [string]$currentMember.displayName }
+                            }
 
                             $entraDeviceIds = $entraDevices | ForEach-Object { $_.EntraDeviceId }
-                            $deviceIdsToAdd = $entraDeviceIds | Where-Object { $_ -notin $currentMemberIds }
-                            $deviceIdsToRemove = $currentMemberIds | Where-Object { $_ -notin $entraDeviceIds }
+                            $deviceIdsToAdd = @($entraDeviceIds | Where-Object { $_ -notin $currentMemberIds })
+                            $deviceIdsToRemove = @($currentMemberIds | Where-Object { $_ -notin $entraDeviceIds })
+                            $devicesToAdd = @($entraDevices | Where-Object { $_.EntraDeviceId -in $deviceIdsToAdd })
 
-                            if ($deviceIdsToAdd.Count -gt 0) {
-                                $batchSize = 20
-                                for ($i = 0; $i -lt $deviceIdsToAdd.Count; $i += $batchSize) {
-                                    $batch = $deviceIdsToAdd[$i..([Math]::Min($i + $batchSize - 1, $deviceIdsToAdd.Count - 1))]
-                                    $addBody = @{
-                                        'members@odata.bind' = $batch | ForEach-Object {
-                                            "https://graph.microsoft.com/v1.0/directoryObjects/$_"
-                                        }
-                                    } | ConvertTo-Json -Depth 10
-
-                                    Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($existingGroup.id)" -Method PATCH -Body $addBody -ContentType 'application/json'
-                                    $memberLabel = if ($batch.Count -eq 1) { 'member' } else { 'members' }
-                                    Write-Verbose "Added batch of $($batch.Count) $memberLabel"
-                                }
+                            $memberStats.Added = 0
+                            $memberStats.Removed = 0
+                            if ($devicesToAdd.Count -gt 0) {
+                                & $addGroupMembers -GroupId ([string]$existingGroup.id) -GroupLabel $groupName -Members $devicesToAdd -FailureFormat "Failed to add device '{0}' to '$($groupName.Replace('{', '{{').Replace('}', '}}'))': {1}"
                             }
 
-                            foreach ($memberId in $deviceIdsToRemove) {
-                                $removeUri = "https://graph.microsoft.com/v1.0/groups/$($existingGroup.id)/members/$memberId/`$ref"
-                                Invoke-MgGraphRequest -Uri $removeUri -Method DELETE
+                            if ($deviceIdsToRemove.Count -gt 0) {
+                                & $removeGroupMembers -GroupId ([string]$existingGroup.id) -GroupLabel $groupName -MemberIds $deviceIdsToRemove -MemberNames $currentMemberNames
                             }
 
-                            Write-NCMessage "Updated group: $groupName (Added: $($deviceIdsToAdd.Count), Removed: $($deviceIdsToRemove.Count))" -Level SUCCESS
+                            Write-NCMessage "Updated group: $groupName (Added: $($memberStats.Added), Removed: $($memberStats.Removed))" -Level SUCCESS
                             if ($deviceIdsToAdd.Count -gt 0) {
                                 Write-Verbose "Added devices:"
                                 foreach ($deviceId in $deviceIdsToAdd) {
@@ -1250,26 +1355,21 @@ function New-IntuneAppBasedGroup {
 
                             $newGroup = Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/groups' -Method POST -Body $groupBody -ContentType 'application/json'
                             Write-NCMessage "Created group: $groupName $($newGroup.id)" -Level SUCCESS
+                            $groupLookup[$groupName] = [pscustomobject]@{ id = $newGroup.id; displayName = $groupName }
+                            $null = $groupLookupFailed.Remove($groupName)
 
-                            if ($memberIds.Count -gt 0) {
+                            if ($entraDevices.Count -gt 0) {
                                 try {
-                                    $batchSize = 20
-                                    for ($i = 0; $i -lt $memberIds.Count; $i += $batchSize) {
-                                        $batch = $memberIds[$i..([Math]::Min($i + $batchSize - 1, $memberIds.Count - 1))]
-                                        $addMembersBody = @{
-                                            'members@odata.bind' = $batch
-                                        } | ConvertTo-Json -Depth 10
+                                    $memberStats.Added = 0
+                                    & $addGroupMembers -GroupId ([string]$newGroup.id) -GroupLabel $groupName -Members $entraDevices -FailureFormat "Group created but failed to add device '{0}': {1}"
 
-                                        Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($newGroup.id)" -Method PATCH -Body $addMembersBody -ContentType 'application/json'
-                                        $memberLabel = if ($batch.Count -eq 1) { 'member' } else { 'members' }
-                                        Write-Verbose "Added batch of $($batch.Count) $memberLabel"
-                                    }
-
-                                    $groupDeviceLabel = if ($memberIds.Count -eq 1) { 'device' } else { 'devices' }
-                                    Write-NCMessage "Added $($memberIds.Count) $groupDeviceLabel to group" -Level SUCCESS
-                                    Write-Verbose "Added devices:"
-                                    foreach ($device in $entraDevices) {
-                                        Write-Verbose "  - $($device.DeviceName)"
+                                    if ($memberStats.Added -gt 0) {
+                                        $groupDeviceLabel = if ($memberStats.Added -eq 1) { 'device' } else { 'devices' }
+                                        Write-NCMessage "Added $($memberStats.Added) $groupDeviceLabel to group" -Level SUCCESS
+                                        Write-Verbose "Added devices:"
+                                        foreach ($device in $entraDevices) {
+                                            Write-Verbose "  - $($device.DeviceName)"
+                                        }
                                     }
                                 }
                                 catch {

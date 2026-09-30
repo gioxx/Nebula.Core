@@ -46,7 +46,128 @@ function Get-NCCoreProperty {
     return $null
 }
 
+function Resolve-NCIntuneManagedDeviceEntraMembers {
+    <#
+    .SYNOPSIS
+        Resolves the Entra device object of many Intune managed devices using Graph batches.
+    .DESCRIPTION
+        Refreshes the Azure AD device id of devices that lack it (beta managedDevices, 20 per request) and
+        looks up the matching Entra device (v1.0 devices filter, 20 per request). Returns one object per
+        input id, in input order, with DeviceId and Resolution (null when the device cannot be resolved).
+        Warnings and errors use the same text as the single-device resolver.
+    .PARAMETER ManagedDevices
+        Managed devices already retrieved from Intune.
+    .PARAMETER DeviceIds
+        Intune managed device ids to resolve.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$ManagedDevices,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$DeviceIds
+    )
+
+    if (@($DeviceIds).Count -eq 0) {
+        return
+    }
+
+    $devicesById = @{}
+    foreach ($managedDevice in @($ManagedDevices)) {
+        $key = [string]$managedDevice.id
+        if (-not $devicesById.ContainsKey($key)) { $devicesById[$key] = $managedDevice }
+    }
+
+    $entries = @(foreach ($deviceId in $DeviceIds) {
+            $plain = if ($devicesById.ContainsKey([string]$deviceId)) { Convert-NCGraphObjectToPlainObject -Object $devicesById[[string]$deviceId] } else { $null }
+            $label = Get-NCCoreProperty -Object $plain -Names @('deviceName', 'DeviceName', 'displayName', 'DisplayName', 'id', 'Id')
+            if ([string]::IsNullOrWhiteSpace($label)) { $label = [string]$deviceId }
+            [pscustomobject]@{
+                DeviceId        = [string]$deviceId
+                Plain           = $plain
+                Label           = $label
+                AzureAdDeviceId = (Get-NCCoreProperty -Object $plain -Names @('azureADDeviceId', 'azureActiveDirectoryDeviceId', 'azureAdDeviceId'))
+                DetailError     = $null
+                EntraDevice     = $null
+                LookupError     = $null
+            }
+        })
+
+    # Refresh the Azure AD device id for devices that do not carry it
+    $refresh = @($entries | Where-Object { $_.Plain -and -not $_.AzureAdDeviceId })
+    if ($refresh.Count -gt 0) {
+        $refreshRequests = @(for ($i = 0; $i -lt $refresh.Count; $i++) {
+                @{ Id = "r$i"; Method = 'GET'; Url = "/deviceManagement/managedDevices/$([uri]::EscapeDataString($refresh[$i].DeviceId))?`$select=id,deviceName,operatingSystem,userPrincipalName,azureADDeviceId,azureActiveDirectoryDeviceId" }
+            })
+        $refreshResponses = @(Invoke-NCGraphBatch -Requests $refreshRequests -ApiVersion 'beta' -Activity 'Reading Intune device details')
+        for ($i = 0; $i -lt $refresh.Count; $i++) {
+            if ($refreshResponses[$i].Success) {
+                $detailsPlain = Convert-NCGraphObjectToPlainObject -Object $refreshResponses[$i].Body
+                $refresh[$i].AzureAdDeviceId = Get-NCCoreProperty -Object $detailsPlain -Names @('azureADDeviceId', 'azureActiveDirectoryDeviceId', 'azureAdDeviceId')
+            }
+            else {
+                $refresh[$i].DetailError = $refreshResponses[$i].ErrorMessage
+            }
+        }
+    }
+
+    # Look up the Entra device objects
+    $lookup = @($entries | Where-Object { $_.Plain -and $_.AzureAdDeviceId })
+    if ($lookup.Count -gt 0) {
+        $lookupRequests = @(for ($i = 0; $i -lt $lookup.Count; $i++) {
+                $filter = "deviceId eq '$(([string]$lookup[$i].AzureAdDeviceId).Replace("'", "''"))'"
+                @{ Id = "e$i"; Method = 'GET'; Url = "/devices?`$filter=$([uri]::EscapeDataString($filter))" }
+            })
+        $lookupResponses = @(Invoke-NCGraphBatch -Requests $lookupRequests -ApiVersion 'v1.0' -Activity 'Resolving Entra devices')
+        for ($i = 0; $i -lt $lookup.Count; $i++) {
+            if ($lookupResponses[$i].Success) {
+                $values = @($lookupResponses[$i].Body.value)
+                if ($values.Count -gt 0 -and $null -ne $values[0]) { $lookup[$i].EntraDevice = $values[0] }
+            }
+            else {
+                $lookup[$i].LookupError = $lookupResponses[$i].ErrorMessage
+            }
+        }
+    }
+
+    foreach ($entry in $entries) {
+        if ($entry.DetailError) {
+            Write-NCMessage "Unable to refresh Intune device details for $($entry.Label): $($entry.DetailError)" -Level WARNING
+        }
+
+        $resolution = $null
+        if (-not $entry.Plain -or -not $entry.AzureAdDeviceId) {
+            Write-NCMessage "No Azure AD Device ID for: $($entry.Label)" -Level WARNING
+        }
+        elseif ($entry.LookupError) {
+            Write-NCMessage "Error looking up Entra ID device for $($entry.Label): $($entry.LookupError)" -Level ERROR
+        }
+        elseif ($entry.EntraDevice) {
+            Write-Verbose "Found Entra ID device: $($entry.Label) -> $($entry.EntraDevice.id)"
+            $resolution = [pscustomobject]@{
+                IntuneDeviceId  = $entry.DeviceId
+                EntraDeviceId   = $entry.EntraDevice.id
+                DeviceName      = $entry.Label
+                AzureAdDeviceId = $entry.AzureAdDeviceId
+            }
+        }
+        else {
+            Write-NCMessage "Device not found in Entra ID: $($entry.Label) (Azure AD Device ID: $($entry.AzureAdDeviceId))" -Level WARNING
+        }
+
+        [pscustomobject]@{ DeviceId = $entry.DeviceId; Resolution = $resolution }
+    }
+}
+
 function Resolve-NCIntuneManagedDeviceEntraMember {
+    <#
+    .SYNOPSIS
+        Resolves the Entra device object of one Intune managed device.
+    .DESCRIPTION
+        Single-device wrapper around Resolve-NCIntuneManagedDeviceEntraMembers.
+    #>
     param(
         [Parameter(Mandatory = $true)]
         [object[]]$ManagedDevices,
@@ -54,61 +175,7 @@ function Resolve-NCIntuneManagedDeviceEntraMember {
         [string]$DeviceId
     )
 
-    $intuneDevice = $ManagedDevices | Where-Object { [string]$_.id -eq [string]$DeviceId } | Select-Object -First 1
-    $intuneDevicePlain = Convert-NCGraphObjectToPlainObject -Object $intuneDevice
-
-    $deviceLabel = Get-NCCoreProperty -Object $intuneDevicePlain -Names @('deviceName', 'DeviceName', 'displayName', 'DisplayName', 'id', 'Id')
-    if ([string]::IsNullOrWhiteSpace($deviceLabel)) {
-        $deviceLabel = [string]$DeviceId
-    }
-
-    $azureAdDeviceId = Get-NCCoreProperty -Object $intuneDevicePlain -Names @('azureADDeviceId', 'azureActiveDirectoryDeviceId', 'azureAdDeviceId')
-    if ($intuneDevicePlain -and -not $azureAdDeviceId) {
-        try {
-            $deviceDetailUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$DeviceId?`$select=id,deviceName,operatingSystem,userPrincipalName,azureADDeviceId,azureActiveDirectoryDeviceId"
-            $deviceDetails = Invoke-MgGraphRequest -Uri $deviceDetailUri -Method GET
-            $deviceDetailsPlain = Convert-NCGraphObjectToPlainObject -Object $deviceDetails
-            $azureAdDeviceId = Get-NCCoreProperty -Object $deviceDetailsPlain -Names @('azureADDeviceId', 'azureActiveDirectoryDeviceId', 'azureAdDeviceId')
-        }
-        catch {
-            Write-NCMessage "Unable to refresh Intune device details for ${deviceLabel}: $($_.Exception.Message)" -Level WARNING
-        }
-    }
-
-    if (-not $intuneDevicePlain) {
-        Write-NCMessage "No Azure AD Device ID for: $deviceLabel" -Level WARNING
-        return $null
-    }
-
-    if (-not $azureAdDeviceId) {
-        Write-NCMessage "No Azure AD Device ID for: $deviceLabel" -Level WARNING
-        return $null
-    }
-
-    $filter = "deviceId eq '$azureAdDeviceId'"
-    $entraDeviceUri = "https://graph.microsoft.com/v1.0/devices?`$filter=$filter"
-
-    try {
-        $entraDeviceResponse = Invoke-MgGraphRequest -Uri $entraDeviceUri -Method GET
-    }
-    catch {
-        Write-NCMessage "Error looking up Entra ID device for ${deviceLabel}: $($_.Exception.Message)" -Level ERROR
-        return $null
-    }
-
-    if ($entraDeviceResponse.value -and $entraDeviceResponse.value.Count -gt 0) {
-        $entraDevice = $entraDeviceResponse.value[0]
-        Write-Verbose "Found Entra ID device: $deviceLabel -> $($entraDevice.id)"
-        return [pscustomobject]@{
-            IntuneDeviceId  = $DeviceId
-            EntraDeviceId   = $entraDevice.id
-            DeviceName      = $deviceLabel
-            AzureAdDeviceId = $azureAdDeviceId
-        }
-    }
-
-    Write-NCMessage "Device not found in Entra ID: $deviceLabel (Azure AD Device ID: $azureAdDeviceId)" -Level WARNING
-    return $null
+    return (@(Resolve-NCIntuneManagedDeviceEntraMembers -ManagedDevices $ManagedDevices -DeviceIds @($DeviceId)) | Select-Object -First 1).Resolution
 }
 
 function Invoke-NCIntuneGroupUsageCore {
@@ -241,67 +308,123 @@ function Invoke-NCIntuneGroupUsageCore {
         return $ids
     }
 
-    function Get-NCCoreAssignmentRecords {
+    function Initialize-NCCoreGroupNames {
+        param([string[]]$Ids)
+
+        if (-not $script:NCIntuneGroupNameCache) {
+            $script:NCIntuneGroupNameCache = @{}
+        }
+
+        $missing = @($Ids | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and -not $script:NCIntuneGroupNameCache.ContainsKey($_) } | Select-Object -Unique)
+        if ($missing.Count -eq 0) { return }
+
+        $requests = @(for ($i = 0; $i -lt $missing.Count; $i++) {
+                @{ Id = "g$i"; Method = 'GET'; Url = "/groups/$([uri]::EscapeDataString($missing[$i]))?`$select=id,displayName" }
+            })
+        $responses = @(Invoke-NCGraphBatch -Requests $requests -ApiVersion 'v1.0' -Activity 'Resolving group names')
+        for ($i = 0; $i -lt $missing.Count; $i++) {
+            $name = $null
+            if ($responses[$i].Success -and $null -ne $responses[$i].Body) {
+                $name = $responses[$i].Body.displayName
+            }
+            $script:NCIntuneGroupNameCache[$missing[$i]] = $name
+        }
+    }
+
+    function Get-NCCoreAssignmentRecordsBatch {
         param(
             [string]$EntityType,
-            [string]$EntityId,
+            [string[]]$EntityIds,
             [System.Collections.Generic.HashSet[string]]$EffectiveGroupIds,
             [string]$RequestedGroupId
         )
 
-        $uri = switch ($EntityType) {
-            'deviceConfigurations' { "beta/deviceManagement/deviceConfigurations('$EntityId')/assignments" }
-            'configurationPolicies' { "beta/deviceManagement/configurationPolicies('$EntityId')/assignments" }
-            'mobileApps' { "beta/deviceAppManagement/mobileApps('$EntityId')/assignments" }
+        $map = @{}
+        $ids = @($EntityIds | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+        if ($ids.Count -eq 0) { return $map }
+
+        $segment = switch ($EntityType) {
+            'deviceConfigurations' { 'deviceManagement/deviceConfigurations' }
+            'configurationPolicies' { 'deviceManagement/configurationPolicies' }
+            'mobileApps' { 'deviceAppManagement/mobileApps' }
             default { $null }
         }
-        if (-not $uri) { return @() }
-
-        try {
-            $assignments = @(Invoke-NCGraphPagedRequestCore -Uri $uri)
-        }
-        catch {
-            Write-NCMessage "Unable to read assignments for '$EntityType' object '$EntityId': $($_.Exception.Message)" -Level WARNING
-            return @()
+        if (-not $segment) {
+            foreach ($id in $ids) { $map[$id] = @() }
+            return $map
         }
 
-        $records = [System.Collections.Generic.List[object]]::new()
-        foreach ($assignment in $assignments) {
-            $target = Get-NCCoreProperty -Object $assignment -Names @('target', 'Target')
-            if (-not $target) { continue }
+        $requests = @(for ($i = 0; $i -lt $ids.Count; $i++) {
+                @{ Id = "a$i"; Method = 'GET'; Url = "/$segment('$([uri]::EscapeDataString($ids[$i]))')/assignments" }
+            })
+        $responses = @(Invoke-NCGraphBatchCollection -Requests $requests -ApiVersion 'beta' -Activity "Reading $EntityType assignments")
 
-            $odataType = [string](Get-NCCoreProperty -Object $target -Names @('@odata.type'))
-            $targetGroupId = [string](Get-NCCoreProperty -Object $target -Names @('groupId', 'GroupId'))
-            $intent = [string](Get-NCCoreProperty -Object $assignment -Names @('intent', 'Intent'))
-            if (-not [string]::IsNullOrWhiteSpace($intent)) { $intent = $intent.ToLowerInvariant() }
-
-            $reason = $null
-            switch ($odataType) {
-                '#microsoft.graph.groupAssignmentTarget' {
-                    if ($EffectiveGroupIds.Contains($targetGroupId)) {
-                        $reason = if ($targetGroupId -eq $RequestedGroupId) { 'Direct Assignment' } else { 'Group Assignment' }
-                    }
-                }
-                '#microsoft.graph.exclusionGroupAssignmentTarget' {
-                    if ($EffectiveGroupIds.Contains($targetGroupId)) {
-                        $reason = if ($targetGroupId -eq $RequestedGroupId) { 'Direct Exclusion' } else { 'Group Exclusion' }
-                    }
-                }
+        $pending = [System.Collections.Generic.List[object]]::new()
+        for ($i = 0; $i -lt $ids.Count; $i++) {
+            $map[$ids[$i]] = @()
+            if (-not $responses[$i].Success) {
+                Write-NCMessage "Unable to read assignments for '$EntityType' object '$($ids[$i])': $($responses[$i].ErrorMessage)" -Level WARNING
+                continue
             }
 
-            if (-not $reason -and -not $Diagnostic.IsPresent) { continue }
+            foreach ($assignment in @($responses[$i].Items)) {
+                if ($null -eq $assignment) { continue }
+                $target = Get-NCCoreProperty -Object $assignment -Names @('target', 'Target')
+                if (-not $target) { continue }
 
-            $records.Add([pscustomobject]@{
-                    Reason          = $reason
-                    GroupId         = $targetGroupId
-                    GroupName       = Resolve-NCCoreGroupName -Id $targetGroupId
-                    AssignmentId    = [string](Get-NCCoreProperty -Object $assignment -Names @('id', 'Id'))
-                    TargetODataType = $odataType
-                    Intent          = $intent
-                }) | Out-Null
+                $odataType = [string](Get-NCCoreProperty -Object $target -Names @('@odata.type'))
+                $targetGroupId = [string](Get-NCCoreProperty -Object $target -Names @('groupId', 'GroupId'))
+                $intent = [string](Get-NCCoreProperty -Object $assignment -Names @('intent', 'Intent'))
+                if (-not [string]::IsNullOrWhiteSpace($intent)) { $intent = $intent.ToLowerInvariant() }
+
+                $reason = $null
+                switch ($odataType) {
+                    '#microsoft.graph.groupAssignmentTarget' {
+                        if ($EffectiveGroupIds.Contains($targetGroupId)) {
+                            $reason = if ($targetGroupId -eq $RequestedGroupId) { 'Direct Assignment' } else { 'Group Assignment' }
+                        }
+                    }
+                    '#microsoft.graph.exclusionGroupAssignmentTarget' {
+                        if ($EffectiveGroupIds.Contains($targetGroupId)) {
+                            $reason = if ($targetGroupId -eq $RequestedGroupId) { 'Direct Exclusion' } else { 'Group Exclusion' }
+                        }
+                    }
+                }
+
+                if (-not $reason -and -not $Diagnostic.IsPresent) { continue }
+
+                $pending.Add([pscustomobject]@{
+                        EntityId        = $ids[$i]
+                        Reason          = $reason
+                        GroupId         = $targetGroupId
+                        AssignmentId    = [string](Get-NCCoreProperty -Object $assignment -Names @('id', 'Id'))
+                        TargetODataType = $odataType
+                        Intent          = $intent
+                    }) | Out-Null
+            }
         }
 
-        return @($records)
+        Initialize-NCCoreGroupNames -Ids @($pending | ForEach-Object { $_.GroupId })
+
+        $records = @{}
+        foreach ($entry in $pending) {
+            if (-not $records.ContainsKey($entry.EntityId)) {
+                $records[$entry.EntityId] = [System.Collections.Generic.List[object]]::new()
+            }
+            $records[$entry.EntityId].Add([pscustomobject]@{
+                    Reason          = $entry.Reason
+                    GroupId         = $entry.GroupId
+                    GroupName       = Resolve-NCCoreGroupName -Id $entry.GroupId
+                    AssignmentId    = $entry.AssignmentId
+                    TargetODataType = $entry.TargetODataType
+                    Intent          = $entry.Intent
+                }) | Out-Null
+        }
+        foreach ($id in $records.Keys) {
+            $map[$id] = @($records[$id])
+        }
+
+        return $map
     }
 
     function Resolve-NCCoreAssignmentValue {
@@ -422,26 +545,32 @@ function Invoke-NCIntuneGroupUsageCore {
     Add-EmptyLine
     Write-Verbose "Scanning $($scannedIds.Count) Intune profile(s) for group '$($resolvedGroup.DisplayName)' ..."
 
-    foreach ($entity in $deviceConfigurations) {
-        $entityId = [string](Get-NCCoreProperty -Object $entity -Names @('id', 'Id'))
-        if ([string]::IsNullOrWhiteSpace($entityId)) { continue }
-        $assignments = @(Get-NCCoreAssignmentRecords -EntityType 'deviceConfigurations' -EntityId $entityId -EffectiveGroupIds $effectiveGroupIds -RequestedGroupId $resolvedGroup.Id)
+    $getEntityId = { param($entity) [string](Get-NCCoreProperty -Object $entity -Names @('id', 'Id')) }
+    $configurationEntities = @($deviceConfigurations | Where-Object { -not [string]::IsNullOrWhiteSpace((& $getEntityId $_)) })
+    $policyEntities = @($configurationPolicies | Where-Object { -not [string]::IsNullOrWhiteSpace((& $getEntityId $_)) })
+    $appEntities = @($mobileApps | Where-Object { -not ($_.isFeatured -or $_.isBuiltIn) -and -not [string]::IsNullOrWhiteSpace((& $getEntityId $_)) })
+
+    $profilesToRead = $configurationEntities.Count + $policyEntities.Count + $appEntities.Count
+    if ($profilesToRead -gt 0) {
+        Write-NCMessage "Processing $profilesToRead Intune profile(s) in Graph batches (20 per request) ..." -Level INFO
+    }
+
+    $configurationAssignments = Get-NCCoreAssignmentRecordsBatch -EntityType 'deviceConfigurations' -EntityIds @($configurationEntities | ForEach-Object { & $getEntityId $_ }) -EffectiveGroupIds $effectiveGroupIds -RequestedGroupId $resolvedGroup.Id
+    foreach ($entity in $configurationEntities) {
+        $assignments = @($configurationAssignments[(& $getEntityId $entity)])
         Add-NCCoreResult -Results $results -Category 'Device Configuration' -Item $entity -Source 'deviceConfigurations' -Assignments $assignments -ResolvedGroup $resolvedGroup
     }
 
-    foreach ($entity in $configurationPolicies) {
-        $entityId = [string](Get-NCCoreProperty -Object $entity -Names @('id', 'Id'))
-        if ([string]::IsNullOrWhiteSpace($entityId)) { continue }
-        $assignments = @(Get-NCCoreAssignmentRecords -EntityType 'configurationPolicies' -EntityId $entityId -EffectiveGroupIds $effectiveGroupIds -RequestedGroupId $resolvedGroup.Id)
+    $policyAssignments = Get-NCCoreAssignmentRecordsBatch -EntityType 'configurationPolicies' -EntityIds @($policyEntities | ForEach-Object { & $getEntityId $_ }) -EffectiveGroupIds $effectiveGroupIds -RequestedGroupId $resolvedGroup.Id
+    foreach ($entity in $policyEntities) {
+        $assignments = @($policyAssignments[(& $getEntityId $entity)])
         Add-NCCoreResult -Results $results -Category 'Settings Catalog Policy' -Item $entity -Source 'configurationPolicies' -Assignments $assignments -ResolvedGroup $resolvedGroup
     }
 
-    foreach ($entity in $mobileApps) {
-        if ($entity.isFeatured -or $entity.isBuiltIn) { continue }
-        $entityId = [string](Get-NCCoreProperty -Object $entity -Names @('id', 'Id'))
-        if ([string]::IsNullOrWhiteSpace($entityId)) { continue }
-
-        $assignments = @(Get-NCCoreAssignmentRecords -EntityType 'mobileApps' -EntityId $entityId -EffectiveGroupIds $effectiveGroupIds -RequestedGroupId $resolvedGroup.Id)
+    $appAssignments = Get-NCCoreAssignmentRecordsBatch -EntityType 'mobileApps' -EntityIds @($appEntities | ForEach-Object { & $getEntityId $_ }) -EffectiveGroupIds $effectiveGroupIds -RequestedGroupId $resolvedGroup.Id
+    foreach ($entity in $appEntities) {
+        $entityId = & $getEntityId $entity
+        $assignments = @($appAssignments[$entityId])
         if ($assignments.Count -eq 0 -and -not $Diagnostic.IsPresent) { continue }
 
         $intentGroups = @{}
