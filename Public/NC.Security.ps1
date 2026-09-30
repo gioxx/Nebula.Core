@@ -890,6 +890,7 @@ function Revoke-UserSessions {
                             Id     = "m$i"
                             Method = 'POST'
                             Url    = "/users/$([uri]::EscapeDataString([string]$approved[$i].id))/revokeSignInSessions"
+                            Body   = @{}
                         }
                     })
                 $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity 'Revoking sessions')

@@ -145,7 +145,7 @@ Describe 'Security batching' {
     }
 
     Context 'Revoke-UserSessions' {
-        It 'uses 2 Graph calls for 14 users and POSTs revokeSignInSessions without body' {
+        It 'uses 2 Graph calls for 14 users and POSTs revokeSignInSessions with an empty JSON body' {
             Set-SecurityGraphMock
             New-Upns 14 | Revoke-UserSessions -Confirm:$false
 
@@ -153,6 +153,11 @@ Describe 'Security batching' {
             $posts = @($global:SeenRequests | Where-Object { $_.method -eq 'POST' })
             $posts.Count | Should -Be 14
             $posts[0].url | Should -Be '/users/id1/revokeSignInSessions'
+            foreach ($post in $posts) {
+                $post.PSObject.Properties['body'] | Should -Not -BeNullOrEmpty
+                (ConvertTo-Json -InputObject $post.body -Compress) | Should -Be '{}'
+                $post.headers.'Content-Type' | Should -Be 'application/json'
+            }
             Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'SUCCESS' -and $Message -eq 'Revoked sessions for 14 users.' }
         }
 
