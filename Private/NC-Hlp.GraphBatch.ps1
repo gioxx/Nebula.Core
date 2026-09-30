@@ -318,3 +318,139 @@ function Invoke-NCGraphBatch {
         $results[[string]$request.Id]
     }
 }
+
+function Invoke-NCGraphBatchCollection {
+    <#
+    .SYNOPSIS
+        Batches GET requests for Graph collections and returns every item of each collection.
+    .DESCRIPTION
+        Sends the requests through Invoke-NCGraphBatch; for each successful response, returns the first page
+        plus every page reached by following @odata.nextLink.
+    .PARAMETER Requests
+        GET requests shaped as @{ Id; Method = 'GET'; Url; Headers }.
+    .PARAMETER ApiVersion
+        Graph API version.
+    .PARAMETER Activity
+        Write-Progress activity label.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Requests,
+        [ValidateSet('v1.0', 'beta')]
+        [string]$ApiVersion = 'v1.0',
+        [string]$Activity = 'Microsoft Graph batch'
+    )
+
+    foreach ($result in @(Invoke-NCGraphBatch -Requests $Requests -ApiVersion $ApiVersion -Activity $Activity)) {
+        $items = @()
+        if ($result.Success -and $null -ne $result.Body) {
+            $body = $result.Body
+            if ($null -ne $body.value) {
+                $items = @($body.value | ForEach-Object { if ($_ -is [System.Collections.IDictionary]) { [pscustomobject]$_ } else { $_ } })
+            }
+            $nextLink = $body.'@odata.nextLink'
+            if ($nextLink) {
+                $items += @(Invoke-NCGraphAllPagesCore -Uri $nextLink)
+            }
+        }
+
+        [pscustomobject]@{
+            Id           = $result.Id
+            Status       = $result.Status
+            Success      = $result.Success
+            Items        = $items
+            ErrorCode    = $result.ErrorCode
+            ErrorMessage = $result.ErrorMessage
+        }
+    }
+}
+
+function Resolve-NCGraphUserBatch {
+    <#
+    .SYNOPSIS
+        Resolves many user identifiers with batched Graph lookups.
+    .DESCRIPTION
+        Looks every identifier up as GET /users/{identifier} in $batch requests. Only identifiers that Graph
+        reports as not found fall back, one by one, to Find-UserRecipient -PreferGraphIdentity (aliases,
+        display names, guests addressed by external mail), followed by one more batched lookup.
+    .PARAMETER Identifier
+        UPNs, mail addresses, object IDs or other identifiers accepted by Find-UserRecipient.
+    .PARAMETER Property
+        User properties to select.
+    .PARAMETER Activity
+        Write-Progress activity label.
+    .OUTPUTS
+        Case-insensitive ordered dictionary: identifier -> user object, or $null when not found.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$Identifier,
+        [string[]]$Property = @('id', 'userPrincipalName', 'displayName', 'mail'),
+        [string]$Activity = 'Resolving users'
+    )
+
+    $map = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $unique = [System.Collections.Generic.List[string]]::new()
+    foreach ($value in $Identifier) {
+        if ([string]::IsNullOrWhiteSpace($value)) { continue }
+        $trimmed = $value.Trim()
+        if (-not $map.Contains($trimmed)) {
+            $map[$trimmed] = $null
+            $unique.Add($trimmed)
+        }
+    }
+
+    if ($unique.Count -eq 0) {
+        return $map
+    }
+
+    $select = (@($Property | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ',')
+    $newLookup = {
+        param([string]$Key, [string]$Lookup)
+        @{ Id = $Key; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString($Lookup))?`$select=$select" }
+    }
+
+    $requests = @(foreach ($value in $unique) { & $newLookup $value $value })
+    $fallback = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($result in @(Invoke-NCGraphBatch -Requests $requests -Activity $Activity)) {
+        if ($result.Success) {
+            $map[$result.Id] = [pscustomobject]$result.Body
+            continue
+        }
+        if ($result.Status -eq 404) {
+            $fallback.Add($result.Id)
+            continue
+        }
+        Write-NCMessage "Unable to resolve user '$($result.Id)': $($result.ErrorMessage)" -Level ERROR
+    }
+
+    if ($fallback.Count -eq 0) {
+        return $map
+    }
+
+    $secondPass = [System.Collections.Generic.List[object]]::new()
+    foreach ($value in $fallback) {
+        $resolvedId = Find-UserRecipient -UserPrincipalName $value -PreferGraphIdentity
+        if ($resolvedId) {
+            $secondPass.Add((& $newLookup $value ([string]$resolvedId)))
+        }
+    }
+
+    if ($secondPass.Count -gt 0) {
+        foreach ($result in @(Invoke-NCGraphBatch -Requests @($secondPass) -Activity $Activity)) {
+            if ($result.Success) {
+                $map[$result.Id] = [pscustomobject]$result.Body
+            }
+            else {
+                Write-NCMessage "Unable to resolve user '$($result.Id)': $($result.ErrorMessage)" -Level ERROR
+            }
+        }
+    }
+
+    return $map
+}

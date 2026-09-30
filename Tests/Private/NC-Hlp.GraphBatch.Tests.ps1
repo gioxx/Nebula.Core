@@ -196,6 +196,122 @@ Describe 'Invoke-NCGraphBatch' {
     }
 }
 
+Describe 'Invoke-NCGraphBatchCollection' {
+    BeforeEach {
+        Mock Start-Sleep {}
+        Mock Write-Progress {}
+    }
+
+    It 'returns the first page and follows nextLink for results that have more pages' {
+        Mock Invoke-MgGraphRequest {
+            @{
+                responses = @(
+                    @{ id = '1'; status = 200; body = @{ value = @(@{ id = 'g1' }); '@odata.nextLink' = 'https://graph.microsoft.com/v1.0/users/u1/memberOf?$skiptoken=abc' } }
+                    @{ id = '2'; status = 200; body = @{ value = @() } }
+                    @{ id = '3'; status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'missing' } } }
+                )
+            }
+        }
+        Mock Invoke-NCGraphAllPagesCore { @([pscustomobject]@{ id = 'g2' }) }
+        $requests = @(
+            @{ Id = 'a'; Method = 'GET'; Url = '/users/u1/memberOf' }
+            @{ Id = 'b'; Method = 'GET'; Url = '/users/u2/memberOf' }
+            @{ Id = 'c'; Method = 'GET'; Url = '/users/u3/memberOf' }
+        )
+
+        $result = @(Invoke-NCGraphBatchCollection -Requests $requests)
+
+        @($result[0].Items).Count | Should -Be 2
+        $result[0].Items[1].id | Should -Be 'g2'
+        @($result[1].Items).Count | Should -Be 0
+        $result[1].Success | Should -BeTrue
+        $result[2].Success | Should -BeFalse
+        @($result[2].Items).Count | Should -Be 0
+        Should -Invoke Invoke-NCGraphAllPagesCore -Times 1 -Exactly -ParameterFilter { $Uri -like '*skiptoken=abc' }
+    }
+}
+
+Describe 'Resolve-NCGraphUserBatch' {
+    BeforeEach {
+        Mock Start-Sleep {}
+        Mock Write-Progress {}
+        Mock Write-NCMessage {}
+    }
+
+    It 'resolves direct identifiers in one batch without the fallback' {
+        Mock Invoke-MgGraphRequest {
+            $payload = $Body | ConvertFrom-Json
+            @{ responses = @(foreach ($r in $payload.requests) { @{ id = $r.id; status = 200; body = @{ id = "id-$($r.id)"; userPrincipalName = ($r.url -replace '^/users/([^?]+)\?.*$', '$1') } } }) }
+        }
+        Mock Find-UserRecipient {}
+
+        $map = Resolve-NCGraphUserBatch -Identifier @('alice@contoso.com', ' bob@contoso.com ', 'ALICE@contoso.com')
+
+        $map.Count | Should -Be 2
+        $map['alice@contoso.com'].userPrincipalName | Should -Be 'alice%40contoso.com'
+        $map['bob@contoso.com'] | Should -Not -BeNullOrEmpty
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly
+        Should -Invoke Find-UserRecipient -Times 0 -Exactly
+    }
+
+    It 'requests the selected properties with an encoded identifier' {
+        $script:urls = @()
+        Mock Invoke-MgGraphRequest {
+            $payload = $Body | ConvertFrom-Json
+            $script:urls = @($payload.requests.url)
+            @{ responses = @(foreach ($r in $payload.requests) { @{ id = $r.id; status = 200; body = @{ id = 'x' } } }) }
+        }
+
+        $null = Resolve-NCGraphUserBatch -Identifier @('guest_contoso.com#EXT#@tenant.onmicrosoft.com') -Property @('id', 'usageLocation')
+
+        $script:urls[0] | Should -Be '/users/guest_contoso.com%23EXT%23%40tenant.onmicrosoft.com?$select=id,usageLocation'
+    }
+
+    It 'falls back to Find-UserRecipient only for identifiers Graph could not find' {
+        $script:calls = 0
+        Mock Invoke-MgGraphRequest {
+            $script:calls++
+            $payload = $Body | ConvertFrom-Json
+            if ($script:calls -eq 1) {
+                return @{
+                    responses = @(
+                        @{ id = '1'; status = 200; body = @{ id = 'id-alice'; userPrincipalName = 'alice@contoso.com' } }
+                        @{ id = '2'; status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'missing' } } }
+                        @{ id = '3'; status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'missing' } } }
+                    )
+                }
+            }
+            @{ responses = @(@{ id = $payload.requests[0].id; status = 200; body = @{ id = 'id-guest'; userPrincipalName = 'guest_ext.com#EXT#@contoso.onmicrosoft.com' } }) }
+        }
+        Mock Find-UserRecipient {
+            if ($UserPrincipalName -eq 'guest@ext.com') { return 'id-guest' }
+        }
+
+        $map = Resolve-NCGraphUserBatch -Identifier @('alice@contoso.com', 'guest@ext.com', 'ghost@contoso.com')
+
+        $map['alice@contoso.com'].id | Should -Be 'id-alice'
+        $map['guest@ext.com'].id | Should -Be 'id-guest'
+        $map['ghost@contoso.com'] | Should -BeNullOrEmpty
+        $map.Contains('ghost@contoso.com') | Should -BeTrue
+        Should -Invoke Find-UserRecipient -Times 2 -Exactly
+        Should -Invoke Find-UserRecipient -Times 0 -Exactly -ParameterFilter { $UserPrincipalName -eq 'alice@contoso.com' }
+        Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly
+    }
+
+    It 'reports non-404 lookup failures with the existing resolve message' {
+        Mock Invoke-MgGraphRequest {
+            @{ responses = @(@{ id = '1'; status = 403; body = @{ error = @{ code = 'Authorization_RequestDenied'; message = 'Insufficient privileges.' } } }) }
+        }
+        Mock Find-UserRecipient {}
+
+        $map = Resolve-NCGraphUserBatch -Identifier @('alice@contoso.com')
+
+        $map['alice@contoso.com'] | Should -BeNullOrEmpty
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -ParameterFilter { $Message -eq "Unable to resolve user 'alice@contoso.com': Insufficient privileges." -and $Level -eq 'ERROR' }
+        Should -Invoke Find-UserRecipient -Times 0 -Exactly
+    }
+}
+
 Describe 'Get-NCGraphDirectoryObjectUri' {
     It 'uses the global endpoint by default' {
         Mock Get-MgContext { [pscustomobject]@{ Environment = 'Global' } }
