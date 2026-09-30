@@ -928,7 +928,12 @@ function Export-MsolAccountSku {
             }
         }
 
-        foreach ($User in $Users) {
+        $allUsers = @($Users)
+        $licenseDetailCache = @{}
+        $batchNoticeShown = $false
+
+        for ($userIndex = 0; $userIndex -lt $allUsers.Count; $userIndex++) {
+            $User = $allUsers[$userIndex]
             $processedCount++
             $Percentage = Get-NCProgressPercent -Current $processedCount -Total $totalUsers
             Write-Progress -Activity "Processing $($User.DisplayName)" -Status "$processedCount out of $totalUsers - $Percentage%" -PercentComplete $Percentage
@@ -940,17 +945,34 @@ function Export-MsolAccountSku {
 
             $processedSinceFlush++
 
-            try {
-                $GraphLicense = Invoke-NCRetry -Action {
-                    Get-MgUserLicenseDetail -UserId $User.Id -ErrorAction Stop
-            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve licenses for $($User.UserPrincipalName)" -OnError {
-                param($attempt, $max, $err)
-                $currentAttempt = if ($attempt) { $attempt } else { '?' }
-                $currentMax = if ($max) { $max } else { $maxAttempts }
-                Write-NCMessage "Failed to retrieve licenses for $($User.UserPrincipalName), attempt $currentAttempt of $currentMax" -Level ERROR
+            # Read license details for this user and the next pending users in one Graph batch (20 per request).
+            if (-not $licenseDetailCache.ContainsKey([string]$User.Id)) {
+                if (-not $batchNoticeShown) {
+                    $batchNoticeShown = $true
+                    Write-NCMessage ("Processing {0} user(s) in Graph batches (20 per request) ..." -f $totalUsers) -Level INFO
+                }
+
+                $pending = [System.Collections.Generic.List[object]]::new()
+                for ($j = $userIndex; $j -lt $allUsers.Count -and $pending.Count -lt 20; $j++) {
+                    $candidate = $allUsers[$j]
+                    if ($processedUsers.Contains($candidate.UserPrincipalName)) { continue }
+                    if ($licenseDetailCache.ContainsKey([string]$candidate.Id)) { continue }
+                    $pending.Add($candidate)
+                }
+
+                $detailRequests = @(for ($k = 0; $k -lt $pending.Count; $k++) {
+                        @{ Id = "l$k"; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString([string]$pending[$k].Id))/licenseDetails" }
+                    })
+                $detailResults = @(Invoke-NCGraphBatchCollection -Requests $detailRequests -Activity 'Reading user licenses')
+                for ($k = 0; $k -lt $pending.Count; $k++) {
+                    $licenseDetailCache[[string]$pending[$k].Id] = $detailResults[$k]
+                }
             }
-        }
-            catch {
+
+            $detailResult = $licenseDetailCache[[string]$User.Id]
+            $licenseDetailCache.Remove([string]$User.Id)
+
+            if (-not $detailResult.Success) {
                 Write-NCMessage "Failed to retrieve licenses for $($User.UserPrincipalName) after $maxAttempts attempts. Skipping." -Level ERROR
                 $consecutiveErrors++
                 if ($MaxConsecutiveErrors -gt 0 -and $consecutiveErrors -ge $MaxConsecutiveErrors) {
@@ -970,6 +992,8 @@ function Export-MsolAccountSku {
                 }
                 continue
             }
+
+            $GraphLicense = if ($null -ne $detailResult.Items) { @($detailResult.Items) } else { @() }
 
             $userMatchesLicenseFilter = -not $License
             $userMatchedLicenseNames = @()
@@ -1466,8 +1490,9 @@ function Get-UserMsolAccountSku {
     begin {
         Set-ProgressAndInfoPreferences
         $initSucceeded = $true
-        $clipboardLines = @()
-        $clipboardHasContent = $false
+        $clipboardLines = [System.Collections.Generic.List[string]]::new()
+        $state = @{ Started = $false; ClipboardHasContent = $false }
+        $queue = [System.Collections.Generic.List[object]]::new()
         $availabilityBySkuId = @{}
 
         try {
@@ -1546,96 +1571,117 @@ function Get-UserMsolAccountSku {
                 }
             }
         }
+
+        # Resolves the queued users, reads their licenses in Graph batches and prints the results.
+        $flush = {
+            $entries = @($queue)
+            $queue.Clear()
+            if ($entries.Count -eq 0) { return }
+
+            if (-not $state.Started) {
+                $state.Started = $true
+                Write-NCMessage "Processing users in Graph batches (20 per request) ..." -Level INFO
+            }
+
+            $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $resolvedUsers = Resolve-NCGraphUserBatch -Identifier $entries -Property @('id', 'displayName', 'userPrincipalName', 'mail') -FailedIdentifier $failedUsers
+
+            $targets = [System.Collections.Generic.List[object]]::new()
+            foreach ($entry in $entries) {
+                $resolved = $resolvedUsers[$entry.Trim()]
+                if (-not $resolved -or -not $resolved.id) {
+                    if (-not $failedUsers.Contains($entry.Trim())) {
+                        Write-NCMessage "Unable to resolve user recipient for $entry" -Level ERROR
+                    }
+                    continue
+                }
+                $targets.Add($resolved)
+            }
+            if ($targets.Count -eq 0) { return }
+
+            $detailRequests = @(for ($i = 0; $i -lt $targets.Count; $i++) {
+                    @{ Id = "l$i"; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString([string]$targets[$i].id))/licenseDetails" }
+                })
+            $detailResults = @(Invoke-NCGraphBatchCollection -Requests $detailRequests -Activity 'Reading user licenses')
+
+            for ($i = 0; $i -lt $targets.Count; $i++) {
+                $user = $targets[$i]
+                $detail = $detailResults[$i]
+
+                Write-NCMessage ("`nProcessing user: {0} <{1}>{2}`n" -f $user.displayName, $user.userPrincipalName, $catalogInfo) -Level SUCCESS
+
+                if (-not $detail.Success) {
+                    Write-NCMessage "Failed to retrieve licenses for $($user.userPrincipalName) after $maxAttempts attempts." -Level ERROR
+                    continue
+                }
+                $GraphLicense = if ($null -ne $detail.Items) { @($detail.Items) } else { @() }
+
+                if ($GraphLicense -and $GraphLicense.Count -gt 0) {
+                    $licensesForClipboard = @()
+                    $availabilityLines = [System.Collections.Generic.List[string]]::new()
+
+                    foreach ($lic in $GraphLicense) {
+                        $skuPart = $lic.SkuPartNumber
+                        $skuId = $lic.SkuId
+                        $matchSource = $null
+                        $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $skuPart -FallbackLookup $customLookup -MatchSource ([ref]$matchSource)
+                        $licensesForClipboard += if ($display) { $display } else { $skuPart }
+                        if ($display) {
+                            $suffix = if ($matchSource -and $matchSource -ne 'Primary') { ' (custom)' } else { '' }
+                            Write-NCMessage ("  - {0}{2} ({1})" -f $display, $skuId, $suffix) -Level INFO
+                        }
+                        else {
+                            Write-Verbose ("  - Unknown license: {0} ({1})" -f $skuPart, $skuId)
+                            Write-NCMessage ("  - {0} ({1})" -f $skuPart, $skuId) -Level WARNING
+                        }
+
+                        if ($CheckAvailability.IsPresent) {
+                            $skuKey = [string]$skuId
+                            $availability = if ($availabilityBySkuId.ContainsKey($skuKey)) { $availabilityBySkuId[$skuKey].Available } else { $null }
+                            $availabilityDisplay = if ($null -ne $availability) { $availability } else { 'N/A' }
+                            $availabilityLabel = if ($display) { $display } else { $skuPart }
+                            $availabilityLines.Add(("  - {0}: {1}" -f $availabilityLabel, $availabilityDisplay)) | Out-Null
+                        }
+                    }
+
+                    if ($CheckAvailability.IsPresent -and $availabilityLines.Count -gt 0) {
+                        Add-EmptyLine
+                        Write-NCMessage "Tenant License Availability:" -Level INFO
+                        foreach ($line in $availabilityLines) {
+                            Write-NCMessage $line -Level INFO
+                        }
+                    }
+
+                    if ($Clipboard.IsPresent) {
+                        $normalized = $licensesForClipboard | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+                        $quoted = $normalized | ForEach-Object { "`"$($_.Replace('"', '\"'))`"" }
+                        if ((@($quoted)).Count -gt 0) {
+                            $clipboardLines.Add(($quoted -join ","))
+                            $state.ClipboardHasContent = $true
+                        }
+                    }
+                }
+                else {
+                    Write-Verbose "No licenses assigned to this user."
+                    Write-NCMessage ("No licenses assigned to user {0}." -f $user.UserPrincipalName) -Level WARNING
+                }
+            }
+        }
     }
 
     process {
         if (-not $initSucceeded) { return }
-        
-        $inputUserPrincipalName = $UserPrincipalName
-        $resolvedGraphIdentity = Find-UserRecipient -UserPrincipalName $inputUserPrincipalName -PreferGraphIdentity
-        if (-not $resolvedGraphIdentity) {
-            Write-NCMessage "Unable to resolve user recipient for $inputUserPrincipalName" -Level ERROR
-            return
-        }
 
-        try {
-            $User = Get-MgUser -UserId $resolvedGraphIdentity -Property Id, DisplayName, UserPrincipalName, Mail -ErrorAction Stop
-        }
-        catch {
-            $detail = if ($ShowErrorDetails.IsPresent) { ": $($_.Exception.Message)" } else { "." }
-            Write-NCMessage ("User {0} not found or query failed{1}" -f $inputUserPrincipalName, $detail) -Level ERROR
-            return
-        }
-
-        Write-NCMessage ("`nProcessing user: {0} <{1}>{2}`n" -f $User.DisplayName, $User.UserPrincipalName, $catalogInfo) -Level SUCCESS
-
-        try {
-            $GraphLicense = Invoke-NCRetry -Action {
-                Get-MgUserLicenseDetail -UserId $User.Id -ErrorAction Stop
-            } -MaxAttempts $maxAttempts -DelaySeconds 5 -OperationDescription "retrieve licenses for $($User.UserPrincipalName)" -OnError {
-                param($attempt, $max, $err)
-                $currentAttempt = if ($attempt) { $attempt } else { '?' }
-                $currentMax = if ($max) { $max } else { $maxAttempts }
-                Write-NCMessage "Failed to retrieve licenses for $($User.UserPrincipalName), attempt $currentAttempt of $currentMax" -Level ERROR
-            }
-        }
-        catch {
-            Write-NCMessage "Failed to retrieve licenses for $($User.UserPrincipalName) after $maxAttempts attempts." -Level ERROR
-            return
-        }
-
-        if ($GraphLicense -and $GraphLicense.Count -gt 0) {
-            $licensesForClipboard = @()
-            $availabilityLines = [System.Collections.Generic.List[string]]::new()
-
-            foreach ($lic in $GraphLicense) {
-                $skuPart = $lic.SkuPartNumber
-                $skuId = $lic.SkuId
-                $matchSource = $null
-                $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $skuPart -FallbackLookup $customLookup -MatchSource ([ref]$matchSource)
-                $licensesForClipboard += if ($display) { $display } else { $skuPart }
-                if ($display) {
-                    $suffix = if ($matchSource -and $matchSource -ne 'Primary') { ' (custom)' } else { '' }
-                    Write-NCMessage ("  - {0}{2} ({1})" -f $display, $skuId, $suffix) -Level INFO
-                }
-                else {
-                    Write-Verbose ("  - Unknown license: {0} ({1})" -f $skuPart, $skuId)
-                    Write-NCMessage ("  - {0} ({1})" -f $skuPart, $skuId) -Level WARNING
-                }
-
-                if ($CheckAvailability.IsPresent) {
-                    $skuKey = [string]$skuId
-                    $availability = if ($availabilityBySkuId.ContainsKey($skuKey)) { $availabilityBySkuId[$skuKey].Available } else { $null }
-                    $availabilityDisplay = if ($null -ne $availability) { $availability } else { 'N/A' }
-                    $availabilityLabel = if ($display) { $display } else { $skuPart }
-                    $availabilityLines.Add(("  - {0}: {1}" -f $availabilityLabel, $availabilityDisplay)) | Out-Null
-                }
-            }
-
-            if ($CheckAvailability.IsPresent -and $availabilityLines.Count -gt 0) {
-                Add-EmptyLine
-                Write-NCMessage "Tenant License Availability:" -Level INFO
-                foreach ($line in $availabilityLines) {
-                    Write-NCMessage $line -Level INFO
-                }
-            }
-
-            if ($Clipboard.IsPresent) {
-                $normalized = $licensesForClipboard | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
-                $quoted = $normalized | ForEach-Object { "`"$($_.Replace('"', '\"'))`"" }
-                if ((@($quoted)).Count -gt 0) {
-                    $clipboardLines += ($quoted -join ",")
-                    $clipboardHasContent = $true
-                }
-            }
-        }
-        else {
-            Write-Verbose "No licenses assigned to this user."
-            Write-NCMessage ("No licenses assigned to user {0}." -f $User.UserPrincipalName) -Level WARNING
+        $queue.Add($UserPrincipalName)
+        if ($queue.Count -ge 20) {
+            & $flush
         }
     }
+
     end {
-        if ($Clipboard.IsPresent -and $clipboardHasContent) {
+        if ($initSucceeded) { & $flush }
+
+        if ($Clipboard.IsPresent -and $state.ClipboardHasContent) {
             $clipboardText = ($clipboardLines -join [Environment]::NewLine)
             try {
                 $clipboardText | Set-Clipboard
@@ -1728,32 +1774,34 @@ function Get-UserUsageLocation {
                 }
             }
 
+            Write-NCMessage ("Processing {0} user(s) in Graph batches (20 per request) ..." -f $queue.Count) -Level INFO
+
             $counter = 0
-            foreach ($upn in $queue) {
-                $counter++
+            for ($offset = 0; $offset -lt $queue.Count; $offset += 20) {
+                $chunk = @($queue[$offset..([Math]::Min($offset + 20, $queue.Count) - 1)])
                 $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
-                Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
+                Write-Progress -Activity "Reading usage location" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
 
-                $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $upn -PreferGraphIdentity
-                if (-not $resolvedPrincipal) {
-                    Write-NCMessage "Unable to resolve user recipient for $upn" -Level ERROR
-                    continue
-                }
+                $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                $resolvedUsers = Resolve-NCGraphUserBatch -Identifier $chunk -Property @('id', 'userPrincipalName', 'displayName', 'usageLocation') -FailedIdentifier $failedUsers
 
-                try {
-                    $user = Get-MgUser -UserId $resolvedPrincipal -Property Id, UserPrincipalName, DisplayName, UsageLocation -ErrorAction Stop
-                }
-                catch {
-                    Write-NCMessage "Unable to retrieve user '$upn'. $($_.Exception.Message)" -Level ERROR
-                    continue
-                }
+                foreach ($upn in $chunk) {
+                    $counter++
+                    $user = $resolvedUsers[$upn.Trim()]
+                    if (-not $user -or -not $user.id) {
+                        if (-not $failedUsers.Contains($upn.Trim())) {
+                            Write-NCMessage "Unable to resolve user recipient for $upn" -Level ERROR
+                        }
+                        continue
+                    }
 
-                [pscustomobject]@{
-                    UserPrincipalName              = $user.UserPrincipalName
-                    DisplayName                    = $user.DisplayName
-                    UsageLocation                  = $user.UsageLocation
-                    ConfiguredDefaultUsageLocation = $defaultUsageLocation
-                    MatchesConfiguredDefault       = (& $normalizeUsageLocation $user.UsageLocation) -eq (& $normalizeUsageLocation $defaultUsageLocation)
+                    [pscustomobject]@{
+                        UserPrincipalName              = $user.userPrincipalName
+                        DisplayName                    = $user.displayName
+                        UsageLocation                  = $user.usageLocation
+                        ConfiguredDefaultUsageLocation = $defaultUsageLocation
+                        MatchesConfiguredDefault       = (& $normalizeUsageLocation $user.usageLocation) -eq (& $normalizeUsageLocation $defaultUsageLocation)
+                    }
                 }
             }
         }
@@ -2422,61 +2470,82 @@ function Set-UserUsageLocation {
             $skippedCount = 0
             $counter = 0
 
-            foreach ($upn in $queue) {
-                $counter++
+            Write-NCMessage ("Processing {0} user(s) in Graph batches (20 per request) ..." -f $queue.Count) -Level INFO
+
+            for ($offset = 0; $offset -lt $queue.Count; $offset += 20) {
+                $chunk = @($queue[$offset..([Math]::Min($offset + 20, $queue.Count) - 1)])
                 $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
-                Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
+                Write-Progress -Activity "Updating usage location" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
 
-                $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $upn -PreferGraphIdentity
-                if (-not $resolvedPrincipal) {
-                    Write-NCMessage "Unable to resolve user recipient for $upn" -Level ERROR
-                    continue
-                }
+                # (a) Resolve the whole chunk.
+                $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                $resolvedUsers = Resolve-NCGraphUserBatch -Identifier $chunk -Property @('id', 'userPrincipalName', 'displayName', 'usageLocation') -FailedIdentifier $failedUsers
 
-                try {
-                    $user = Get-MgUser -UserId $resolvedPrincipal -Property Id,UserPrincipalName,DisplayName,UsageLocation -ErrorAction Stop
-                }
-                catch {
-                    Write-NCMessage "Unable to retrieve user '$upn'. $($_.Exception.Message)" -Level ERROR
-                    continue
-                }
-
-                $currentUsage = & $normalizeUsageLocation $user.UsageLocation
-                if ($currentUsage -eq $targetUsage) {
-                    $skippedCount++
-                    if ($PassThru.IsPresent) {
-                        $results.Add([pscustomobject]@{
-                                UserPrincipalName     = $user.UserPrincipalName
-                                DisplayName           = $user.DisplayName
-                                PreviousUsageLocation = $user.UsageLocation
-                                UsageLocation         = $user.UsageLocation
-                                Action                = 'Skipped'
-                            }) | Out-Null
+                # (b) Decide per user: skip or confirm.
+                $approved = [System.Collections.Generic.List[object]]::new()
+                foreach ($upn in $chunk) {
+                    $counter++
+                    $user = $resolvedUsers[$upn.Trim()]
+                    if (-not $user -or -not $user.id) {
+                        if (-not $failedUsers.Contains($upn.Trim())) {
+                            Write-NCMessage "Unable to resolve user recipient for $upn" -Level ERROR
+                        }
+                        continue
                     }
-                    Write-Verbose "Usage location already set to $targetUsage for $($user.UserPrincipalName)."
-                    continue
-                }
 
-                if (-not $PSCmdlet.ShouldProcess($user.UserPrincipalName, "Set usage location to $targetUsage")) {
-                    continue
-                }
-
-                try {
-                    Update-MgUser -UserId $user.Id -UsageLocation $targetUsage -ErrorAction Stop | Out-Null
-                    $updatedCount++
-                    if ($PassThru.IsPresent) {
-                        $results.Add([pscustomobject]@{
-                                UserPrincipalName     = $user.UserPrincipalName
-                                DisplayName           = $user.DisplayName
-                                PreviousUsageLocation = $user.UsageLocation
-                                UsageLocation         = $targetUsage
-                                Action                = 'Updated'
-                            }) | Out-Null
+                    $currentUsage = & $normalizeUsageLocation $user.usageLocation
+                    if ($currentUsage -eq $targetUsage) {
+                        $skippedCount++
+                        if ($PassThru.IsPresent) {
+                            $results.Add([pscustomobject]@{
+                                    UserPrincipalName     = $user.userPrincipalName
+                                    DisplayName           = $user.displayName
+                                    PreviousUsageLocation = $user.usageLocation
+                                    UsageLocation         = $user.usageLocation
+                                    Action                = 'Skipped'
+                                }) | Out-Null
+                        }
+                        Write-Verbose "Usage location already set to $targetUsage for $($user.userPrincipalName)."
+                        continue
                     }
-                    Write-Verbose "Usage location set to $targetUsage for $($user.UserPrincipalName)."
+
+                    if (-not $PSCmdlet.ShouldProcess($user.userPrincipalName, "Set usage location to $targetUsage")) {
+                        continue
+                    }
+
+                    $approved.Add($user) | Out-Null
                 }
-                catch {
-                    Write-NCMessage "Unable to set usage location ($targetUsage) for $($user.UserPrincipalName): $($_.Exception.Message)" -Level ERROR
+                if ($approved.Count -eq 0) { continue }
+
+                # (c) Update the approved users in one batch.
+                $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                        @{
+                            Id     = "m$i"
+                            Method = 'PATCH'
+                            Url    = "/users/$([uri]::EscapeDataString([string]$approved[$i].id))"
+                            Body   = @{ usageLocation = $targetUsage }
+                        }
+                    })
+                $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity 'Updating usage location')
+                for ($i = 0; $i -lt $approved.Count; $i++) {
+                    $user = $approved[$i]
+                    $response = $responses[$i]
+                    if ($response.Success) {
+                        $updatedCount++
+                        if ($PassThru.IsPresent) {
+                            $results.Add([pscustomobject]@{
+                                    UserPrincipalName     = $user.userPrincipalName
+                                    DisplayName           = $user.displayName
+                                    PreviousUsageLocation = $user.usageLocation
+                                    UsageLocation         = $targetUsage
+                                    Action                = 'Updated'
+                                }) | Out-Null
+                        }
+                        Write-Verbose "Usage location set to $targetUsage for $($user.userPrincipalName)."
+                    }
+                    else {
+                        Write-NCMessage "Unable to set usage location ($targetUsage) for $($user.userPrincipalName): $($response.ErrorMessage)" -Level ERROR
+                    }
                 }
             }
 

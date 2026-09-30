@@ -22,6 +22,10 @@ BeforeAll {
         )
     }
     function Get-MgContext {}
+    function Get-NCProgressPercent { param($Current, $Total) if ($Total) { [int](100 * $Current / $Total) } else { 0 } }
+    function Test-Folder { param($Path) $Path }
+    function New-File { param($Path) $Path }
+    function Get-MgUser { [CmdletBinding()] param($Filter, $ConsistencyLevel, $CountVariable, [switch]$All, $Property) }
     function Get-MgEnvironment { param([string]$Name) }
 
     # Builds a $batch response by asking $Responder for each sub-request ({ param($request) @{ status; body } }).
@@ -187,5 +191,99 @@ Describe 'License assignment batching' {
         $assigns = @($global:SeenRequests | Where-Object { $_.url -like '*/assignLicense' })
         $assigns.Count | Should -Be 1
         @($assigns[0].body.removeLicenses) | Should -Be @($global:skuId)
+    }
+    It 'Get-UserMsolAccountSku uses 2 Graph calls for 14 users' {
+        Set-LicenseGraphMock
+        New-Upns 14 | Get-UserMsolAccountSku
+
+        Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
+        Should -Invoke Write-NCMessage -Times 14 -Exactly -Scope It -ParameterFilter { $Message -like '*Processing user: User *' }
+        Should -Invoke Write-NCMessage -Times 14 -Exactly -Scope It -ParameterFilter { $Message -like "*($global:skuId)" }
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -like 'Processing users in Graph batches*' }
+    }
+
+    It 'Get-UserMsolAccountSku reports a missing user once and keeps going' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                $url = [string]$request.url
+                if ($url -like '/users/ghost*') { return @{ status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'missing' } } } }
+                if ($url -match '^/users/user1%40') { return @{ status = 200; body = @{ id = 'id1'; userPrincipalName = 'user1@contoso.com'; displayName = 'User 1' } } }
+                if ($url -match '^/users/id1/licenseDetails') { return @{ status = 200; body = @{ value = @(@{ skuId = $global:skuId; skuPartNumber = 'ENTERPRISEPACK' }) } } }
+                @{ status = 500 }
+            }
+        }
+        @('ghost@contoso.com', 'user1@contoso.com') | Get-UserMsolAccountSku
+
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Level -eq 'ERROR' -and $Message -eq 'Unable to resolve user recipient for ghost@contoso.com'
+        }
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -like '*Processing user: User 1*' }
+    }
+
+    It 'Get-UserUsageLocation resolves 14 users with 1 Graph call and keeps output shape' {
+        Set-LicenseGraphMock
+        $result = @(New-Upns 14 | Get-UserUsageLocation)
+
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly -Scope It
+        $result.Count | Should -Be 14
+        ($result[0].PSObject.Properties.Name -join ',') | Should -Be 'UserPrincipalName,DisplayName,UsageLocation,ConfiguredDefaultUsageLocation,MatchesConfiguredDefault'
+        $result[0].UserPrincipalName | Should -Be 'user1@contoso.com'
+        $result[13].UserPrincipalName | Should -Be 'user14@contoso.com'
+        $result[0].MatchesConfiguredDefault | Should -BeTrue
+    }
+
+    It 'Set-UserUsageLocation uses 2 Graph calls for 14 users and 1 call with -WhatIf' {
+        $global:UsageLocationForUsers = ''
+        Set-LicenseGraphMock
+        $result = @(New-Upns 14 | Set-UserUsageLocation -UsageLocation DE -PassThru -Confirm:$false)
+
+        Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
+        $result.Count | Should -Be 14
+        ($result.Action | Select-Object -Unique) | Should -Be 'Updated'
+        $patches = @($global:SeenRequests | Where-Object { $_.method -eq 'PATCH' })
+        $patches.Count | Should -Be 14
+        ($patches | ForEach-Object { $_.body.usageLocation } | Select-Object -Unique) | Should -Be 'DE'
+    }
+
+    It 'Set-UserUsageLocation -WhatIf only reads' {
+        $global:UsageLocationForUsers = ''
+        Set-LicenseGraphMock
+        New-Upns 14 | Set-UserUsageLocation -UsageLocation DE -WhatIf
+
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly -Scope It
+        @($global:SeenRequests | Where-Object { $_.method -eq 'PATCH' }).Count | Should -Be 0
+    }
+
+    It 'Set-UserUsageLocation reports a failed PATCH and omits that user from PassThru' {
+        $global:UsageLocationForUsers = ''
+        $global:PatchFailsFor = 'id2'
+        Set-LicenseGraphMock
+        $result = @('user1@contoso.com', 'user2@contoso.com' | Set-UserUsageLocation -UsageLocation DE -PassThru -Confirm:$false)
+
+        $result.Count | Should -Be 1
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Level -eq 'ERROR' -and $Message -eq 'Unable to set usage location (DE) for user2@contoso.com: denied'
+        }
+    }
+
+    It 'Export-MsolAccountSku reads license details for 45 licensed users in 3 batch calls' {
+        Mock Get-MgUser { 1..45 | ForEach-Object { [pscustomobject]@{ Id = "id$_"; DisplayName = "User $_"; UserPrincipalName = "user$_@contoso.com"; Mail = "user$_@contoso.com" } } }
+        Mock Test-Folder { $TestDrive }
+        Mock New-File { Join-Path $TestDrive 'report.csv' }
+        $global:NCVars.DateTimeString_CSV = 'yyyyMMdd'
+        $global:NCVars.CSV_DefaultLimiter = ';'
+        $global:NCVars.CSV_Encoding = 'UTF8'
+        Set-LicenseGraphMock
+
+        Export-MsolAccountSku -CSVFolder $TestDrive -Domain 'contoso.com'
+
+        Should -Invoke Invoke-MgGraphRequest -Times 3 -Exactly -Scope It
+        $rows = @(Import-Csv -LiteralPath (Join-Path $TestDrive 'report.csv') -Delimiter ';')
+        $rows.Count | Should -Be 45
+        ($rows[0].PSObject.Properties.Name -join ',') | Should -Be 'DisplayName,UserPrincipalName,PrimarySmtpAddress,Licenses'
+        $rows[0].DisplayName | Should -Be 'User 1'
+        $rows[44].UserPrincipalName | Should -Be 'user45@contoso.com'
+        ($rows.Licenses | Select-Object -Unique) | Should -Be 'ENTERPRISEPACK'
     }
 }
