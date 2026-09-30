@@ -61,6 +61,7 @@
         'Get-NebulaConfig',
         'Get-NebulaConnections',
         'Get-NebulaModuleUpdates',
+        'Get-QuarantineForMailbox',
         'Get-QuarantineFrom',
         'Get-QuarantineFromDomain',
         'Get-QuarantineToRelease',
@@ -152,6 +153,7 @@
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/icon.png'
 ReleaseNotes = @'
 - Add: `Export-EnterpriseApplication`, `Import-EnterpriseApplication`, `Copy-EnterpriseApplication`, and `Compare-EnterpriseApplication` to snapshot, recreate, clone, and diff Enterprise Applications (App Registration + Service Principal) within the same Entra tenant, including optional App Role Assignment copying, owner sync, and CSV/JSON diff reports. Client secrets and certificates are never copied; only their metadata is captured for reporting.
+- Add: `Get-QuarantineForMailbox` to check quarantine across all of a mailbox's SMTP aliases (primary and secondary) in one call, since `Get-QuarantineMessage -RecipientAddress` only matches the exact address a message was sent to; defaults to a 15-day lookback window (vs. `Get-QuarantineMessage`'s own 7-day default), overridable via `-Days` or explicit `-StartReceivedDate`/`-EndReceivedDate`.
 - Fix: `Add/Get/Remove-EntraGroupUser` now resolve invited Entra guests by external e-mail through a Graph-compatible fallback while preserving direct lookup for tenant members.
 - Fix: `Add/Remove-EntraGroupDevice`, `Add/Remove-EntraGroupOwner`, and `Add/Remove-EntraGroupUser` now support the positional form `<GroupName> <MemberIdentifier>` in addition to named parameters.
 - Fix: `Compare-EnterpriseApplication`'s CSV report now renders non-scalar diff values (redirect URIs, permissions, app roles, owners) as readable JSON instead of an identical, uninformative string on both sides, and now honors the module's configured CSV encoding and delimiter.
