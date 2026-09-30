@@ -18,7 +18,7 @@ function Add-UserMsolAccountSku {
     .PARAMETER ForceLicenseCatalogRefresh
         Force a refresh of the cached license catalog before resolving friendly names.
     .PARAMETER ShowErrorDetails
-        Include exception details in error messages.
+        Kept for compatibility. Error messages always include the Microsoft Graph error detail, so this switch has no effect.
     .EXAMPLE
         Add-MsolAccountSku -UserPrincipalName user@contoso.com -License "Microsoft 365 E3"
     .EXAMPLE
@@ -1457,6 +1457,8 @@ function Get-UserMsolAccountSku {
         Show available seat counts for the user's assigned SKUs (uses tenant license data).
     .PARAMETER ForceLicenseCatalogRefresh
         Force a fresh download of the cached license catalog before processing.
+    .PARAMETER ShowErrorDetails
+        Kept for compatibility. Error messages always include the Microsoft Graph error detail, so this switch has no effect.
     .EXAMPLE
         Get-UserMsolAccountSku -UserPrincipalName "user@contoso.com"
     .EXAMPLE
@@ -2099,6 +2101,8 @@ function Remove-UserMsolAccountSku {
         One or more license identifiers: friendly name (as resolved by the catalog), SKU part number, or SKU ID (GUID).
     .PARAMETER ForceLicenseCatalogRefresh
         Force a refresh of the cached license catalog before resolving friendly names.
+    .PARAMETER ShowErrorDetails
+        Kept for compatibility. Error messages always include the Microsoft Graph error detail, so this switch has no effect.
     .EXAMPLE
         Remove-UserMsolAccountSku -UserPrincipalName user@contoso.com -License "Microsoft 365 E3"
     .EXAMPLE
