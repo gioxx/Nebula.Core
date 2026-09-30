@@ -255,10 +255,12 @@ Describe 'New-IntuneAppBasedGroup batching' {
                         }
                         if ($method -eq 'GET' -and $url -match '^/devices\?\$filter=(.+)$') {
                             $filter = [uri]::UnescapeDataString($Matches[1])
-                            $null = $filter -match "deviceId eq 'az(\d+)'"
-                            return @{ status = 200; body = @{ value = @(@{ id = "ent$($Matches[1])" }) } }
+                            $null = $filter -match "deviceId eq '(az(\d+))'"
+                            if ($Matches[1] -eq $global:EntraLookupFailFor) { return @{ status = 403; body = @{ error = @{ code = 'Forbidden'; message = 'denied' } } } }
+                            return @{ status = 200; body = @{ value = @(@{ id = "ent$($Matches[2])" }) } }
                         }
                         if ($method -eq 'GET' -and $url -match '^/groups\?\$filter=') {
+                            if ($global:GroupLookupFails) { return @{ status = 403; body = @{ error = @{ code = 'Forbidden'; message = 'no access' } } } }
                             if ($global:ExistingGroup) { return @{ status = 200; body = @{ value = @(@{ id = 'G1'; displayName = 'Devices - Java' }) } } }
                             return @{ status = 200; body = @{ value = @() } }
                         }
@@ -295,6 +297,8 @@ Describe 'New-IntuneAppBasedGroup batching' {
         $global:ExistingGroup = $false
         $global:ExistsEntraId = ''
         $global:CurrentMembers = @()
+        $global:EntraLookupFailFor = ''
+        $global:GroupLookupFails = $false
     }
 
     It 'creates a group and adds 25 devices with 2 batches of POST members/$ref, reading detected apps and resolving devices in batches' {
@@ -335,6 +339,68 @@ Describe 'New-IntuneAppBasedGroup batching' {
         @($global:SeenRequests | Where-Object { $_.method -eq 'DELETE' }).Count | Should -Be 1
         @($global:SeenRequests | Where-Object { $_.method -eq 'DELETE' })[0].url | Should -Be '/groups/G1/members/old1/$ref'
         Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq 'Updated group: Devices - Java (Added: 24, Removed: 1)' -and $Level -eq 'SUCCESS' }
+    }
+
+    It 'skips every removal when one Entra lookup fails, and still adds the resolved devices' {
+        Set-AppGroupDevices -Count 25
+        Set-AppGroupGraphMock
+        $global:ExistingGroup = $true
+        $global:EntraLookupFailFor = 'az3'
+        $global:CurrentMembers = @(@{ id = 'old1'; displayName = 'Old 1' }, @{ id = 'ent1'; displayName = 'PC1' }, @{ id = 'ent3'; displayName = 'PC3' })
+        New-IntuneAppBasedGroup -ApplicationName 'Java*' -GroupName 'Devices - Java' -UpdateExisting -Confirm:$false
+
+        @($global:SeenRequests | Where-Object { $_.method -eq 'DELETE' }).Count | Should -Be 0
+        @($global:SeenRequests | Where-Object { $_.method -eq 'POST' }).Count | Should -Be 23
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Level -eq 'WARNING' -and $Message -eq "Entra device resolution for group 'Devices - Java' is incomplete. No members will be removed from it in this run."
+        }
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq 'Updated group: Devices - Java (Added: 23, Removed: 0)' -and $Level -eq 'SUCCESS' }
+    }
+
+    It 'skips every removal when the Entra device resolver throws' {
+        Set-AppGroupDevices -Count 3
+        Set-AppGroupGraphMock
+        Mock Resolve-NCIntuneManagedDeviceEntraMembers { throw 'resolver down' }
+        $global:ExistingGroup = $true
+        $global:CurrentMembers = @(@{ id = 'ent1'; displayName = 'PC1' }, @{ id = 'ent2'; displayName = 'PC2' })
+        New-IntuneAppBasedGroup -ApplicationName 'Java*' -GroupName 'Devices - Java' -UpdateExisting -Confirm:$false
+
+        @($global:SeenRequests | Where-Object { $_.method -in 'DELETE', 'POST' }).Count | Should -Be 0
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -eq 'Error looking up Entra ID devices for group Devices - Java: resolver down' }
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Level -eq 'WARNING' -and $Message -eq "Entra device resolution for group 'Devices - Java' is incomplete. No members will be removed from it in this run."
+        }
+    }
+
+    It 'skips the target instead of creating a duplicate group when the group lookup fails' {
+        Set-AppGroupDevices -Count 3
+        Set-AppGroupGraphMock
+        $global:GroupLookupFails = $true
+        New-IntuneAppBasedGroup -ApplicationName 'Java*' -GroupName 'Devices - Java' -UpdateExisting -Confirm:$false
+
+        Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly -Scope It -ParameterFilter { $Uri -eq 'https://graph.microsoft.com/v1.0/groups' }
+        @($global:SeenRequests | Where-Object { $_.method -in 'DELETE', 'POST' }).Count | Should -Be 0
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Level -eq 'ERROR' -and $Message -eq "Unable to look up existing group 'Devices - Java', skipping it to avoid creating a duplicate: no access"
+        }
+        Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter { $Message -like 'No existing group found*' }
+    }
+
+    It 'adds an Entra device once when two Intune devices map to it (create and update)' {
+        Set-AppGroupDevices -Count 3
+        $global:TestDevices[1].azureADDeviceId = 'az1'
+        Set-AppGroupGraphMock
+        New-IntuneAppBasedGroup -ApplicationName 'Java*' -GroupName 'Devices - Java' -Confirm:$false
+        $createAdds = @($global:SeenRequests | Where-Object { $_.method -eq 'POST' } | ForEach-Object { [string]$_.body.'@odata.id' })
+        $createAdds.Count | Should -Be 2
+        @($createAdds | Select-Object -Unique).Count | Should -Be 2
+
+        $global:SeenRequests.Clear()
+        $global:ExistingGroup = $true
+        New-IntuneAppBasedGroup -ApplicationName 'Java*' -GroupName 'Devices - Java' -UpdateExisting -Confirm:$false
+        $updateAdds = @($global:SeenRequests | Where-Object { $_.method -eq 'POST' } | ForEach-Object { [string]$_.body.'@odata.id' })
+        $updateAdds.Count | Should -Be 2
+        @($updateAdds | Select-Object -Unique).Count | Should -Be 2
     }
 
     It 'sends no write requests with -WhatIf' {

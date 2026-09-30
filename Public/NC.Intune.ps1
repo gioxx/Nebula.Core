@@ -1199,7 +1199,8 @@ function New-IntuneAppBasedGroup {
 
             # Existing groups are looked up for all targets in Graph batches
             $groupLookup = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            $groupLookupFailed = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            # Failed lookups (name -> error): the group may exist, so the target is skipped rather than created
+            $groupLookupFailed = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             if (-not $DryRun.IsPresent) {
                 $lookupNames = @($targetInfos | Where-Object { $_ } | ForEach-Object { $_.GroupName } | Select-Object -Unique)
                 if ($lookupNames.Count -gt 0 -and -not $batchNoticeWritten) {
@@ -1218,7 +1219,7 @@ function New-IntuneAppBasedGroup {
                             $groupLookup[$lookupNames[$i]] = @($groupResponses[$i].Items) | Select-Object -First 1
                         }
                         else {
-                            $null = $groupLookupFailed.Add($lookupNames[$i])
+                            $groupLookupFailed[$lookupNames[$i]] = [string]$groupResponses[$i].ErrorMessage
                         }
                     }
                 }
@@ -1307,8 +1308,9 @@ function New-IntuneAppBasedGroup {
                 }
 
                 $existingGroup = $null
-                if ($groupLookupFailed.Contains($groupName)) {
-                    Write-NCMessage "No existing group found with name: $groupName" -Level WARNING
+                if ($groupLookupFailed.ContainsKey($groupName)) {
+                    Write-NCMessage "Unable to look up existing group '$groupName', skipping it to avoid creating a duplicate: $($groupLookupFailed[$groupName])" -Level ERROR
+                    continue
                 }
                 elseif ($groupLookup.ContainsKey($groupName)) {
                     $existingGroup = $groupLookup[$groupName]
@@ -1320,10 +1322,17 @@ function New-IntuneAppBasedGroup {
                 }
 
                 $entraDevices = @()
+                # Removals are only safe when every device was resolved without a Graph error
+                $resolutionIncomplete = $false
+                $seenEntraDeviceIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
                 try {
                     Write-Progress -Activity 'Resolving Entra Devices' -Status "$groupName - $deviceCount devices" -PercentComplete 0
                     foreach ($resolved in @(Resolve-NCIntuneManagedDeviceEntraMembers -ManagedDevices $devices -DeviceIds @($uniqueDeviceIds))) {
-                        if ($resolved.Resolution) {
+                        if ($resolved.LookupFailed) {
+                            $resolutionIncomplete = $true
+                        }
+                        # Two Intune devices can map to the same Entra device: add it once
+                        if ($resolved.Resolution -and $seenEntraDeviceIds.Add([string]$resolved.Resolution.EntraDeviceId)) {
                             $entraDevices += @{
                                 IntuneDeviceId = $resolved.Resolution.IntuneDeviceId
                                 EntraDeviceId  = $resolved.Resolution.EntraDeviceId
@@ -1334,6 +1343,7 @@ function New-IntuneAppBasedGroup {
                 }
                 catch {
                     Write-NCMessage "Error looking up Entra ID devices for group $($groupName): $($_.Exception.Message)" -Level ERROR
+                    $resolutionIncomplete = $true
                 }
 
                 Write-Progress -Activity 'Resolving Entra Devices' -Completed
@@ -1352,6 +1362,10 @@ function New-IntuneAppBasedGroup {
                             $entraDeviceIds = $entraDevices | ForEach-Object { $_.EntraDeviceId }
                             $deviceIdsToAdd = @($entraDeviceIds | Where-Object { $_ -notin $currentMemberIds })
                             $deviceIdsToRemove = @($currentMemberIds | Where-Object { $_ -notin $entraDeviceIds })
+                            if ($resolutionIncomplete -and $deviceIdsToRemove.Count -gt 0) {
+                                Write-NCMessage "Entra device resolution for group '$groupName' is incomplete. No members will be removed from it in this run." -Level WARNING
+                                $deviceIdsToRemove = @()
+                            }
                             $devicesToAdd = @($entraDevices | Where-Object { $_.EntraDeviceId -in $deviceIdsToAdd })
 
                             $memberStats.Added = 0

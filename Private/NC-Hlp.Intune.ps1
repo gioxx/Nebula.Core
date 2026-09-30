@@ -53,7 +53,8 @@ function Resolve-NCIntuneManagedDeviceEntraMembers {
     .DESCRIPTION
         Refreshes the Azure AD device id of devices that lack it (beta managedDevices, 20 per request) and
         looks up the matching Entra device (v1.0 devices filter, 20 per request). Returns one object per
-        input id, in input order, with DeviceId and Resolution (null when the device cannot be resolved).
+        input id, in input order, with DeviceId, Resolution (null when the device cannot be resolved) and
+        LookupFailed (true when a Graph read for the device failed, so its state is unknown rather than absent).
         Warnings and errors use the same text as the single-device resolver.
     .PARAMETER ManagedDevices
         Managed devices already retrieved from Intune.
@@ -157,7 +158,7 @@ function Resolve-NCIntuneManagedDeviceEntraMembers {
             Write-NCMessage "Device not found in Entra ID: $($entry.Label) (Azure AD Device ID: $($entry.AzureAdDeviceId))" -Level WARNING
         }
 
-        [pscustomobject]@{ DeviceId = $entry.DeviceId; Resolution = $resolution }
+        [pscustomobject]@{ DeviceId = $entry.DeviceId; Resolution = $resolution; LookupFailed = [bool]($entry.DetailError -or $entry.LookupError) }
     }
 }
 
