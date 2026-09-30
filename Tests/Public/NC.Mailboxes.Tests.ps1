@@ -209,11 +209,13 @@ Describe 'Sign-in log batching' {
                     param($request)
                     $global:SeenRequests.Add($request)
                     $url = [string]$request.url
-                    if ($url -match '^/auditLogs/signIns\?\$filter=userid%20eq%20%27id(\d+)%27&\$top=20$') {
+                    if ($url -match '^/auditLogs/signIns\?\$filter=userId%20eq%20%27id(\d+)%27%20and%20status%2FerrorCode%20eq%200&\$top=1$') {
                         $n = [int]$Matches[1]
                         if ($n -eq 5) { return @{ status = 403; body = @{ error = @{ code = 'Forbidden'; message = 'denied' } } } }
-                        if ($n -in 1, 2) { return @{ status = 200; body = @{ value = @(@{ status = @{ errorCode = 50126 } }, @{ status = @{ errorCode = 0 } }) } } }
-                        return @{ status = 200; body = @{ value = @(@{ status = @{ errorCode = 50126 } }) } }
+                        # Server-side filtered: only successful sign-ins come back; nextLink must never be followed.
+                        if ($n -in 1, 2) { return @{ status = 200; body = @{ value = @(@{ status = @{ errorCode = 0 } }); '@odata.nextLink' = "https://graph.microsoft.com/v1.0/auditLogs/signIns?next=$n" } } }
+                        if ($n -eq 3) { return @{ status = 200; body = @{ value = @(); '@odata.nextLink' = 'https://graph.microsoft.com/v1.0/auditLogs/signIns?next=3' } } }
+                        return @{ status = 200; body = @{ value = @() } }
                     }
                     if ($url -match '^/users/id(\d+)\?\$select=userPrincipalName,assignedPlans$') {
                         $n = [int]$Matches[1]
@@ -252,6 +254,28 @@ Describe 'Sign-in log batching' {
                 $Message -eq 'Sign-in records found for shared mailbox Shared 1' -and $Level -eq 'WARNING'
             }
             Should -Invoke Write-NCMessage -Times 1 -Exactly -ParameterFilter { $Message -like 'Processing 14 mailbox(es) in Graph batches*' }
+        }
+
+        It 'asks Graph for one successful sign-in per mailbox and never follows nextLink' {
+            Mock Invoke-NCGraphAllPagesCore { throw 'nextLink must not be followed' }
+            $report = @(Test-SharedMailboxCompliance -GridView:$false)
+
+            Should -Invoke Invoke-NCGraphAllPagesCore -Times 0 -Exactly
+            $signInRequests = @($global:SeenRequests | Where-Object { ([string]$_.url).StartsWith('/auditLogs/signIns') })
+            $signInRequests.Count | Should -Be 14
+            $signInRequests[0].url | Should -Be '/auditLogs/signIns?$filter=userId%20eq%20%27id1%27%20and%20status%2FerrorCode%20eq%200&$top=1'
+            ($report | Where-Object DisplayName -eq 'Shared 2').'Sign in Record Found' | Should -Be 'Yes'
+            ($report | Where-Object DisplayName -eq 'Shared 3').'Sign in Record Found' | Should -Be 'No'
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -ParameterFilter {
+                $Message -eq 'No successful sign-in records found for shared mailbox Shared 3' -and $Level -eq 'SUCCESS'
+            }
+        }
+
+        It 'escapes quotes in the object id before encoding the filter' {
+            Mock Get-ExoMailbox { [pscustomobject]@{ DisplayName = 'Quote'; PrimarySmtpAddress = 'quote@contoso.com'; ExternalDirectoryObjectId = "o'id" } }
+            $null = Test-SharedMailboxCompliance -GridView:$false
+
+            $global:SeenRequests[0].url | Should -Be '/auditLogs/signIns?$filter=userId%20eq%20%27o%27%27id%27%20and%20status%2FerrorCode%20eq%200&$top=1'
         }
     }
 }

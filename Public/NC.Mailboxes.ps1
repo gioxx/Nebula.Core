@@ -1824,28 +1824,23 @@ function Test-SharedMailboxCompliance {
             $chunk = @($mailboxList[$offset..([Math]::Min($offset + 20, $mailboxList.Count) - 1)])
 
             $signInRequests = @(for ($i = 0; $i -lt $chunk.Count; $i++) {
-                    $filter = "userid eq '$(([string]$chunk[$i].ExternalDirectoryObjectId).Replace("'", "''"))'"
+                    $filter = "userId eq '$(([string]$chunk[$i].ExternalDirectoryObjectId).Replace("'", "''"))' and status/errorCode eq 0"
                     @{
                         Id     = "m$i"
                         Method = 'GET'
-                        Url    = "/auditLogs/signIns?`$filter=$([uri]::EscapeDataString($filter))&`$top=20"
+                        Url    = "/auditLogs/signIns?`$filter=$([uri]::EscapeDataString($filter))&`$top=1"
                     }
                 })
-            # Every page is read, like the former Get-MgAuditLogSignIn -All call.
-            $signInResponses = @(Invoke-NCGraphBatchCollection -Requests $signInRequests -Activity 'Reading sign-in logs')
+            # Graph filters successful sign-ins server-side: one item on the first page is enough.
+            $signInResponses = @(Invoke-NCGraphBatch -Requests $signInRequests -Activity 'Reading sign-in logs')
 
             $signInFound = @{}
             $licenseRequests = [System.Collections.Generic.List[object]]::new()
             for ($i = 0; $i -lt $chunk.Count; $i++) {
                 $response = $signInResponses[$i]
                 $found = $false
-                if ($response.Success) {
-                    foreach ($log in @($response.Items)) {
-                        if ($log.Status.ErrorCode -eq 0) {
-                            $found = $true
-                            break
-                        }
-                    }
+                if ($response.Success -and $null -ne $response.Body) {
+                    $found = (@($response.Body.value | Where-Object { $null -ne $_ }).Count -ge 1)
                 }
                 $signInFound[$i] = $found
                 if ($found) {
