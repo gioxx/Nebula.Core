@@ -66,6 +66,21 @@ Describe 'Invoke-NCGraphBatch' {
         Should -Invoke Invoke-MgGraphRequest -Times 3 -Exactly -ParameterFilter { $Method -eq 'POST' -and $Uri -eq 'v1.0/$batch' }
     }
 
+    It 'writes ASCII progress on its own progress id and completes only that bar' {
+        Mock Invoke-MgGraphRequest {
+            $payload = $Body | ConvertFrom-Json
+            @{ responses = @(foreach ($r in $payload.requests) { @{ id = $r.id; status = 200; body = @{} } }) }
+        }
+        $requests = @(1..25 | ForEach-Object { @{ Id = "r$_"; Method = 'GET'; Url = "/users/u$_" } })
+
+        $null = Invoke-NCGraphBatch -Requests $requests -Activity 'Test activity'
+
+        Should -Invoke Write-Progress -Times 1 -Exactly -ParameterFilter { $Id -eq 7781 -and $Status -eq 'Batch 1 - 0 items processed' }
+        Should -Invoke Write-Progress -Times 1 -Exactly -ParameterFilter { $Id -eq 7781 -and $Status -eq 'Batch 2 - 20 items processed' }
+        Should -Invoke Write-Progress -Times 1 -Exactly -ParameterFilter { $Id -eq 7781 -and $Completed }
+        Should -Invoke Write-Progress -Times 0 -Exactly -ParameterFilter { $Id -ne 7781 }
+    }
+
     It 'reports mixed per-request outcomes independently' {
         Mock Invoke-MgGraphRequest {
             @{

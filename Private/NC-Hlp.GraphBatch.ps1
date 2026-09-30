@@ -209,6 +209,8 @@ function Invoke-NCGraphBatch {
     }
 
     $chunkSize = 20
+    # Dedicated progress bar id: completing it never clears the caller's own progress bar
+    $progressId = 7781
     $results = @{}
     $processed = 0
     $batchNumber = 0
@@ -220,7 +222,7 @@ function Invoke-NCGraphBatch {
         $attempt = 0
 
         while ($pending.Count -gt 0) {
-            Write-Progress -Activity $Activity -Status "Batch $batchNumber · $processed items processed"
+            Write-Progress -Id $progressId -Activity $Activity -Status "Batch $batchNumber - $processed items processed"
 
             $byBatchId = @{}
             $subRequests = [System.Collections.Generic.List[object]]::new()
@@ -262,7 +264,7 @@ function Invoke-NCGraphBatch {
                 if ((Test-NCGraphTransientError -Message $reason) -and $attempt -lt $MaxRetries) {
                     $attempt++
                     $wait = [int][Math]::Min(60, 5 * [Math]::Pow(2, $attempt - 1))
-                    Write-Progress -Activity $Activity -Status "Throttled by Graph, retrying in ${wait}s ..."
+                    Write-Progress -Id $progressId -Activity $Activity -Status "Throttled by Graph, retrying in ${wait}s ..."
                     Start-Sleep -Seconds $wait
                     continue
                 }
@@ -304,7 +306,7 @@ function Invoke-NCGraphBatch {
             $pending = @($retry)
             if ($pending.Count -gt 0) {
                 $attempt++
-                Write-Progress -Activity $Activity -Status "Throttled by Graph, retrying in ${wait}s ..."
+                Write-Progress -Id $progressId -Activity $Activity -Status "Throttled by Graph, retrying in ${wait}s ..."
                 Start-Sleep -Seconds $wait
             }
         }
@@ -312,7 +314,7 @@ function Invoke-NCGraphBatch {
         $processed += ($last - $offset + 1)
     }
 
-    Write-Progress -Activity $Activity -Completed
+    Write-Progress -Id $progressId -Activity $Activity -Completed
 
     foreach ($request in $Requests) {
         $results[[string]$request.Id]
