@@ -30,7 +30,8 @@ BeforeAll {
     function Find-UserRecipient {
         param(
             [string]$UserPrincipalName,
-            [switch]$PreferGraphIdentity
+            [switch]$PreferGraphIdentity,
+            [switch]$SkipDirectGraphLookup
         )
     }
     function New-MgGroupMember {

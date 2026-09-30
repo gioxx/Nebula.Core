@@ -62,12 +62,17 @@ function Find-UserRecipient {
         The UPN or identifier of the user recipient to resolve.
     .PARAMETER PreferGraphIdentity
         Returns a Graph-friendly identity instead of the primary SMTP address.
+    .PARAMETER SkipDirectGraphLookup
+        Skips only the direct Get-MgUser -UserId lookup that follows a failed Get-Recipient (use it when a
+        batched GET /users/{identifier} already returned not found). The filter-based Graph queries still run;
+        the not-found message then carries no direct-lookup error text.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string]$UserPrincipalName,
-        [switch]$PreferGraphIdentity
+        [switch]$PreferGraphIdentity,
+        [switch]$SkipDirectGraphLookup
     )
 
     if ([string]::IsNullOrWhiteSpace($UserPrincipalName)) {
@@ -78,79 +83,90 @@ function Find-UserRecipient {
         $recipient = Get-Recipient -Identity $UserPrincipalName -ErrorAction Stop
     }
     catch {
-        try {
-            $user = Get-MgUser -UserId $UserPrincipalName -Property Id, UserPrincipalName, Mail -ErrorAction Stop
-
-            if ($PreferGraphIdentity.IsPresent) {
-                return $user.Id
-            }
-
-            if ($user.Mail) {
-                return $user.Mail
-            }
-
-            return $user.UserPrincipalName
-        }
-        catch {
-            $escaped = $UserPrincipalName.Replace("'", "''")
-            $queries = @()
-
-            if ($UserPrincipalName -match '@') {
-                $queries += "userPrincipalName eq '$escaped'"
-                $queries += "mail eq '$escaped'"
-            }
-            else {
-                $queries += "mailNickname eq '$escaped'"
-                $queries += "onPremisesSamAccountName eq '$escaped'"
-                $queries += "displayName eq '$escaped'"
-                $queries += "startswith(userPrincipalName,'$escaped@')"
-            }
-
-            $requests = @(for ($i = 0; $i -lt $queries.Count; $i++) {
-                    @{
-                        Id     = "q$i"
-                        Method = 'GET'
-                        Url    = '/users?$filter=' + [uri]::EscapeDataString($queries[$i]) + '&$select=id,userPrincipalName,mail,displayName'
-                    }
-                })
-
-            # One batch for every candidate query; the first query (in order) with results wins.
-            # A failed sub-request counts as "no results".
-            $matchedUsers = @()
-            foreach ($result in @(Invoke-NCGraphBatchCollection -Requests $requests -Activity 'Resolving user')) {
-                if ($result.Success -and @($result.Items).Count -gt 0) {
-                    $matchedUsers = @($result.Items | ForEach-Object {
-                            [pscustomobject]@{
-                                Id                = $_.id
-                                UserPrincipalName = $_.userPrincipalName
-                                Mail              = $_.mail
-                                DisplayName       = $_.displayName
-                            }
-                        })
-                    break
-                }
-            }
-
-            if ($matchedUsers.Count -gt 0) {
-                $selectedUser = $matchedUsers | Sort-Object UserPrincipalName | Select-Object -First 1
-
-                if ($matchedUsers.Count -gt 1) {
-                    $selectedLabel = if ($selectedUser.UserPrincipalName) { $selectedUser.UserPrincipalName } else { $selectedUser.DisplayName }
-                    Write-NCMessage "Multiple users matched '$UserPrincipalName'. Using the first result ($selectedLabel)." -Level WARNING
-                }
+        # Direct lookup by id/UPN; skipped when the caller already knows Graph returned not found for it.
+        $directLookupError = $null
+        if (-not $SkipDirectGraphLookup.IsPresent) {
+            try {
+                $user = Get-MgUser -UserId $UserPrincipalName -Property Id, UserPrincipalName, Mail -ErrorAction Stop
 
                 if ($PreferGraphIdentity.IsPresent) {
-                    return $selectedUser.Id
+                    return $user.Id
                 }
 
-                if ($selectedUser.Mail) {
-                    return $selectedUser.Mail
+                if ($user.Mail) {
+                    return $user.Mail
                 }
 
-                return $selectedUser.UserPrincipalName
+                return $user.UserPrincipalName
+            }
+            catch {
+                $directLookupError = $_.Exception.Message
+            }
+        }
+
+        $escaped = $UserPrincipalName.Replace("'", "''")
+        $queries = @()
+
+        if ($UserPrincipalName -match '@') {
+            $queries += "userPrincipalName eq '$escaped'"
+            $queries += "mail eq '$escaped'"
+        }
+        else {
+            $queries += "mailNickname eq '$escaped'"
+            $queries += "onPremisesSamAccountName eq '$escaped'"
+            $queries += "displayName eq '$escaped'"
+            $queries += "startswith(userPrincipalName,'$escaped@')"
+        }
+
+        $requests = @(for ($i = 0; $i -lt $queries.Count; $i++) {
+                @{
+                    Id     = "q$i"
+                    Method = 'GET'
+                    Url    = '/users?$filter=' + [uri]::EscapeDataString($queries[$i]) + '&$select=id,userPrincipalName,mail,displayName'
+                }
+            })
+
+        # One batch for every candidate query; the first query (in order) with results wins.
+        # A failed sub-request counts as "no results".
+        $matchedUsers = @()
+        foreach ($result in @(Invoke-NCGraphBatchCollection -Requests $requests -Activity 'Resolving user')) {
+            if ($result.Success -and @($result.Items).Count -gt 0) {
+                $matchedUsers = @($result.Items | ForEach-Object {
+                        [pscustomobject]@{
+                            Id                = $_.id
+                            UserPrincipalName = $_.userPrincipalName
+                            Mail              = $_.mail
+                            DisplayName       = $_.displayName
+                        }
+                    })
+                break
+            }
+        }
+
+        if ($matchedUsers.Count -gt 0) {
+            $selectedUser = $matchedUsers | Sort-Object UserPrincipalName | Select-Object -First 1
+
+            if ($matchedUsers.Count -gt 1) {
+                $selectedLabel = if ($selectedUser.UserPrincipalName) { $selectedUser.UserPrincipalName } else { $selectedUser.DisplayName }
+                Write-NCMessage "Multiple users matched '$UserPrincipalName'. Using the first result ($selectedLabel)." -Level WARNING
             }
 
-            Write-NCMessage "Recipient not available or not found ($UserPrincipalName). $($_.Exception.Message)" -Level ERROR
+            if ($PreferGraphIdentity.IsPresent) {
+                return $selectedUser.Id
+            }
+
+            if ($selectedUser.Mail) {
+                return $selectedUser.Mail
+            }
+
+            return $selectedUser.UserPrincipalName
+        }
+
+        if ($null -ne $directLookupError) {
+            Write-NCMessage "Recipient not available or not found ($UserPrincipalName). $directLookupError" -Level ERROR
+        }
+        else {
+            Write-NCMessage "Recipient not available or not found ($UserPrincipalName)." -Level ERROR
         }
 
         return

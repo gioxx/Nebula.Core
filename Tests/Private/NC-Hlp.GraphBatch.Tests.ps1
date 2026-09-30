@@ -21,7 +21,8 @@ BeforeAll {
     function Find-UserRecipient {
         param(
             [string]$UserPrincipalName,
-            [switch]$PreferGraphIdentity
+            [switch]$PreferGraphIdentity,
+            [switch]$SkipDirectGraphLookup
         )
     }
 
@@ -295,6 +296,7 @@ Describe 'Resolve-NCGraphUserBatch' {
         $map.Contains('ghost@contoso.com') | Should -BeTrue
         Should -Invoke Find-UserRecipient -Times 2 -Exactly
         Should -Invoke Find-UserRecipient -Times 0 -Exactly -ParameterFilter { $UserPrincipalName -eq 'alice@contoso.com' }
+        Should -Invoke Find-UserRecipient -Times 2 -Exactly -ParameterFilter { $PreferGraphIdentity -and $SkipDirectGraphLookup }
         Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly
     }
 

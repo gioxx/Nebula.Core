@@ -439,7 +439,8 @@ function Resolve-NCGraphUserBatch {
 
     $secondPass = [System.Collections.Generic.List[object]]::new()
     foreach ($value in $fallback) {
-        $resolvedId = Find-UserRecipient -UserPrincipalName $value -PreferGraphIdentity
+        # Graph already answered 404 for this identifier: skip the identical direct lookup
+        $resolvedId = Find-UserRecipient -UserPrincipalName $value -PreferGraphIdentity -SkipDirectGraphLookup
         if ($resolvedId) {
             $secondPass.Add((& $newLookup $value ([string]$resolvedId)))
         }

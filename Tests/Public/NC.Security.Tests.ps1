@@ -4,7 +4,7 @@ BeforeAll {
     function Write-NCMessage { param([string]$Message, [string]$Level) }
     function Set-ProgressAndInfoPreferences {}
     function Restore-ProgressAndInfoPreferences {}
-    function Find-UserRecipient { param([string]$UserPrincipalName, [switch]$PreferGraphIdentity) }
+    function Find-UserRecipient { param([string]$UserPrincipalName, [switch]$PreferGraphIdentity, [switch]$SkipDirectGraphLookup) }
     function Invoke-NCRetry {
         param([scriptblock]$Action, [int]$MaxAttempts, [int]$DelaySeconds, [string]$OperationDescription, [scriptblock]$OnError)
         & $Action

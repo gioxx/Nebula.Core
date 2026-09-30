@@ -160,4 +160,52 @@ Describe 'Find-UserRecipient batched filter fallback' {
             $Message -like 'Recipient not available or not found (ghost).*' -and $Level -eq 'ERROR'
         }
     }
+
+    It 'skips only the direct Get-MgUser lookup with -SkipDirectGraphLookup' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($r)
+                @{ status = 200; body = @{ value = @() } }
+            }
+        }
+
+        $result = Find-UserRecipient -UserPrincipalName 'ghost@contoso.com' -PreferGraphIdentity -SkipDirectGraphLookup
+
+        $result | Should -BeNullOrEmpty
+        Should -Invoke Get-Recipient -Times 1 -Exactly
+        Should -Invoke Get-MgUser -Times 0 -Exactly
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -ParameterFilter {
+            $Message -eq 'Recipient not available or not found (ghost@contoso.com).' -and $Level -eq 'ERROR'
+        }
+    }
+
+    It 'still resolves through the filter queries with -SkipDirectGraphLookup' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($r)
+                if ($r.id -eq '2') { @{ status = 200; body = @{ value = @(@{ id = 'id-mail'; userPrincipalName = 'u@contoso.com'; mail = 'alias@contoso.com'; displayName = 'U' }) } } }
+                else { @{ status = 200; body = @{ value = @() } } }
+            }
+        }
+
+        Find-UserRecipient -UserPrincipalName 'alias@contoso.com' -PreferGraphIdentity -SkipDirectGraphLookup | Should -Be 'id-mail'
+        Should -Invoke Get-MgUser -Times 0 -Exactly
+    }
+
+    It 'keeps the direct lookup error in the not-found message without the switch' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($r)
+                @{ status = 200; body = @{ value = @() } }
+            }
+        }
+
+        $null = Find-UserRecipient -UserPrincipalName 'ghost@contoso.com'
+
+        Should -Invoke Get-MgUser -Times 1 -Exactly
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -ParameterFilter {
+            $Message -eq 'Recipient not available or not found (ghost@contoso.com). direct lookup failed' -and $Level -eq 'ERROR'
+        }
+    }
 }

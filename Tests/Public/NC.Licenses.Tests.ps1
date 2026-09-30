@@ -7,7 +7,7 @@ BeforeAll {
     function Get-LicenseCatalog { param([switch]$IncludeMetadata, [switch]$ForceRefresh) }
     function Get-LicenseDisplayName { param($Lookup, $SkuPartNumber, $FallbackLookup, $MatchSource) }
     function Get-MgSubscribedSku { param([switch]$All) }
-    function Find-UserRecipient { param([string]$UserPrincipalName, [switch]$PreferGraphIdentity) }
+    function Find-UserRecipient { param([string]$UserPrincipalName, [switch]$PreferGraphIdentity, [switch]$SkipDirectGraphLookup) }
     function Invoke-NCRetry {
         param([scriptblock]$Action, [int]$MaxAttempts, [int]$DelaySeconds, [string]$OperationDescription, [scriptblock]$OnError)
         & $Action
