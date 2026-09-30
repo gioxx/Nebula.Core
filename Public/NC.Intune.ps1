@@ -338,6 +338,8 @@ function Export-IntuneAppInventory {
             Write-NCMessage "Managed devices retrieved: $($devices.Count)" -Level INFO
 
             $lastInventoryFailed = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            # Devices already read in v1.0 (even with a blank last-sync date): never requested again
+            $lastInventoryChecked = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
             # Reads missing last-sync dates for the given devices in Graph batches (v1.0, 20 per request).
             $loadLastInventory = {
@@ -350,7 +352,8 @@ function Export-IntuneAppInventory {
                 $missing = @($DeviceIds | Where-Object {
                         -not [string]::IsNullOrWhiteSpace($_) -and
                         -not ($lastInventoryCache.ContainsKey($_) -and -not [string]::IsNullOrWhiteSpace([string]$lastInventoryCache[$_])) -and
-                        -not $lastInventoryFailed.Contains($_)
+                        -not $lastInventoryFailed.Contains($_) -and
+                        -not $lastInventoryChecked.Contains($_)
                     } | Select-Object -Unique)
                 if ($missing.Count -eq 0) {
                     return
@@ -369,6 +372,7 @@ function Export-IntuneAppInventory {
                             if (-not [string]::IsNullOrWhiteSpace([string]$lastInventoryValue)) {
                                 $lastInventoryCache[$missing[$i]] = Format-NCDateTime -Value $lastInventoryValue -AsLocalTime
                             }
+                            $null = $lastInventoryChecked.Add($missing[$i])
                         }
                         catch {
                             $detailError = $_.Exception.Message
@@ -490,19 +494,55 @@ function Export-IntuneAppInventory {
                 Write-NCMessage "Including deployed apps device status ..." -Level INFO
                 $appsUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps"
                 $allApps = @(Invoke-NCGraphAllPagesCore -Uri $appsUri)
-                
-                foreach ($app in $allApps | Where-Object { $_.displayName -like $ApplicationName }) {
-                    $appType = Get-NCIntuneAppTypeFromODataType -ODataType $app.'@odata.type'
-                    if ($FilterByType -ne "All" -and $appType -ne $FilterByType) {
-                        continue
-                    }
 
-                    $statusUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($app.id)/deviceStatuses"
-                    $statuses = @(Invoke-NCGraphAllPagesCore -Uri $statusUri)
+                $deployedCandidates = @(foreach ($app in $allApps | Where-Object { $_.displayName -like $ApplicationName }) {
+                        $appType = Get-NCIntuneAppTypeFromODataType -ODataType $app.'@odata.type'
+                        if ($FilterByType -ne "All" -and $appType -ne $FilterByType) {
+                            continue
+                        }
+                        [pscustomobject]@{ App = $app; AppType = $appType }
+                    })
+
+                if ($deployedCandidates.Count -gt 0 -and $devices.Count -eq 0) {
+                    Write-NCMessage "Processing $($deployedCandidates.Count) app(s) in Graph batches (20 per request) ..." -Level INFO
+                }
+
+                # Deployment statuses in Graph batches (beta, 20 apps per request), in app order
+                $deployedStatuses = [System.Collections.Generic.List[object]]::new()
+                for ($offset = 0; $offset -lt $deployedCandidates.Count; $offset += 20) {
+                    $candidateChunk = @($deployedCandidates[$offset..([Math]::Min($offset + 20, $deployedCandidates.Count) - 1)])
+                    $statusRequests = @(for ($i = 0; $i -lt $candidateChunk.Count; $i++) {
+                            @{ Id = "s$i"; Method = 'GET'; Url = "/deviceAppManagement/mobileApps/$([uri]::EscapeDataString([string]$candidateChunk[$i].App.id))/deviceStatuses" }
+                        })
+                    $statusResponses = @(Invoke-NCGraphBatchCollection -Requests $statusRequests -ApiVersion 'beta' -Activity 'Reading app deployment status')
+
+                    $chunkEntries = @(for ($i = 0; $i -lt $candidateChunk.Count; $i++) {
+                            $chunkStatuses = @()
+                            if ($statusResponses[$i].Success) {
+                                $chunkStatuses = @($statusResponses[$i].Items)
+                            }
+                            else {
+                                Write-NCMessage "Error fetching data: $($statusResponses[$i].ErrorMessage)" -Level WARNING
+                            }
+                            [pscustomobject]@{ App = $candidateChunk[$i].App; AppType = $candidateChunk[$i].AppType; Statuses = $chunkStatuses }
+                        })
+
                     if ($LastInventory) {
-                        $statusDeviceIds = @($statuses | Where-Object { -not ($OnlySuccessfulInstalls -and $_.installState -ne "installed") } | ForEach-Object { [string]$_.deviceId } | Where-Object { $devices.id -contains $_ })
+                        $statusDeviceIds = @(foreach ($entry in $chunkEntries) {
+                                $entry.Statuses | Where-Object { -not ($OnlySuccessfulInstalls -and $_.installState -ne "installed") } | ForEach-Object { [string]$_.deviceId } | Where-Object { $devices.id -contains $_ }
+                            })
                         & $loadLastInventory -DeviceIds $statusDeviceIds
                     }
+
+                    foreach ($entry in $chunkEntries) {
+                        $deployedStatuses.Add($entry) | Out-Null
+                    }
+                }
+
+                foreach ($entry in $deployedStatuses) {
+                    $app = $entry.App
+                    $appType = $entry.AppType
+                    $statuses = $entry.Statuses
 
                     foreach ($s in $statuses) {
                         if ($OnlySuccessfulInstalls -and $s.installState -ne "installed") {

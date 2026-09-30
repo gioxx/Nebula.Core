@@ -142,6 +142,87 @@ Describe 'Export-IntuneAppInventory batching' {
         Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly -Scope It
         Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter { $Message -like 'Processing*' }
     }
+
+    Context '-IncludeDeployedApps' {
+        BeforeAll {
+            function Set-DeployedAppsMock {
+                param([int]$AppCount, [switch]$BlankLastSync)
+                $global:TestApps = @(1..$AppCount | ForEach-Object { [pscustomobject]@{ id = "app$_"; displayName = "Java Deployed $_"; '@odata.type' = '#microsoft.graph.win32LobApp' } })
+                Mock Invoke-NCGraphAllPagesCore {
+                    if ($Uri -like '*/deviceAppManagement/mobileApps') { return $global:TestApps }
+                    if ($Uri -like '*deviceStatuses*') { throw 'deviceStatuses must be read in Graph batches' }
+                    $global:TestDevices
+                }
+                $global:BlankLastSync = [bool]$BlankLastSync
+                Mock Invoke-MgGraphRequest {
+                    $global:SeenUris.Add($Uri)
+                    New-TestBatchResponse -Body $Body -Responder {
+                        param($request)
+                        $global:SeenRequests.Add($request)
+                        $url = [string]$request.url
+                        if ($url -match '^/deviceManagement/managedDevices/(dev\d+)\?\$expand=detectedApps$') {
+                            return @{ status = 200; body = @{ detectedApps = @(@{ displayName = 'Java 8'; version = '8.0.1'; publisher = 'Oracle' }) } }
+                        }
+                        if ($url -match '^/deviceManagement/managedDevices/(dev\d+)\?\$select=lastSyncDateTime$') {
+                            if ($global:BlankLastSync) { return @{ status = 200; body = @{ lastSyncDateTime = $null } } }
+                            return @{ status = 200; body = @{ lastSyncDateTime = '2026-03-04T05:06:07Z' } }
+                        }
+                        if ($url -match '^/deviceAppManagement/mobileApps/(app\d+)/deviceStatuses$') {
+                            if ($Matches[1] -eq $global:FailDevice) { return @{ status = 403; body = @{ error = @{ code = 'Forbidden'; message = 'denied' } } } }
+                            return @{ status = 200; body = @{ value = @(
+                                        @{ deviceId = 'dev1'; installState = 'installed' },
+                                        @{ deviceId = 'dev2'; installState = 'failed' },
+                                        @{ deviceId = 'devX'; installState = 'installed' }
+                                    ) } }
+                        }
+                        @{ status = 500 }
+                    }
+                }
+            }
+        }
+
+        It 'reads deployment statuses for 25 apps in 2 beta batch calls and keeps the rows' {
+            Set-IntuneDevices -Count 2
+            Set-DeployedAppsMock -AppCount 25
+            Export-IntuneAppInventory -ApplicationName 'Java*' -IncludeDeployedApps -OutputJsonPath $global:JsonPath | Out-Null
+
+            Should -Invoke Invoke-MgGraphRequest -Times 3 -Exactly -Scope It
+            @($global:SeenUris | Where-Object { $_ -like '*beta*$batch' }).Count | Should -Be 3
+            $statusRequests = @($global:SeenRequests | Where-Object { ([string]$_.url) -like '*/deviceStatuses' })
+            $statusRequests.Count | Should -Be 25
+            $statusRequests[0].url | Should -Be '/deviceAppManagement/mobileApps/app1/deviceStatuses'
+            Should -Invoke Invoke-NCGraphAllPagesCore -Times 0 -Exactly -Scope It -ParameterFilter { $Uri -like '*deviceStatuses*' }
+
+            $rows = @(Get-Content -LiteralPath $global:JsonPath -Raw | ConvertFrom-Json)
+            $deployedRows = @($rows | Where-Object Source -eq 'DeploymentStatus')
+            $deployedRows.Count | Should -Be 50
+            $row = $deployedRows | Where-Object { $_.AppName -eq 'Java Deployed 7' -and $_.DeviceId -eq 'dev2' }
+            $row.InstallState | Should -Be 'failed'
+            $row.AppType | Should -Not -BeNullOrEmpty
+            @($rows | Where-Object Source -eq 'DetectedApps').Count | Should -Be 2
+        }
+
+        It 'reports a failed deployment status read with the existing warning and keeps the other apps' {
+            Set-IntuneDevices -Count 2
+            Set-DeployedAppsMock -AppCount 3
+            $global:FailDevice = 'app2'
+            Export-IntuneAppInventory -ApplicationName 'Java*' -IncludeDeployedApps -OnlySuccessfulInstalls -OutputJsonPath $global:JsonPath | Out-Null
+
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'WARNING' -and $Message -eq 'Error fetching data: denied' }
+            $rows = @(Get-Content -LiteralPath $global:JsonPath -Raw | ConvertFrom-Json)
+            @(@($rows | Where-Object Source -eq 'DeploymentStatus').AppName | Sort-Object) | Should -Be @('Java Deployed 1', 'Java Deployed 3')
+        }
+
+        It 'does not request the last inventory date again for a device whose v1.0 read returned a blank date' {
+            Set-IntuneDevices -Count 2
+            Set-DeployedAppsMock -AppCount 3 -BlankLastSync
+            Export-IntuneAppInventory -ApplicationName 'Java*' -IncludeDeployedApps -LastInventory -OutputJsonPath $global:JsonPath | Out-Null
+
+            $lastSyncRequests = @($global:SeenRequests | Where-Object { ([string]$_.url) -like '*select=lastSyncDateTime' })
+            @($lastSyncRequests | Where-Object { $_.url -like '*/dev1?*' }).Count | Should -Be 1
+            @($lastSyncRequests | Where-Object { $_.url -like '*/dev2?*' }).Count | Should -Be 1
+        }
+    }
 }
 
 Describe 'New-IntuneAppBasedGroup batching' {
