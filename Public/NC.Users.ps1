@@ -114,6 +114,81 @@ function Remove-EntraUser {
 
     begin {
         $graphConnected = $null
+        $queue = [System.Collections.Generic.List[string]]::new()
+        $state = @{ StartLineWritten = $false }
+
+        $flush = {
+            if ($queue.Count -eq 0) { return }
+            $items = @($queue)
+            $queue.Clear()
+
+            if (-not $state.StartLineWritten) {
+                Write-NCMessage "Processing users in Graph batches (20 per request) ..." -Level INFO
+                $state.StartLineWritten = $true
+            }
+
+            for ($offset = 0; $offset -lt $items.Count; $offset += 20) {
+                $chunk = @($items[$offset..([Math]::Min($offset + 20, $items.Count) - 1)])
+
+                # (a) Read the whole chunk.
+                $lookups = @(for ($i = 0; $i -lt $chunk.Count; $i++) {
+                        @{
+                            Id     = "m$i"
+                            Method = 'GET'
+                            Url    = "/users/$([uri]::EscapeDataString($chunk[$i]))?`$select=id,displayName,userPrincipalName,mail,userType"
+                        }
+                    })
+                $lookupResponses = @(Invoke-NCGraphBatch -Requests $lookups -Activity 'Resolving users')
+
+                # (b) Confirm per user.
+                $approved = [System.Collections.Generic.List[object]]::new()
+                for ($i = 0; $i -lt $chunk.Count; $i++) {
+                    $response = $lookupResponses[$i]
+                    if (-not $response.Success) {
+                        Write-NCMessage "Unable to resolve user '$($chunk[$i])': $($response.ErrorMessage)" -Level ERROR
+                        continue
+                    }
+
+                    $user = [pscustomobject]$response.Body
+                    if ($PSCmdlet.ShouldProcess($user.userPrincipalName, "Remove Entra user $($user.displayName)")) {
+                        $approved.Add($user) | Out-Null
+                    }
+                }
+
+                # (c) Delete the approved users in one batch.
+                if ($approved.Count -eq 0) { continue }
+                $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                        @{
+                            Id     = "m$i"
+                            Method = 'DELETE'
+                            Url    = "/users/$([uri]::EscapeDataString([string]$approved[$i].id))"
+                        }
+                    })
+                $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity 'Removing users')
+
+                # (d) Report in input order.
+                for ($i = 0; $i -lt $approved.Count; $i++) {
+                    $user = $approved[$i]
+                    $response = $responses[$i]
+                    if ($response.Success) {
+                        if ($PassThru.IsPresent) {
+                            [pscustomobject]@{
+                                'Display Name'        = $user.displayName
+                                'User Principal Name' = $user.userPrincipalName
+                                'Mail'                = $user.mail
+                                'User Type'           = $user.userType
+                                'User Id'             = $user.id
+                            }
+                        }
+
+                        Write-NCMessage "Removed Entra user '$($user.displayName)' ($($user.userPrincipalName))." -Level SUCCESS
+                    }
+                    else {
+                        Write-NCMessage "Unable to remove user '$($user.displayName)': $($response.ErrorMessage)" -Level ERROR
+                    }
+                }
+            }
+        }
     }
 
     process {
@@ -127,37 +202,15 @@ function Remove-EntraUser {
             if (-not $graphConnected) {
                 Add-EmptyLine
                 Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
-                return
             }
         }
+        if (-not $graphConnected) { return }
 
-        try {
-            $user = Get-MgUser -UserId $UserPrincipalName -Property Id, DisplayName, UserPrincipalName, Mail, UserType -ErrorAction Stop
-        }
-        catch {
-            Write-NCMessage "Unable to resolve user '$UserPrincipalName': $($_.Exception.Message)" -Level ERROR
-            return
-        }
+        $queue.Add($UserPrincipalName.Trim()) | Out-Null
+        if ($queue.Count -ge 20) { & $flush }
+    }
 
-        if ($PSCmdlet.ShouldProcess($user.UserPrincipalName, "Remove Entra user $($user.DisplayName)")) {
-            try {
-                Remove-MgUser -UserId $user.Id -ErrorAction Stop
-
-                if ($PassThru.IsPresent) {
-                    [pscustomobject]@{
-                        'Display Name'        = $user.DisplayName
-                        'User Principal Name' = $user.UserPrincipalName
-                        'Mail'                = $user.Mail
-                        'User Type'           = $user.UserType
-                        'User Id'             = $user.Id
-                    }
-                }
-
-                Write-NCMessage "Removed Entra user '$($user.DisplayName)' ($($user.UserPrincipalName))." -Level SUCCESS
-            }
-            catch {
-                Write-NCMessage "Unable to remove user '$($user.DisplayName)': $($_.Exception.Message)" -Level ERROR
-            }
-        }
+    end {
+        if ($graphConnected) { & $flush }
     }
 }

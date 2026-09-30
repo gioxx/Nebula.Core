@@ -54,63 +54,92 @@ function Disable-UserDevices {
 
             $results = [System.Collections.Generic.List[object]]::new()
             $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            $queue = foreach ($entry in $targets) { if ($dedup.Add($entry)) { $entry } }
-            $counter = 0
+            $queue = @(foreach ($entry in $targets) { if ($dedup.Add($entry)) { $entry } })
 
-            foreach ($upn in $queue) {
-                $counter++
-                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
-                Write-Progress -Activity "Resolving user $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
+            Write-NCMessage ("Processing {0} user(s) in Graph batches (20 per request) ..." -f $queue.Count) -Level INFO
 
-                try {
-                    $resolvedUpn = Find-UserRecipient -UserPrincipalName $upn
-                    if (-not $resolvedUpn) {
+            for ($offset = 0; $offset -lt $queue.Count; $offset += 20) {
+                $chunk = @($queue[$offset..([Math]::Min($offset + 20, $queue.Count) - 1)])
+                $Percentage = Get-NCProgressPercent -Current $offset -Total $queue.Count
+                Write-Progress -Activity "Resolving users" -Status "$offset of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
+
+                # (a) Resolve the whole chunk.
+                $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                $resolvedUsers = Resolve-NCGraphUserBatch -Identifier $chunk -Property @('id', 'userPrincipalName', 'displayName') -FailedIdentifier $failedUsers
+
+                $users = [System.Collections.Generic.List[object]]::new()
+                foreach ($upn in $chunk) {
+                    $user = $resolvedUsers[$upn.Trim()]
+                    if (-not $user -or -not $user.id) {
+                        if (-not $failedUsers.Contains($upn.Trim())) {
+                            Write-NCMessage "Can't find Azure AD account for user $upn." -Level ERROR
+                        }
+                        continue
+                    }
+                    $users.Add($user) | Out-Null
+                }
+                if ($users.Count -eq 0) { continue }
+
+                # (b) Read the registered devices of every resolved user.
+                $deviceRequests = @(for ($i = 0; $i -lt $users.Count; $i++) {
+                        @{
+                            Id     = "m$i"
+                            Method = 'GET'
+                            Url    = "/users/$([uri]::EscapeDataString([string]$users[$i].id))/registeredDevices?`$select=id,displayName,accountEnabled"
+                        }
+                    })
+                $deviceResponses = @(Invoke-NCGraphBatchCollection -Requests $deviceRequests -Activity 'Reading registered devices')
+
+                # (c) Confirm per device.
+                $approved = [System.Collections.Generic.List[object]]::new()
+                for ($i = 0; $i -lt $users.Count; $i++) {
+                    $user = $users[$i]
+                    $response = $deviceResponses[$i]
+                    if (-not $response.Success) {
+                        Write-NCMessage "Unable to retrieve registered devices for $($user.userPrincipalName). $($response.ErrorMessage)" -Level ERROR
                         continue
                     }
 
-                    $user = Get-MgUser -UserId $resolvedUpn -ErrorAction Stop
-                }
-                catch {
-                    Write-NCMessage "Can't find Azure AD account for user $upn. $($_.Exception.Message)" -Level ERROR
-                    continue
-                }
-
-                if (-not $user) {
-                    Write-NCMessage "Can't find Azure AD account for user $upn." -Level ERROR
-                    continue
-                }
-
-                try {
-                    $devices = Get-MgUserRegisteredDevice -UserId $user.Id -All
-                }
-                catch {
-                    Write-NCMessage "Unable to retrieve registered devices for $($user.UserPrincipalName). $($_.Exception.Message)" -Level ERROR
-                    continue
-                }
-
-                if (-not $devices -or $devices.Count -eq 0) {
-                    Write-NCMessage ("No registered devices found for {0}." -f $user.UserPrincipalName) -Level WARNING
-                    continue
-                }
-
-                foreach ($device in $devices) {
-                    $deviceLabel = if ($device.DisplayName) { $device.DisplayName } else { $device.Id }
-                    if (-not $PSCmdlet.ShouldProcess($deviceLabel, "Disable device for user $($user.UserPrincipalName)")) {
+                    $devices = @($response.Items)
+                    if ($devices.Count -eq 0) {
+                        Write-NCMessage ("No registered devices found for {0}." -f $user.userPrincipalName) -Level WARNING
                         continue
                     }
 
-                    try {
-                        Update-MgDevice -DeviceId $device.Id -AccountEnabled:$false -ErrorAction Stop | Out-Null
+                    foreach ($device in $devices) {
+                        $deviceLabel = if ($device.displayName) { $device.displayName } else { $device.id }
+                        if ($PSCmdlet.ShouldProcess($deviceLabel, "Disable device for user $($user.userPrincipalName)")) {
+                            $approved.Add([pscustomobject]@{ User = $user; Device = $device; Label = $deviceLabel }) | Out-Null
+                        }
+                    }
+                }
+                if ($approved.Count -eq 0) { continue }
+
+                # (d) Disable the approved devices in batches.
+                $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                        @{
+                            Id     = "m$i"
+                            Method = 'PATCH'
+                            Url    = "/devices/$([uri]::EscapeDataString([string]$approved[$i].Device.id))"
+                            Body   = @{ accountEnabled = $false }
+                        }
+                    })
+                $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity 'Disabling devices')
+                for ($i = 0; $i -lt $approved.Count; $i++) {
+                    $user = $approved[$i].User
+                    $device = $approved[$i].Device
+                    $response = $responses[$i]
+                    if ($response.Success) {
                         $results.Add([pscustomobject]@{
-                                UserPrincipalName = $user.UserPrincipalName
-                                UserDisplayName   = $user.DisplayName
-                                DeviceId          = $device.Id
-                                DeviceDisplayName = $device.DisplayName
+                                UserPrincipalName = $user.userPrincipalName
+                                UserDisplayName   = $user.displayName
+                                DeviceId          = $device.id
+                                DeviceDisplayName = $device.displayName
                                 Action            = 'Disabled'
                             }) | Out-Null
                     }
-                    catch {
-                        Write-NCMessage "Failed to disable device $deviceLabel for $($user.UserPrincipalName). $($_.Exception.Message)" -Level ERROR
+                    else {
+                        Write-NCMessage "Failed to disable device $($approved[$i].Label) for $($user.userPrincipalName). $($response.ErrorMessage)" -Level ERROR
                     }
                 }
             }
@@ -181,46 +210,59 @@ function Disable-UserSignIn {
 
             $results = [System.Collections.Generic.List[object]]::new()
             $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            $queue = foreach ($entry in $targets) { if ($dedup.Add($entry)) { $entry } }
-            $counter = 0
+            $queue = @(foreach ($entry in $targets) { if ($dedup.Add($entry)) { $entry } })
 
-            foreach ($upn in $queue) {
-                $counter++
-                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
-                Write-Progress -Activity "Processing $upn" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
+            Write-NCMessage ("Processing {0} user(s) in Graph batches (20 per request) ..." -f $queue.Count) -Level INFO
 
-                try {
-                    $resolvedUpn = Find-UserRecipient -UserPrincipalName $upn
-                    if (-not $resolvedUpn) {
+            for ($offset = 0; $offset -lt $queue.Count; $offset += 20) {
+                $chunk = @($queue[$offset..([Math]::Min($offset + 20, $queue.Count) - 1)])
+                $Percentage = Get-NCProgressPercent -Current $offset -Total $queue.Count
+                Write-Progress -Activity "Processing users" -Status "$offset of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
+
+                # (a) Resolve the whole chunk.
+                $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                $resolvedUsers = Resolve-NCGraphUserBatch -Identifier $chunk -Property @('id', 'userPrincipalName', 'displayName') -FailedIdentifier $failedUsers
+
+                # (b) Confirm per user.
+                $approved = [System.Collections.Generic.List[object]]::new()
+                foreach ($upn in $chunk) {
+                    $user = $resolvedUsers[$upn.Trim()]
+                    if (-not $user -or -not $user.id) {
+                        if (-not $failedUsers.Contains($upn.Trim())) {
+                            Write-NCMessage "Can't find Azure AD account for user $upn." -Level ERROR
+                        }
                         continue
                     }
 
-                    $user = Get-MgUser -UserId $resolvedUpn -ErrorAction Stop
+                    if ($PSCmdlet.ShouldProcess($user.userPrincipalName, "Disable sign-in")) {
+                        $approved.Add($user) | Out-Null
+                    }
                 }
-                catch {
-                    Write-NCMessage "Can't find Azure AD account for user $upn. $($_.Exception.Message)" -Level ERROR
-                    continue
-                }
+                if ($approved.Count -eq 0) { continue }
 
-                if (-not $user) {
-                    Write-NCMessage "Can't find Azure AD account for user $upn." -Level ERROR
-                    continue
-                }
-
-                if (-not $PSCmdlet.ShouldProcess($user.UserPrincipalName, "Disable sign-in")) {
-                    continue
-                }
-
-                try {
-                    Update-MgUser -UserId $user.Id -AccountEnabled:$false -ErrorAction Stop | Out-Null
-                    $results.Add([pscustomobject]@{
-                            UserPrincipalName = $user.UserPrincipalName
-                            DisplayName       = $user.DisplayName
-                            Action            = 'SignInDisabled'
-                        }) | Out-Null
-                }
-                catch {
-                    Write-NCMessage "Failed to disable sign-in for $($user.UserPrincipalName). $($_.Exception.Message)" -Level ERROR
+                # (c) Disable the approved users in one batch.
+                $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                        @{
+                            Id     = "m$i"
+                            Method = 'PATCH'
+                            Url    = "/users/$([uri]::EscapeDataString([string]$approved[$i].id))"
+                            Body   = @{ accountEnabled = $false }
+                        }
+                    })
+                $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity 'Disabling sign-in')
+                for ($i = 0; $i -lt $approved.Count; $i++) {
+                    $user = $approved[$i]
+                    $response = $responses[$i]
+                    if ($response.Success) {
+                        $results.Add([pscustomobject]@{
+                                UserPrincipalName = $user.userPrincipalName
+                                DisplayName       = $user.displayName
+                                Action            = 'SignInDisabled'
+                            }) | Out-Null
+                    }
+                    else {
+                        Write-NCMessage "Failed to disable sign-in for $($user.userPrincipalName). $($response.ErrorMessage)" -Level ERROR
+                    }
                 }
             }
 
@@ -778,12 +820,14 @@ function Revoke-UserSessions {
                 return
             }
 
-            $queue = [System.Collections.Generic.List[Microsoft.Graph.PowerShell.Models.IMicrosoftGraphUser]]::new()
+            $queue = [System.Collections.Generic.List[object]]::new()
 
             if ($All.IsPresent) {
                 try {
                     $allUsers = Get-MgUser -All -ConsistencyLevel eventual -ErrorAction Stop
-                    foreach ($u in $allUsers) { $queue.Add($u) | Out-Null }
+                    foreach ($u in $allUsers) {
+                        $queue.Add([pscustomobject]@{ id = $u.Id; userPrincipalName = $u.UserPrincipalName; displayName = $u.DisplayName }) | Out-Null
+                    }
                 }
                 catch {
                     Write-NCMessage "Unable to retrieve all users. $($_.Exception.Message)" -Level ERROR
@@ -792,25 +836,22 @@ function Revoke-UserSessions {
             }
             else {
                 $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-                $uniqueTargets = foreach ($entry in $targets) { if ($dedup.Add($entry)) { $entry } }
+                $uniqueTargets = @(foreach ($entry in $targets) { if ($dedup.Add($entry)) { $entry } })
 
-                foreach ($upn in $uniqueTargets) {
-                    try {
-                        $resolvedUpn = Find-UserRecipient -UserPrincipalName $upn
-                        if (-not $resolvedUpn) {
-                            continue
-                        }
+                Write-NCMessage ("Processing {0} user(s) in Graph batches (20 per request) ..." -f $uniqueTargets.Count) -Level INFO
 
-                        $user = Get-MgUser -UserId $resolvedUpn -ErrorAction Stop
-                        if ($user) {
+                for ($offset = 0; $offset -lt $uniqueTargets.Count; $offset += 20) {
+                    $chunk = @($uniqueTargets[$offset..([Math]::Min($offset + 20, $uniqueTargets.Count) - 1)])
+                    $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                    $resolvedUsers = Resolve-NCGraphUserBatch -Identifier $chunk -Property @('id', 'userPrincipalName', 'displayName') -FailedIdentifier $failedUsers
+                    foreach ($upn in $chunk) {
+                        $user = $resolvedUsers[$upn.Trim()]
+                        if ($user -and $user.id) {
                             $queue.Add($user) | Out-Null
                         }
-                        else {
+                        elseif (-not $failedUsers.Contains($upn.Trim())) {
                             Write-NCMessage "Can't find Azure AD account for user $upn." -Level ERROR
                         }
-                    }
-                    catch {
-                        Write-NCMessage "Can't find Azure AD account for user $upn. $($_.Exception.Message)" -Level ERROR
                     }
                 }
             }
@@ -820,33 +861,51 @@ function Revoke-UserSessions {
                 return
             }
 
+            if ($All.IsPresent) {
+                Write-NCMessage ("Processing {0} user(s) in Graph batches (20 per request) ..." -f $queue.Count) -Level INFO
+            }
+
             $results = [System.Collections.Generic.List[object]]::new()
-            $counter = 0
 
-            foreach ($user in $queue) {
-                $counter++
-                $Percentage = Get-NCProgressPercent -Current $counter -Total $queue.Count
-                Write-Progress -Activity "Revoking sessions" -Status "$counter of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
+            for ($offset = 0; $offset -lt $queue.Count; $offset += 20) {
+                $chunk = @($queue[$offset..([Math]::Min($offset + 20, $queue.Count) - 1)])
+                $Percentage = Get-NCProgressPercent -Current $offset -Total $queue.Count
+                Write-Progress -Activity "Revoking sessions" -Status "$offset of $($queue.Count) - $Percentage%" -PercentComplete $Percentage
 
-                if ($exclusions.Contains($user.UserPrincipalName)) {
-                    Write-NCMessage ("Skipping user {0}" -f $user.UserPrincipalName) -Level INFO
-                    continue
+                $approved = [System.Collections.Generic.List[object]]::new()
+                foreach ($user in $chunk) {
+                    if ($exclusions.Contains([string]$user.userPrincipalName)) {
+                        Write-NCMessage ("Skipping user {0}" -f $user.userPrincipalName) -Level INFO
+                        continue
+                    }
+
+                    if ($PSCmdlet.ShouldProcess($user.userPrincipalName, "Revoke sign-in sessions")) {
+                        $approved.Add($user) | Out-Null
+                    }
                 }
+                if ($approved.Count -eq 0) { continue }
 
-                if (-not $PSCmdlet.ShouldProcess($user.UserPrincipalName, "Revoke sign-in sessions")) {
-                    continue
-                }
-
-                try {
-                    Revoke-MgUserSignInSession -UserId $user.Id -ErrorAction Stop | Out-Null
-                    $results.Add([pscustomobject]@{
-                            UserPrincipalName = $user.UserPrincipalName
-                            DisplayName       = $user.DisplayName
-                            Action            = 'SessionsRevoked'
-                        }) | Out-Null
-                }
-                catch {
-                    Write-NCMessage "Failed to revoke sessions for $($user.UserPrincipalName). $($_.Exception.Message)" -Level ERROR
+                $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                        @{
+                            Id     = "m$i"
+                            Method = 'POST'
+                            Url    = "/users/$([uri]::EscapeDataString([string]$approved[$i].id))/revokeSignInSessions"
+                        }
+                    })
+                $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity 'Revoking sessions')
+                for ($i = 0; $i -lt $approved.Count; $i++) {
+                    $user = $approved[$i]
+                    $response = $responses[$i]
+                    if ($response.Success) {
+                        $results.Add([pscustomobject]@{
+                                UserPrincipalName = $user.userPrincipalName
+                                DisplayName       = $user.displayName
+                                Action            = 'SessionsRevoked'
+                            }) | Out-Null
+                    }
+                    else {
+                        Write-NCMessage "Failed to revoke sessions for $($user.userPrincipalName). $($response.ErrorMessage)" -Level ERROR
+                    }
                 }
             }
 
