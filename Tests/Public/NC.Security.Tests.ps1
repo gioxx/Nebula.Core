@@ -101,6 +101,134 @@ Describe 'Security batching' {
     }
 
     Context 'Disable-UserSignIn' {
+        It 'splits 25 users into 2 write batches (20 + 5) with the right ids' {
+            Set-SecurityGraphMock
+            $result = New-Upns 25 | Disable-UserSignIn -Confirm:$false -PassThru
+
+            # 2 chunks x (resolve batch + write batch)
+            Should -Invoke Invoke-MgGraphRequest -Times 4 -Exactly -Scope It
+            $patches = @($global:SeenRequests | Where-Object { $_.method -eq 'PATCH' })
+            $patches.Count | Should -Be 25
+            # Sub-request ids restart at 1 in every $batch call: one '1' per write batch.
+            @($patches | Where-Object { $_.id -eq '1' }).Count | Should -Be 2
+            @($patches | Where-Object { $_.id -eq '20' }).Count | Should -Be 1
+            @($patches | ForEach-Object { $_.url }) | Should -Be @(1..25 | ForEach-Object { "/users/id$_" })
+            @($result).Count | Should -Be 25
+        }
+
+        It 'PATCHes only the users approved at the -Confirm prompt when the middle one is declined' {
+            if (-not ('NCScriptedHost' -as [type])) {
+                Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Globalization;
+using System.Management.Automation;
+using System.Management.Automation.Host;
+using System.Security;
+
+public class NCScriptedHostUI : PSHostUserInterface {
+    public Queue<int> Answers = new Queue<int>();
+    public List<string> Prompts = new List<string>();
+    public override PSHostRawUserInterface RawUI { get { return null; } }
+    public override int PromptForChoice(string caption, string message, Collection<ChoiceDescription> choices, int defaultChoice) {
+        Prompts.Add(message);
+        return Answers.Count > 0 ? Answers.Dequeue() : defaultChoice;
+    }
+    public override Dictionary<string, PSObject> Prompt(string caption, string message, Collection<FieldDescription> descriptions) { throw new NotSupportedException(); }
+    public override PSCredential PromptForCredential(string caption, string message, string userName, string targetName) { throw new NotSupportedException(); }
+    public override PSCredential PromptForCredential(string caption, string message, string userName, string targetName, PSCredentialTypes allowedCredentialTypes, PSCredentialUIOptions options) { throw new NotSupportedException(); }
+    public override string ReadLine() { return string.Empty; }
+    public override SecureString ReadLineAsSecureString() { return new SecureString(); }
+    public override void Write(string value) { }
+    public override void Write(ConsoleColor foregroundColor, ConsoleColor backgroundColor, string value) { }
+    public override void WriteLine(string value) { }
+    public override void WriteErrorLine(string value) { }
+    public override void WriteDebugLine(string message) { }
+    public override void WriteProgress(long sourceId, ProgressRecord record) { }
+    public override void WriteVerboseLine(string message) { }
+    public override void WriteWarningLine(string message) { }
+}
+
+public class NCScriptedHost : PSHost {
+    private readonly NCScriptedHostUI ui = new NCScriptedHostUI();
+    private readonly Guid instanceId = Guid.NewGuid();
+    public NCScriptedHostUI ScriptedUI { get { return ui; } }
+    public override string Name { get { return "NCScriptedHost"; } }
+    public override Version Version { get { return new Version(1, 0); } }
+    public override Guid InstanceId { get { return instanceId; } }
+    public override PSHostUserInterface UI { get { return ui; } }
+    public override CultureInfo CurrentCulture { get { return CultureInfo.InvariantCulture; } }
+    public override CultureInfo CurrentUICulture { get { return CultureInfo.InvariantCulture; } }
+    public override void SetShouldExit(int exitCode) { }
+    public override void EnterNestedPrompt() { throw new NotSupportedException(); }
+    public override void ExitNestedPrompt() { }
+    public override void NotifyBeginApplication() { }
+    public override void NotifyEndApplication() { }
+}
+'@
+            }
+
+            # $PSCmdlet.ShouldProcess cannot be mocked: run the real function in a runspace whose host answers the
+            # -Confirm prompts (Yes, No, Yes), with plain stubs in place of the Pester mocks.
+            $scriptedHost = [NCScriptedHost]::new()
+            $scriptedHost.ScriptedUI.Answers.Enqueue(0)
+            $scriptedHost.ScriptedUI.Answers.Enqueue(2)
+            $scriptedHost.ScriptedUI.Answers.Enqueue(0)
+            $runspace = [runspacefactory]::CreateRunspace($scriptedHost)
+            $runspace.Open()
+            try {
+                $ps = [powershell]::Create()
+                $ps.Runspace = $runspace
+                $null = $ps.AddScript({
+                        param([string]$Root)
+                        function Test-MgGraphConnection { param([string[]]$Scopes, [bool]$EnsureExchangeOnline) $true }
+                        function Add-EmptyLine {}
+                        function Write-NCMessage { param([string]$Message, [string]$Level) }
+                        function Set-ProgressAndInfoPreferences {}
+                        function Restore-ProgressAndInfoPreferences {}
+                        function Find-UserRecipient { param([string]$UserPrincipalName, [switch]$PreferGraphIdentity, [switch]$SkipDirectGraphLookup) }
+                        function Get-MgContext {}
+                        function Get-NCProgressPercent { param($Current, $Total) 0 }
+                        $global:SeenRequests = [System.Collections.Generic.List[object]]::new()
+                        function Invoke-MgGraphRequest {
+                            param([string]$Uri, [string]$Method, [object]$Body, [string]$ContentType, [string]$OutputType)
+                            $payload = $Body | ConvertFrom-Json
+                            @{
+                                responses = @(foreach ($request in $payload.requests) {
+                                        $global:SeenRequests.Add($request)
+                                        if ($request.method -eq 'GET' -and ([string]$request.url) -match '^/users/user(\d+)%40contoso\.com') {
+                                            $n = $Matches[1]
+                                            @{ id = $request.id; status = 200; body = @{ id = "id$n"; userPrincipalName = "user$n@contoso.com"; displayName = "User $n" } }
+                                        }
+                                        else {
+                                            @{ id = $request.id; status = 204 }
+                                        }
+                                    })
+                            }
+                        }
+                        . "$Root/Private/NC-Hlp.Intune.ps1"
+                        . "$Root/Private/NC-Hlp.GraphBatch.ps1"
+                        . "$Root/Public/NC.Security.ps1"
+
+                        $result = @('user1@contoso.com', 'user2@contoso.com', 'user3@contoso.com') | Disable-UserSignIn -Confirm -PassThru
+                        [pscustomobject]@{
+                            Result  = $result
+                            Patches = @($global:SeenRequests | Where-Object { $_.method -eq 'PATCH' } | ForEach-Object { [string]$_.url })
+                        }
+                    }).AddArgument((Resolve-Path "$PSScriptRoot/../..").Path)
+                $output = $ps.Invoke()
+                $ps.Streams.Error | ForEach-Object { throw $_ }
+            }
+            finally {
+                $runspace.Dispose()
+            }
+
+            $scriptedHost.ScriptedUI.Prompts.Count | Should -Be 3
+            @($output[0].Patches) | Should -Be @('/users/id1', '/users/id3')
+            @($output[0].Result.UserPrincipalName) | Should -Be @('user1@contoso.com', 'user3@contoso.com')
+        }
+
         It 'uses 2 Graph calls for 14 users and PATCHes accountEnabled=false' {
             Set-SecurityGraphMock
             New-Upns 14 | Disable-UserSignIn -Confirm:$false
