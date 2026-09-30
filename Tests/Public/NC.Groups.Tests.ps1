@@ -140,29 +140,33 @@ Describe 'Entra group user identity resolution' {
 
 
     It 'reads memberships for a tenant member through the unchanged direct lookup' {
-        Mock Get-MgUser {
-            if ($UserId -eq $memberUpn) {
-                return $memberUser
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                if ($request.url -like "/users/$memberId/memberOf*") { return @{ status = 200; body = @{ value = @(@{ id = $groupId; displayName = 'Cloud Group'; mail = 'cloud-group@contoso.com' }) } } }
+                if ($request.url -like '/users/employee%40contoso.com*') { return @{ status = 200; body = @{ id = $memberId; userPrincipalName = $memberUpn; displayName = 'Tenant Employee' } } }
+                @{ status = 500 }
             }
-
-            throw "Unexpected user lookup: $UserId"
         }
 
         $null = Get-EntraGroupUser -UserIdentifier $memberUpn
 
         Assert-MockCalled Find-UserRecipient -Times 0 -Scope It
-        Assert-MockCalled Get-MgUserMemberOf -Times 1 -Scope It -ParameterFilter {
-            $UserId -eq $memberId
+        Assert-MockCalled Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
+        Assert-MockCalled Invoke-MgGraphRequest -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Body -like "*/users/$memberId/memberOf*"
         }
     }
 
     It 'reads memberships for a guest through a Graph-compatible fallback identity' {
-        Mock Get-MgUser {
-            if ($UserId -eq $guestId) {
-                return $guestUser
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                if ($request.url -like "/users/$guestId/memberOf*") { return @{ status = 200; body = @{ value = @(@{ id = $groupId; displayName = 'Cloud Group' }) } } }
+                if ($request.url -like "/users/$guestId*") { return @{ status = 200; body = @{ id = $guestId; userPrincipalName = 'consultant_external.example#EXT#@contoso.onmicrosoft.com'; displayName = 'External Consultant' } } }
+                if ($request.url -like '/users/consultant%40external.example*') { return @{ status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'missing' } } } }
+                @{ status = 500 }
             }
-
-            throw "User not found: $UserId"
         }
 
         $null = Get-EntraGroupUser -UserIdentifier $guestMail
@@ -170,8 +174,8 @@ Describe 'Entra group user identity resolution' {
         Assert-MockCalled Find-UserRecipient -Times 1 -Scope It -ParameterFilter {
             $UserPrincipalName -eq $guestMail -and $PreferGraphIdentity
         }
-        Assert-MockCalled Get-MgUserMemberOf -Times 1 -Scope It -ParameterFilter {
-            $UserId -eq $guestId
+        Assert-MockCalled Invoke-MgGraphRequest -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Body -like "*/users/$guestId/memberOf*"
         }
     }
 
@@ -733,6 +737,220 @@ Describe 'Entra group owner batching' {
             $script:ownerBatchSizes[0] | Should -Be @('POST /groups/id-dst/owners/$ref', 'POST /groups/id-dst/owners/$ref')
             $result.OwnersCopied | Should -Be 2
             Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Copied owner 'o1@contoso.com' to 'Group dst'." -and $Level -eq 'SUCCESS' }
+        }
+    }
+}
+
+Describe 'Entra group read batching' {
+    BeforeAll {
+        function Set-ProgressAndInfoPreferences {}
+        function Restore-ProgressAndInfoPreferences {}
+        function Get-NCProgressPercent { param($Current, $Total) 0 }
+        function Get-MgGroupMember {
+            param(
+                [string]$GroupId,
+                [switch]$All
+            )
+        }
+        function Out-GridView {
+            param(
+                [Parameter(ValueFromPipeline = $true)]
+                [object]$InputObject,
+                [string]$Title
+            )
+            process {}
+        }
+    }
+
+    BeforeEach {
+        Mock Test-MgGraphConnection { $true }
+        Mock Add-EmptyLine {}
+        Mock Write-NCMessage {}
+        Mock Write-Progress {}
+        Mock Start-Sleep {}
+        Mock Get-MgContext { [pscustomobject]@{ Environment = 'Global' } }
+        Mock Find-UserRecipient { $null }
+    }
+
+    Context 'Get-EntraGroupUser' {
+        BeforeEach {
+            Mock Invoke-MgGraphRequest {
+                New-TestBatchResponse -Body $Body -Responder {
+                    param($request)
+                    if ($request.url -like '/users/*/memberOf*') {
+                        return @{ status = 200; body = @{ value = @(
+                                    @{ '@odata.type' = '#microsoft.graph.group'; id = 'g2'; displayName = 'Zulu'; mail = 'zulu@contoso.com'; groupTypes = @('Unified'); description = 'Z group'; mailNickname = 'zulu'; mailEnabled = $true }
+                                    @{ '@odata.type' = '#microsoft.graph.group'; id = 'g1'; displayName = 'Alpha'; mail = $null; groupTypes = @(); description = 'A group'; mailNickname = 'alpha'; mailEnabled = $false }
+                                ) } }
+                    }
+                    if ($request.url -like '/users/*') {
+                        $upn = [uri]::UnescapeDataString(($request.url -replace '^/users/([^?]+).*$', '$1'))
+                        return @{ status = 200; body = @{ id = "id-$upn"; userPrincipalName = $upn; displayName = "Name $upn" } }
+                    }
+                    @{ status = 500 }
+                }
+            }
+        }
+
+        It 'reads 14 users with one resolve batch and one memberOf batch' {
+            $users = @(1..14 | ForEach-Object { "user$_@contoso.com" })
+
+            $users | Get-EntraGroupUser | Out-Null
+
+            Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq 'Processing users in Graph batches (20 per request) ...' -and $Level -eq 'INFO' }
+        }
+
+        It 'emits the same rows, sorted by group name, for each user in input order' {
+            $result = @('a@contoso.com', 'b@contoso.com' | Get-EntraGroupUser)
+
+            $result.Count | Should -Be 4
+            $result[0].PSObject.Properties.Name | Should -Be @('Group Name', 'Group Mail')
+            $result[0].'Group Name' | Should -Be 'Alpha'
+            $result[0].'Group Mail' | Should -BeNullOrEmpty
+            $result[1].'Group Name' | Should -Be 'Zulu'
+            $result[1].'Group Mail' | Should -Be 'zulu@contoso.com'
+        }
+
+        It 'emits the extra GridView columns in the original order' {
+            $script:gridRows = @()
+            Mock Out-GridView { $script:gridRows += $InputObject }
+
+            Get-EntraGroupUser -UserIdentifier 'a@contoso.com' -GridView
+
+            $script:gridRows[0].PSObject.Properties.Name | Should -Be @('Group Name', 'Group Mail', 'Group Description', 'Group Mail Nickname', 'Group Mail Enabled', 'Group Type', 'Group ID')
+            $zulu = $script:gridRows | Where-Object { $_.'Group Name' -eq 'Zulu' }
+            $zulu.'Group Description' | Should -Be 'Z group'
+            $zulu.'Group Type' | Should -Be 'Unified'
+            $zulu.'Group ID' | Should -Be 'g2'
+        }
+
+        It 'reports a single connection error and skips all work when Graph is unavailable' {
+            Mock Test-MgGraphConnection { $false }
+
+            @('a@contoso.com', 'b@contoso.com') | Get-EntraGroupUser
+
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Can't connect or use Microsoft Graph modules. Please check logs." -and $Level -eq 'ERROR' }
+            Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly -Scope It
+        }
+
+        It 'falls back to the display-name filter once for an unresolved input' {
+            Mock Get-MgUser { $null }
+            Mock Invoke-MgGraphRequest {
+                New-TestBatchResponse -Body $Body -Responder {
+                    param($request)
+                    @{ status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'missing' } } }
+                }
+            }
+
+            Get-EntraGroupUser -UserIdentifier 'Nobody Here'
+
+            Should -Invoke Get-MgUser -Times 1 -Exactly -Scope It
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "User 'Nobody Here' not found" -and $Level -eq 'WARNING' }
+        }
+
+        It 'reports a missing object ID with the original message' {
+            Mock Invoke-MgGraphRequest {
+                New-TestBatchResponse -Body $Body -Responder {
+                    param($request)
+                    @{ status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'gone' } } }
+                }
+            }
+
+            Get-EntraGroupUser -UserIdentifier '11111111-1111-1111-1111-111111111111'
+
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -like "Entra user with ID '11111111-1111-1111-1111-111111111111' not found: *" -and $Level -eq 'ERROR' }
+        }
+    }
+
+    Context 'Get-EntraGroupDevice' {
+        BeforeEach {
+            Mock Invoke-MgGraphRequest {
+                New-TestBatchResponse -Body $Body -Responder {
+                    param($request)
+                    if ($request.url -like '/devices/*/memberOf*') {
+                        return @{ status = 200; body = @{ value = @(@{ '@odata.type' = '#microsoft.graph.group'; id = 'g1'; displayName = 'Device Group'; mail = 'dg@contoso.com' }) } }
+                    }
+                    $decoded = [uri]::UnescapeDataString($request.url)
+                    $name = $decoded -replace "^/devices\?\`$filter=displayName eq '([^']+)'.*$", '$1'
+                    @{ status = 200; body = @{ value = @(@{ id = "id-$name"; displayName = $name }) } }
+                }
+            }
+        }
+
+        It 'reads 3 devices by name with one resolve batch and one memberOf batch' {
+            $result = @('PC1', 'PC2', 'PC3' | Get-EntraGroupDevice)
+
+            Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
+            $result.Count | Should -Be 3
+            $result[0].PSObject.Properties.Name | Should -Be @('Group Name', 'Group Mail')
+            $result[0].'Group Name' | Should -Be 'Device Group'
+            $result[0].'Group Mail' | Should -Be 'dg@contoso.com'
+        }
+
+        It 'reports a missing device ID with the original message' {
+            Mock Invoke-MgGraphRequest {
+                New-TestBatchResponse -Body $Body -Responder {
+                    param($request)
+                    @{ status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'gone' } } }
+                }
+            }
+
+            Get-EntraGroupDevice -DeviceIdentifier '22222222-2222-2222-2222-222222222222'
+
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -like "Entra device with ID '22222222-2222-2222-2222-222222222222' not found: *" -and $Level -eq 'ERROR' }
+        }
+    }
+
+    Context 'Get-EntraGroupMembers' {
+        It 'reads registered owners and users of 3 device members in one batch of 6 sub-requests' {
+            Mock Get-MgGroup { [pscustomobject]@{ Id = 'group-id'; DisplayName = 'Group' } }
+            Mock Get-MgGroupMember {
+                1..3 | ForEach-Object {
+                    [pscustomobject]@{ Id = "dev$_"; AdditionalProperties = @{ '@odata.type' = '#microsoft.graph.device'; displayName = "PC$_" } }
+                }
+            }
+            Mock Invoke-MgGraphRequest {
+                New-TestBatchResponse -Body $Body -Responder {
+                    param($request)
+                    if ($request.url -like '*/registeredOwners') { return @{ status = 200; body = @{ value = @(@{ id = 'u1'; userPrincipalName = 'owner@contoso.com'; displayName = 'Owner' }) } } }
+                    @{ status = 200; body = @{ value = @(@{ id = 'u2'; displayName = 'Only Name' }) } }
+                }
+            }
+
+            $result = @(Get-EntraGroupMembers -GroupName 'Group' -IncludeDeviceUsers)
+
+            Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly -Scope It -ParameterFilter { @(($Body | ConvertFrom-Json).requests).Count -eq 6 }
+            $result.Count | Should -Be 3
+            $result[0].PSObject.Properties.Name | Should -Be @('Member Name', 'Member Type', 'Member Id', 'Device Owners/Users')
+            $result[0].'Device Owners/Users' | Should -Be 'Owners: owner@contoso.com | Users: Only Name'
+        }
+    }
+
+    Context 'Export-EmptyEntraGroups' {
+        It 'checks 45 groups with 3 batch calls and reports only the empty ones' {
+            Mock Get-MgGroup {
+                1..45 | ForEach-Object {
+                    [pscustomobject]@{ Id = "gid$_"; DisplayName = "Group $_"; GroupTypes = @(); SecurityEnabled = $true; MailEnabled = $false }
+                }
+            }
+            Mock Invoke-MgGraphRequest {
+                New-TestBatchResponse -Body $Body -Responder {
+                    param($request)
+                    $number = [int]($request.url -replace '^/groups/gid(\d+)/.*$', '$1')
+                    if ($number % 5 -eq 0) { return @{ status = 200; body = @{ value = @() } } }
+                    @{ status = 200; body = @{ value = @(@{ id = 'member' }) } }
+                }
+            }
+
+            $result = @(Export-EmptyEntraGroups -Csv $false)
+
+            Should -Invoke Invoke-MgGraphRequest -Times 3 -Exactly -Scope It
+            $result.Count | Should -Be 9
+            $result[0].PSObject.Properties.Name | Should -Be @('DisplayName', 'Id', 'GroupType', 'MemberCount', 'MailEnabled', 'SecurityEnabled')
+            $result.Id | Should -Contain 'gid45'
+            $result.Id | Should -Not -Contain 'gid44'
+            $result[0].GroupType | Should -Be 'Security'
         }
     }
 }

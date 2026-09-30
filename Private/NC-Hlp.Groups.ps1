@@ -312,3 +312,39 @@ function Resolve-NCEntraOwnerBatch {
         Resolve-NCEntraOwner -OwnerIdentifier $original
     }
 }
+
+function ConvertTo-NCGraphDirectoryObject {
+    <#
+    .SYNOPSIS
+        Wraps a raw Graph directory object like the SDK's DirectoryObject (Id + AdditionalProperties).
+    .DESCRIPTION
+        Batch responses return camelCase JSON objects (pscustomobject or hashtable), while the read functions were
+        written against SDK objects that expose Id and an AdditionalProperties dictionary holding every other key
+        (including '@odata.type'). This wrapper keeps those consumers unchanged.
+    .PARAMETER Item
+        Raw directory object from a Graph collection response.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [object]$Item
+    )
+
+    $additional = @{}
+    if ($Item -is [System.Collections.IDictionary]) {
+        foreach ($key in $Item.Keys) {
+            if ($key -ne 'id') { $additional[[string]$key] = $Item[$key] }
+        }
+    }
+    elseif ($null -ne $Item) {
+        foreach ($property in $Item.PSObject.Properties) {
+            if ($property.Name -ne 'id') { $additional[$property.Name] = $property.Value }
+        }
+    }
+
+    [pscustomobject]@{
+        Id                   = $Item.id
+        AdditionalProperties = $additional
+    }
+}

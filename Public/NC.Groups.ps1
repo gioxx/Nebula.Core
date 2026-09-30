@@ -2031,19 +2031,27 @@ function Export-EmptyEntraGroups {
             $totalGroups = $groups.Count
             $processedCount = 0
 
+            Write-NCMessage "Processing $totalGroups group(s) in Graph batches (20 per request) ..." -Level INFO
+            $memberRequests = @(for ($i = 0; $i -lt $totalGroups; $i++) {
+                    @{ Id = "g$i"; Method = 'GET'; Url = "/groups/$([uri]::EscapeDataString([string]$groups[$i].Id))/members?`$select=id&`$top=1" }
+                })
+            $memberLookup = @{}
+            foreach ($memberResult in @(Invoke-NCGraphBatch -Requests $memberRequests -Activity 'Checking group members')) {
+                $memberLookup[$memberResult.Id] = $memberResult
+            }
+
             foreach ($group in $groups) {
                 $processedCount++
                 $Percentage = Get-NCProgressPercent -Current $counter -Total $totalGroups
                 Write-Progress -Activity "Checking $($group.DisplayName)" -Status "$processedCount of $totalGroups - $Percentage%" -PercentComplete $Percentage
 
-                try {
-                    $members = @(Get-MgGroupMember -GroupId $group.Id -All -ErrorAction Stop)
-                }
-                catch {
-                    Write-NCMessage "Unable to read members for group '$($group.DisplayName)'. $($_.Exception.Message)" -Level WARNING
+                $memberResult = $memberLookup["g$($processedCount - 1)"]
+                if (-not $memberResult.Success) {
+                    Write-NCMessage "Unable to read members for group '$($group.DisplayName)'. $($memberResult.ErrorMessage)" -Level WARNING
                     continue
                 }
 
+                $members = if ($null -ne $memberResult.Body -and $null -ne $memberResult.Body.value) { @($memberResult.Body.value) } else { @() }
                 if ($members.Count -gt 0) {
                     continue
                 }
@@ -2626,98 +2634,105 @@ function Get-EntraGroupDevice {
     )
 
     begin {
-        $graphConnected = $null
+        $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        if (-not $graphConnected) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+        }
+
+        $guidPattern = '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+        $queue = [System.Collections.Generic.List[string]]::new()
+        $state = @{ Started = $false }
+
+        $flush = {
+            $inputs = @($queue)
+            $queue.Clear()
+            if ($inputs.Count -eq 0) { return }
+
+            if (-not $state.Started) {
+                $state.Started = $true
+                Write-NCMessage "Processing devices in Graph batches (20 per request) ..." -Level INFO
+            }
+
+            $targets = @(Resolve-NCEntraDeviceTargetBatch -DeviceIdentifier $inputs -TreatInputAsId:$TreatInputAsId.IsPresent)
+            if ($targets.Count -eq 0) { return }
+
+            $requests = @(for ($i = 0; $i -lt $targets.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'GET'; Url = "/devices/$([uri]::EscapeDataString([string]$targets[$i].Id))/memberOf" }
+                })
+            $lookup = @{}
+            foreach ($result in @(Invoke-NCGraphBatchCollection -Requests $requests -Activity 'Reading device group memberships')) {
+                $lookup[$result.Id] = $result
+            }
+
+            for ($i = 0; $i -lt $targets.Count; $i++) {
+                $deviceLabel = $targets[$i].Label
+                $result = $lookup["m$i"]
+
+                if (-not $result.Success) {
+                    $inputWasId = $TreatInputAsId.IsPresent -or $targets[$i].Input -match $guidPattern
+                    if ($inputWasId -and $result.Status -eq 404) {
+                        Write-NCMessage "Entra device with ID '$($targets[$i].Input)' not found: $($result.ErrorMessage)" -Level ERROR
+                    }
+                    else {
+                        Write-NCMessage "Unable to read group memberships for device ${deviceLabel}: $($result.ErrorMessage)" -Level ERROR
+                    }
+                    continue
+                }
+
+                $memberships = @($result.Items | ForEach-Object { ConvertTo-NCGraphDirectoryObject -Item $_ })
+
+                Add-EmptyLine
+                Write-Verbose "Device ($deviceLabel) - Groups found: $($memberships.Count)"
+
+                if (-not $memberships -or $memberships.Count -eq 0) {
+                    Write-NCMessage "No groups found for $deviceLabel." -Level WARNING
+                    continue
+                }
+
+                $results = [System.Collections.Generic.List[object]]::new()
+                foreach ($membership in $memberships) {
+                    $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
+                    $row = [ordered]@{
+                        'Group Name' = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
+                        'Group Mail' = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
+                    }
+
+                    if ($GridView.IsPresent) {
+                        $row['Group Description'] = if ($props.ContainsKey('description')) { $props.description } else { $null }
+                        $row['Group Mail Nickname'] = if ($props.ContainsKey('mailNickname')) { $props.mailNickname } else { $null }
+                        $row['Group Mail Enabled'] = if ($props.ContainsKey('mailEnabled')) { $props.mailEnabled } else { $null }
+                        $row['Group Type'] = if ($props.ContainsKey('groupTypes')) { ($props.groupTypes -join ', ') } else { $null }
+                        $row['Group ID'] = $membership.Id
+                    }
+
+                    $results.Add([pscustomobject]$row) | Out-Null
+                }
+
+                if ($GridView.IsPresent) {
+                    $results | Out-GridView -Title "Entra Device Groups - $deviceLabel"
+                }
+                else {
+                    $results | Sort-Object 'Group Name'
+                }
+            }
+        }
     }
 
     process {
-        if ($null -eq $graphConnected) {
-            $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
-            if (-not $graphConnected) {
-                Add-EmptyLine
-                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
-                return
-            }
-        }
-
-        $device = $null
-        $deviceLabel = $DeviceIdentifier
-
-        if ($TreatInputAsId.IsPresent -or $DeviceIdentifier -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-            try {
-                $device = Get-MgDevice -DeviceId $DeviceIdentifier -ErrorAction Stop
-            }
-            catch {
-                Write-NCMessage "Entra device with ID '$DeviceIdentifier' not found: $($_.Exception.Message)" -Level ERROR
-                return
-            }
-        }
-        else {
-            $escapedDevice = $DeviceIdentifier.Replace("'", "''")
-            try {
-                $deviceMatches = Get-MgDevice -Filter "displayName eq '$escapedDevice'" -All -ErrorAction Stop
-            }
-            catch {
-                Write-NCMessage "Unable to resolve device '$DeviceIdentifier': $($_.Exception.Message)" -Level ERROR
-                return
-            }
-
-            if (-not $deviceMatches -or $deviceMatches.Count -eq 0) {
-                Write-NCMessage "Device '$DeviceIdentifier' not found" -Level WARNING
-                return
-            }
-
-            if ($deviceMatches.Count -gt 1) {
-                Write-NCMessage "Multiple devices matched '$DeviceIdentifier'. Using the first result ($($deviceMatches[0].DisplayName))" -Level WARNING
-            }
-
-            $device = $deviceMatches | Select-Object -First 1
-            $deviceLabel = $device.DisplayName
-        }
-
-        if (-not $device) {
+        if (-not $graphConnected) {
             return
         }
 
-        try {
-            $memberships = @(Get-MgDeviceMemberOf -DeviceId $device.Id -All -ErrorAction Stop)
+        $queue.Add($DeviceIdentifier)
+        if ($queue.Count -ge 20) {
+            & $flush
         }
-        catch {
-            Write-NCMessage "Unable to read group memberships for device ${deviceLabel}: $($_.Exception.Message)" -Level ERROR
-            return
-        }
+    }
 
-        Add-EmptyLine
-        Write-Verbose "Device ($deviceLabel) - Groups found: $($memberships.Count)"
-
-        if (-not $memberships -or $memberships.Count -eq 0) {
-            Write-NCMessage "No groups found for $deviceLabel." -Level WARNING
-            return
-        }
-
-        $results = [System.Collections.Generic.List[object]]::new()
-        foreach ($membership in $memberships) {
-            $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
-            $row = [ordered]@{
-                'Group Name' = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
-                'Group Mail' = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
-            }
-
-            if ($GridView.IsPresent) {
-                $row['Group Description'] = if ($props.ContainsKey('description')) { $props.description } else { $null }
-                $row['Group Mail Nickname'] = if ($props.ContainsKey('mailNickname')) { $props.mailNickname } else { $null }
-                $row['Group Mail Enabled'] = if ($props.ContainsKey('mailEnabled')) { $props.mailEnabled } else { $null }
-                $row['Group Type'] = if ($props.ContainsKey('groupTypes')) { ($props.groupTypes -join ', ') } else { $null }
-                $row['Group ID'] = $membership.Id
-            }
-
-            $results.Add([pscustomobject]$row) | Out-Null
-        }
-
-        if ($GridView.IsPresent) {
-            $results | Out-GridView -Title "Entra Device Groups - $deviceLabel"
-        }
-        else {
-            $results | Sort-Object 'Group Name'
+    end {
+        if ($graphConnected -and $queue.Count -gt 0) {
+            & $flush
         }
     }
 }
@@ -2826,8 +2841,33 @@ function Get-EntraGroupMembers {
         return 'DirectoryObject'
     }
 
+    $resolveOdataType = {
+        param($member)
+        $memberProps = if ($member.AdditionalProperties) { $member.AdditionalProperties } else { @{} }
+        if ($memberProps.ContainsKey('@odata.type')) { $memberProps['@odata.type'] } else { $null }
+    }
+
+    $deviceLookup = @{}
+    if ($IncludeDeviceUsers.IsPresent) {
+        $deviceRequests = [System.Collections.Generic.List[object]]::new()
+        for ($i = 0; $i -lt $members.Count; $i++) {
+            if ((& $resolveType (& $resolveOdataType $members[$i])) -ne 'Device') { continue }
+            $deviceSegment = [uri]::EscapeDataString([string]$members[$i].Id)
+            $deviceRequests.Add(@{ Id = "o$i"; Method = 'GET'; Url = "/devices/$deviceSegment/registeredOwners" })
+            $deviceRequests.Add(@{ Id = "u$i"; Method = 'GET'; Url = "/devices/$deviceSegment/registeredUsers" })
+        }
+
+        if ($deviceRequests.Count -gt 0) {
+            Write-NCMessage "Processing $($deviceRequests.Count / 2) device(s) in Graph batches (20 per request) ..." -Level INFO
+            foreach ($result in @(Invoke-NCGraphBatchCollection -Requests @($deviceRequests) -Activity 'Reading device registered owners and users')) {
+                $deviceLookup[$result.Id] = $result
+            }
+        }
+    }
+
     $results = [System.Collections.Generic.List[object]]::new()
-    foreach ($member in $members) {
+    for ($memberIndex = 0; $memberIndex -lt $members.Count; $memberIndex++) {
+        $member = $members[$memberIndex]
         $props = if ($member.AdditionalProperties) { $member.AdditionalProperties } else { @{} }
         $odataType = if ($props.ContainsKey('@odata.type')) { $props['@odata.type'] } else { $null }
         $memberType = & $resolveType $odataType
@@ -2844,18 +2884,20 @@ function Get-EntraGroupMembers {
         if ($IncludeDeviceUsers.IsPresent -and $memberType -eq 'Device') {
             $owners = @()
             $users = @()
-            try {
-                $owners = @(Get-MgDeviceRegisteredOwner -DeviceId $member.Id -All -ErrorAction Stop)
+            $ownerResult = $deviceLookup["o$memberIndex"]
+            if ($ownerResult.Success) {
+                $owners = @($ownerResult.Items | ForEach-Object { ConvertTo-NCGraphDirectoryObject -Item $_ })
             }
-            catch {
-                Write-NCMessage "Unable to read registered owners for device $($displayName): $($_.Exception.Message)" -Level WARNING
+            else {
+                Write-NCMessage "Unable to read registered owners for device $($displayName): $($ownerResult.ErrorMessage)" -Level WARNING
             }
 
-            try {
-                $users = @(Get-MgDeviceRegisteredUser -DeviceId $member.Id -All -ErrorAction Stop)
+            $userResult = $deviceLookup["u$memberIndex"]
+            if ($userResult.Success) {
+                $users = @($userResult.Items | ForEach-Object { ConvertTo-NCGraphDirectoryObject -Item $_ })
             }
-            catch {
-                Write-NCMessage "Unable to read registered users for device $($displayName): $($_.Exception.Message)" -Level WARNING
+            else {
+                Write-NCMessage "Unable to read registered users for device $($displayName): $($userResult.ErrorMessage)" -Level WARNING
             }
 
             $ownerLabels = $owners | ForEach-Object {
@@ -2933,120 +2975,171 @@ function Get-EntraGroupUser {
     )
 
     begin {
-        $graphConnected = $null
+        $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        if (-not $graphConnected) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+        }
+
+        $guidPattern = '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+        $queue = [System.Collections.Generic.List[string]]::new()
+        $state = @{ Started = $false }
+
+        $flush = {
+            $inputs = @($queue)
+            $queue.Clear()
+            if ($inputs.Count -eq 0) { return }
+
+            if (-not $state.Started) {
+                $state.Started = $true
+                Write-NCMessage "Processing users in Graph batches (20 per request) ..." -Level INFO
+            }
+
+            # (a) Resolve identities: object IDs with one batched GET, everything else through the user resolver.
+            $idLookup = @{}
+            $idRequests = @(for ($i = 0; $i -lt $inputs.Count; $i++) {
+                    if ($TreatInputAsId.IsPresent -or $inputs[$i] -match $guidPattern) {
+                        @{ Id = "u$i"; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString($inputs[$i]))?`$select=id,userPrincipalName,displayName" }
+                    }
+                })
+            if ($idRequests.Count -gt 0) {
+                foreach ($result in @(Invoke-NCGraphBatch -Requests $idRequests -Activity 'Resolving users')) {
+                    $idLookup[$result.Id] = $result
+                }
+            }
+
+            $nameInputs = @(for ($i = 0; $i -lt $inputs.Count; $i++) {
+                    if (-not ($TreatInputAsId.IsPresent -or $inputs[$i] -match $guidPattern)) { $inputs[$i] }
+                })
+            $resolved = if ($nameInputs.Count -gt 0) {
+                Resolve-NCGraphUserBatch -Identifier $nameInputs -Property @('id', 'userPrincipalName', 'displayName')
+            }
+            else {
+                @{}
+            }
+
+            # (b) Build the list of users to read, keeping input order.
+            $targets = [System.Collections.Generic.List[object]]::new()
+            for ($i = 0; $i -lt $inputs.Count; $i++) {
+                $identifier = $inputs[$i]
+                $user = $null
+
+                if ($TreatInputAsId.IsPresent -or $identifier -match $guidPattern) {
+                    $result = $idLookup["u$i"]
+                    if (-not $result.Success -or -not $result.Body) {
+                        Write-NCMessage "Entra user with ID '$identifier' not found: $($result.ErrorMessage)" -Level ERROR
+                        continue
+                    }
+                    $user = [pscustomobject]$result.Body
+                }
+                else {
+                    $user = $resolved[$identifier.Trim()]
+                    if (-not $user) {
+                        $escapedUser = $identifier.Replace("'", "''")
+                        try {
+                            $userMatches = Get-MgUser -Filter "displayName eq '$escapedUser'" -All -ErrorAction Stop
+                        }
+                        catch {
+                            Write-NCMessage "Unable to resolve user '$identifier': $($_.Exception.Message)" -Level ERROR
+                            continue
+                        }
+
+                        if (-not $userMatches -or $userMatches.Count -eq 0) {
+                            Write-NCMessage "User '$identifier' not found" -Level WARNING
+                            continue
+                        }
+
+                        if ($userMatches.Count -gt 1) {
+                            Write-NCMessage "Multiple users matched '$identifier'. Using the first result ($($userMatches[0].UserPrincipalName))." -Level WARNING
+                        }
+
+                        $matched = $userMatches | Select-Object -First 1
+                        $user = [pscustomobject]@{ id = $matched.Id; userPrincipalName = $matched.UserPrincipalName; displayName = $matched.DisplayName }
+                    }
+                }
+
+                if (-not $user -or -not $user.id) {
+                    continue
+                }
+
+                $userLabel = if ($user.userPrincipalName) { $user.userPrincipalName } else { $user.displayName }
+                $targets.Add([pscustomobject]@{ Id = [string]$user.id; Label = $userLabel })
+            }
+
+            if ($targets.Count -eq 0) { return }
+
+            # (c) Read memberships for every resolved user in batches.
+            $requests = @(for ($i = 0; $i -lt $targets.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString($targets[$i].Id))/memberOf?`$select=id,displayName,mail,groupTypes,securityEnabled,mailEnabled,description,mailNickname" }
+                })
+            $lookup = @{}
+            foreach ($result in @(Invoke-NCGraphBatchCollection -Requests $requests -Activity 'Reading user group memberships')) {
+                $lookup[$result.Id] = $result
+            }
+
+            # (d) Emit per user, in input order.
+            for ($i = 0; $i -lt $targets.Count; $i++) {
+                $userLabel = $targets[$i].Label
+                $result = $lookup["m$i"]
+
+                if (-not $result.Success) {
+                    Write-NCMessage "Unable to read group memberships for user ${userLabel}: $($result.ErrorMessage)" -Level ERROR
+                    continue
+                }
+
+                $memberships = @($result.Items | ForEach-Object { ConvertTo-NCGraphDirectoryObject -Item $_ })
+
+                Add-EmptyLine
+                Write-Verbose "User ($userLabel) - Groups found: $($memberships.Count)"
+
+                if (-not $memberships -or $memberships.Count -eq 0) {
+                    Write-NCMessage "No groups found for $userLabel." -Level WARNING
+                    continue
+                }
+
+                $results = [System.Collections.Generic.List[object]]::new()
+                foreach ($membership in $memberships) {
+                    $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
+                    $row = [ordered]@{
+                        'Group Name' = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
+                        'Group Mail' = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
+                    }
+
+                    if ($GridView.IsPresent) {
+                        $row['Group Description'] = if ($props.ContainsKey('description')) { $props.description } else { $null }
+                        $row['Group Mail Nickname'] = if ($props.ContainsKey('mailNickname')) { $props.mailNickname } else { $null }
+                        $row['Group Mail Enabled'] = if ($props.ContainsKey('mailEnabled')) { $props.mailEnabled } else { $null }
+                        $row['Group Type'] = if ($props.ContainsKey('groupTypes')) { ($props.groupTypes -join ', ') } else { $null }
+                        $row['Group ID'] = $membership.Id
+                    }
+
+                    $results.Add([pscustomobject]$row) | Out-Null
+                }
+
+                if ($GridView.IsPresent) {
+                    $results | Out-GridView -Title "Entra User Groups - $userLabel"
+                }
+                else {
+                    $results | Sort-Object 'Group Name'
+                }
+            }
+        }
     }
 
     process {
-        if ($null -eq $graphConnected) {
-            $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
-            if (-not $graphConnected) {
-                Add-EmptyLine
-                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
-                return
-            }
-        }
-
-        $user = $null
-        $userLabel = $UserIdentifier
-
-        if ($TreatInputAsId.IsPresent -or $UserIdentifier -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-            try {
-                $user = Get-MgUser -UserId $UserIdentifier -ErrorAction Stop
-            }
-            catch {
-                Write-NCMessage "Entra user with ID '$UserIdentifier' not found: $($_.Exception.Message)" -Level ERROR
-                return
-            }
-        }
-        else {
-            try {
-                $user = Get-MgUser -UserId $UserIdentifier -ErrorAction Stop
-            }
-            catch {
-                $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $UserIdentifier -PreferGraphIdentity
-                if ($resolvedIdentifier) {
-                    try {
-                        $user = Get-MgUser -UserId $resolvedIdentifier -ErrorAction Stop
-                    }
-                    catch {
-                        Write-NCMessage "Unable to resolve user '$UserIdentifier': $($_.Exception.Message)" -Level ERROR
-                        return
-                    }
-                }
-
-                if ($user) {
-                    $userLabel = if ($user.UserPrincipalName) { $user.UserPrincipalName } else { $user.DisplayName }
-                }
-                else {
-                    $escapedUser = $UserIdentifier.Replace("'", "''")
-                    try {
-                        $userMatches = Get-MgUser -Filter "displayName eq '$escapedUser'" -All -ErrorAction Stop
-                    }
-                    catch {
-                        Write-NCMessage "Unable to resolve user '$UserIdentifier': $($_.Exception.Message)" -Level ERROR
-                        return
-                    }
-
-                    if (-not $userMatches -or $userMatches.Count -eq 0) {
-                        Write-NCMessage "User '$UserIdentifier' not found" -Level WARNING
-                        return
-                    }
-
-                    if ($userMatches.Count -gt 1) {
-                        Write-NCMessage "Multiple users matched '$UserIdentifier'. Using the first result ($($userMatches[0].UserPrincipalName))." -Level WARNING
-                    }
-
-                    $user = $userMatches | Select-Object -First 1
-                }
-            }
-        }
-
-        if (-not $user) {
+        if (-not $graphConnected) {
             return
         }
 
-        $userLabel = if ($user.UserPrincipalName) { $user.UserPrincipalName } else { $user.DisplayName }
-
-        try {
-            $memberships = @(Get-MgUserMemberOf -UserId $user.Id -All -ErrorAction Stop)
+        $queue.Add($UserIdentifier)
+        if ($queue.Count -ge 20) {
+            & $flush
         }
-        catch {
-            Write-NCMessage "Unable to read group memberships for user ${userLabel}: $($_.Exception.Message)" -Level ERROR
-            return
-        }
+    }
 
-        Add-EmptyLine
-        Write-Verbose "User ($userLabel) - Groups found: $($memberships.Count)"
-
-        if (-not $memberships -or $memberships.Count -eq 0) {
-            Write-NCMessage "No groups found for $userLabel." -Level WARNING
-            return
-        }
-
-        $results = [System.Collections.Generic.List[object]]::new()
-        foreach ($membership in $memberships) {
-            $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
-            $row = [ordered]@{
-                'Group Name' = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
-                'Group Mail' = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
-            }
-
-            if ($GridView.IsPresent) {
-                $row['Group Description'] = if ($props.ContainsKey('description')) { $props.description } else { $null }
-                $row['Group Mail Nickname'] = if ($props.ContainsKey('mailNickname')) { $props.mailNickname } else { $null }
-                $row['Group Mail Enabled'] = if ($props.ContainsKey('mailEnabled')) { $props.mailEnabled } else { $null }
-                $row['Group Type'] = if ($props.ContainsKey('groupTypes')) { ($props.groupTypes -join ', ') } else { $null }
-                $row['Group ID'] = $membership.Id
-            }
-
-            $results.Add([pscustomobject]$row) | Out-Null
-        }
-
-        if ($GridView.IsPresent) {
-            $results | Out-GridView -Title "Entra User Groups - $userLabel"
-        }
-        else {
-            $results | Sort-Object 'Group Name'
+    end {
+        if ($graphConnected -and $queue.Count -gt 0) {
+            & $flush
         }
     }
 }
