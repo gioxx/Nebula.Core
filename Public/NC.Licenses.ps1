@@ -608,8 +608,6 @@ function Export-MsolAccountSku {
         license are exported, but all of their assigned licenses are still included in the report.
     .PARAMETER ForceLicenseCatalogRefresh
         Force a fresh download of the cached license catalog before processing.
-    .PARAMETER ShowErrorDetails
-        Include exception details in error messages.
     .PARAMETER BatchSize
         Number of processed users before flushing partial CSV output.
     .PARAMETER Resume
