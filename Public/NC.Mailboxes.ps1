@@ -1065,7 +1065,91 @@ function Get-UserLastSeen {
         [string]$User
     )
 
-    begin { Set-ProgressAndInfoPreferences }
+    begin {
+        Set-ProgressAndInfoPreferences
+
+        $graphReady = $null
+        $queue = [System.Collections.Generic.List[object]]::new()
+        $state = @{ StartLineWritten = $false }
+
+        $flush = {
+            if ($queue.Count -eq 0) { return }
+            $items = @($queue)
+            $queue.Clear()
+
+            if ($graphReady -and -not $state.StartLineWritten) {
+                Write-NCMessage "Processing mailboxes in Graph batches (20 per request) ..." -Level INFO
+                $state.StartLineWritten = $true
+            }
+
+            for ($offset = 0; $offset -lt $items.Count; $offset += 20) {
+                $chunk = @($items[$offset..([Math]::Min($offset + 20, $items.Count) - 1)])
+
+                $responses = @()
+                if ($graphReady) {
+                    $requests = @(for ($i = 0; $i -lt $chunk.Count; $i++) {
+                            $filter = "userId eq '$(([string]$chunk[$i].Mailbox.ExternalDirectoryObjectId).Replace("'", "''"))'"
+                            @{
+                                Id     = "m$i"
+                                Method = 'GET'
+                                Url    = "/auditLogs/signIns?`$filter=$([uri]::EscapeDataString($filter))&`$top=20"
+                            }
+                        })
+                    $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity 'Reading sign-in logs')
+                }
+
+                for ($i = 0; $i -lt $chunk.Count; $i++) {
+                    $mailbox = $chunk[$i].Mailbox
+                    $mailboxIdentity = $mailbox.PrimarySmtpAddress
+                    $lastMailboxAction = $chunk[$i].LastMailboxAction
+                    $lastSignIn = $null
+
+                    if ($graphReady) {
+                        $response = $responses[$i]
+                        if ($response.Success) {
+                            # Only the first page (20 entries, newest first) is read: it holds the latest sign-in.
+                            foreach ($signIn in @($response.Body.value)) {
+                                $created = $signIn.createdDateTime
+                                if ($null -eq $created) { continue }
+                                if ($created -is [datetimeoffset]) { $created = $created.LocalDateTime }
+                                elseif ($created -isnot [datetime]) {
+                                    $created = [datetime]::Parse([string]$created, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime()
+                                }
+                                if ($null -eq $lastSignIn -or $created -gt $lastSignIn) { $lastSignIn = $created }
+                            }
+                        }
+                        else {
+                            Write-NCMessage ("Unable to retrieve sign-in logs for {0}. {1}" -f $mailboxIdentity, $response.ErrorMessage) -Level WARNING
+                        }
+                    }
+                    else {
+                        Write-NCMessage "Microsoft Graph AuditLog.Read.All is not available. Returning mailbox activity only." -Level WARNING
+                    }
+
+                    $sources = @()
+                    if ($lastMailboxAction) { $sources += 'MailboxAction' }
+                    if ($lastSignIn) { $sources += 'SignInLog' }
+
+                    $lastSeen = $null
+                    if ($sources.Count -gt 0) {
+                        $timestamps = @()
+                        if ($lastMailboxAction) { $timestamps += $lastMailboxAction }
+                        if ($lastSignIn) { $timestamps += $lastSignIn }
+                        $lastSeen = $timestamps | Sort-Object -Descending | Select-Object -First 1
+                    }
+
+                    [pscustomobject][ordered]@{
+                        DisplayName           = $mailbox.DisplayName
+                        PrimarySmtpAddress    = $mailboxIdentity
+                        LastUserActionTime    = $lastMailboxAction
+                        LastInteractiveSignIn = if ($lastSignIn) { [datetime]$lastSignIn } else { $null }
+                        LastSeen              = if ($lastSeen) { [datetime]$lastSeen } else { $null }
+                        Source                = if ($sources.Count -gt 0) { $sources -join ',' } else { 'None' }
+                    }
+                }
+            }
+        }
+    }
 
     process {
         if (-not (Test-EOLConnection)) {
@@ -1082,54 +1166,24 @@ function Get-UserLastSeen {
             return
         }
 
-        $mailboxIdentity = $mailbox.PrimarySmtpAddress
         $lastMailboxAction = $null
-        $lastSignIn = $null
-
-        $stats = Get-MailboxStatisticsSafe -Identity $mailboxIdentity
+        $stats = Get-MailboxStatisticsSafe -Identity $mailbox.PrimarySmtpAddress
         if ($stats) {
             $lastMailboxAction = $stats.LastUserActionTime
         }
 
-        $graphReady = Test-MgGraphConnection -Scopes @('AuditLog.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
-        if ($graphReady) {
-            try {
-                $signIns = Get-MgAuditLogSignIn -Filter "userId eq '$($mailbox.ExternalDirectoryObjectId)'" -All:$true -Top 20 -ErrorAction Stop
-                if ($signIns) {
-                    $lastSignIn = $signIns | Sort-Object -Property CreatedDateTime -Descending | Select-Object -First 1 -ExpandProperty CreatedDateTime
-                }
-            }
-            catch {
-                Write-NCMessage ("Unable to retrieve sign-in logs for {0}. {1}" -f $mailboxIdentity, $_.Exception.Message) -Level WARNING
-            }
-        }
-        else {
-            Write-NCMessage "Microsoft Graph AuditLog.Read.All is not available. Returning mailbox activity only." -Level WARNING
+        if ($null -eq $graphReady) {
+            $graphReady = [bool](Test-MgGraphConnection -Scopes @('AuditLog.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false)
         }
 
-        $sources = @()
-        if ($lastMailboxAction) { $sources += 'MailboxAction' }
-        if ($lastSignIn) { $sources += 'SignInLog' }
-
-        $lastSeen = $null
-        if ($sources.Count -gt 0) {
-            $timestamps = @()
-            if ($lastMailboxAction) { $timestamps += $lastMailboxAction }
-            if ($lastSignIn) { $timestamps += $lastSignIn }
-            $lastSeen = $timestamps | Sort-Object -Descending | Select-Object -First 1
-        }
-
-        [pscustomobject][ordered]@{
-            DisplayName           = $mailbox.DisplayName
-            PrimarySmtpAddress    = $mailboxIdentity
-            LastUserActionTime    = $lastMailboxAction
-            LastInteractiveSignIn = if ($lastSignIn) { [datetime]$lastSignIn } else { $null }
-            LastSeen              = if ($lastSeen) { [datetime]$lastSeen } else { $null }
-            Source                = if ($sources.Count -gt 0) { $sources -join ',' } else { 'None' }
-        }
+        $queue.Add([pscustomobject]@{ Mailbox = $mailbox; LastMailboxAction = $lastMailboxAction }) | Out-Null
+        if ($queue.Count -ge 20) { & $flush }
     }
 
-    end { Restore-ProgressAndInfoPreferences }
+    end {
+        & $flush
+        Restore-ProgressAndInfoPreferences
+    }
 }
 
 function Get-MboxLastMessageTrace {
@@ -1750,53 +1804,92 @@ function Test-SharedMailboxCompliance {
         $report = [System.Collections.Generic.List[object]]::new()
         $counter = 0
 
-        foreach ($mbx in $mailboxes) {
-            $counter++
-            $Percentage = Get-NCProgressPercent -Current $counter -Total $mailboxes.Count
-            Write-Progress -Activity "Checking $($mbx.DisplayName)" -Status "$counter of $($mailboxes.Count) - $Percentage%" -PercentComplete $Percentage
+        Write-NCMessage "Processing $($mailboxes.Count) mailbox(es) in Graph batches (20 per request) ..." -Level INFO
 
-            $logsFound = $false
-            $exoPlan1Found = $false
-            $exoPlan2Found = $false
+        $mailboxList = @($mailboxes)
+        for ($offset = 0; $offset -lt $mailboxList.Count; $offset += 20) {
+            $chunk = @($mailboxList[$offset..([Math]::Min($offset + 20, $mailboxList.Count) - 1)])
 
-            try {
-                $signIns = Get-MgAuditLogSignIn -Filter "userid eq '$($mbx.ExternalDirectoryObjectId)'" -All -Top 20 -ErrorAction Stop
-                if ($signIns) {
-                    foreach ($log in $signIns) {
+            $signInRequests = @(for ($i = 0; $i -lt $chunk.Count; $i++) {
+                    $filter = "userid eq '$(([string]$chunk[$i].ExternalDirectoryObjectId).Replace("'", "''"))'"
+                    @{
+                        Id     = "m$i"
+                        Method = 'GET'
+                        Url    = "/auditLogs/signIns?`$filter=$([uri]::EscapeDataString($filter))&`$top=20"
+                    }
+                })
+            # Every page is read, like the former Get-MgAuditLogSignIn -All call.
+            $signInResponses = @(Invoke-NCGraphBatchCollection -Requests $signInRequests -Activity 'Reading sign-in logs')
+
+            $signInFound = @{}
+            $licenseRequests = [System.Collections.Generic.List[object]]::new()
+            for ($i = 0; $i -lt $chunk.Count; $i++) {
+                $response = $signInResponses[$i]
+                $found = $false
+                if ($response.Success) {
+                    foreach ($log in @($response.Items)) {
                         if ($log.Status.ErrorCode -eq 0) {
-                            $logsFound = $true
+                            $found = $true
                             break
                         }
                     }
                 }
-            }
-            catch {
-                Write-NCMessage ("Unable to retrieve sign-in records for {0}. {1}" -f $mbx.DisplayName, $_.Exception.Message) -Level ERROR
-            }
-
-            if ($logsFound) {
-                Write-NCMessage ("Sign-in records found for shared mailbox {0}" -f $mbx.DisplayName) -Level WARNING
-                try {
-                    $user = Get-MgUser -UserId $mbx.ExternalDirectoryObjectId -Property UserPrincipalName, assignedPlans
-                    $exoPlans = @($user.AssignedPlans | Where-Object { $_.Service -eq 'exchange' -and $_.capabilityStatus -eq 'Enabled' })
-                    $exoPlan1Found = $exoPlan1 -in $exoPlans.ServicePlanId
-                    $exoPlan2Found = $exoPlan2 -in $exoPlans.ServicePlanId
-                }
-                catch {
-                    Write-NCMessage ("Unable to read license info for {0}. {1}" -f $mbx.DisplayName, $_.Exception.Message) -Level ERROR
+                $signInFound[$i] = $found
+                if ($found) {
+                    $licenseRequests.Add(@{
+                            Id     = "m$i"
+                            Method = 'GET'
+                            Url    = "/users/$([uri]::EscapeDataString([string]$chunk[$i].ExternalDirectoryObjectId))?`$select=userPrincipalName,assignedPlans"
+                        }) | Out-Null
                 }
             }
-            else {
-                Write-NCMessage ("No successful sign-in records found for shared mailbox {0}" -f $mbx.DisplayName) -Level SUCCESS
+
+            $licenseResponses = @{}
+            if ($licenseRequests.Count -gt 0) {
+                foreach ($licenseResponse in @(Invoke-NCGraphBatch -Requests @($licenseRequests) -Activity 'Reading license info')) {
+                    $licenseResponses[[string]$licenseResponse.Id] = $licenseResponse
+                }
             }
 
-            $report.Add([pscustomobject]@{
-                    DisplayName               = $mbx.DisplayName
-                    ExternalDirectoryObjectId = $mbx.ExternalDirectoryObjectId
-                    'Sign in Record Found'    = if ($logsFound) { 'Yes' } else { 'No' }
-                    'Exchange Online Plan 1'  = $exoPlan1Found
-                    'Exchange Online Plan 2'  = $exoPlan2Found
-                }) | Out-Null
+            for ($i = 0; $i -lt $chunk.Count; $i++) {
+                $mbx = $chunk[$i]
+                $counter++
+                $Percentage = Get-NCProgressPercent -Current $counter -Total $mailboxes.Count
+                Write-Progress -Activity "Checking $($mbx.DisplayName)" -Status "$counter of $($mailboxes.Count) - $Percentage%" -PercentComplete $Percentage
+
+                $logsFound = $signInFound[$i]
+                $exoPlan1Found = $false
+                $exoPlan2Found = $false
+
+                $signInResponse = $signInResponses[$i]
+                if (-not $signInResponse.Success) {
+                    Write-NCMessage ("Unable to retrieve sign-in records for {0}. {1}" -f $mbx.DisplayName, $signInResponse.ErrorMessage) -Level ERROR
+                }
+
+                if ($logsFound) {
+                    Write-NCMessage ("Sign-in records found for shared mailbox {0}" -f $mbx.DisplayName) -Level WARNING
+                    $licenseResponse = $licenseResponses["m$i"]
+                    if ($licenseResponse.Success) {
+                        $exoPlans = @($licenseResponse.Body.assignedPlans | Where-Object { $_.service -eq 'exchange' -and $_.capabilityStatus -eq 'Enabled' })
+                        $exoPlan1Found = $exoPlan1 -in $exoPlans.servicePlanId
+                        $exoPlan2Found = $exoPlan2 -in $exoPlans.servicePlanId
+                    }
+                    else {
+                        Write-NCMessage ("Unable to read license info for {0}. {1}" -f $mbx.DisplayName, $licenseResponse.ErrorMessage) -Level ERROR
+                    }
+                }
+                else {
+                    Write-NCMessage ("No successful sign-in records found for shared mailbox {0}" -f $mbx.DisplayName) -Level SUCCESS
+                }
+
+                $report.Add([pscustomobject]@{
+                        DisplayName               = $mbx.DisplayName
+                        ExternalDirectoryObjectId = $mbx.ExternalDirectoryObjectId
+                        'Sign in Record Found'    = if ($logsFound) { 'Yes' } else { 'No' }
+                        'Exchange Online Plan 1'  = $exoPlan1Found
+                        'Exchange Online Plan 2'  = $exoPlan2Found
+                    }) | Out-Null
+            }
         }
 
         Write-Progress -Activity "Checking shared mailboxes" -Completed
