@@ -310,6 +310,30 @@ Describe 'Resolve-NCGraphUserBatch' {
         Should -Invoke Write-NCMessage -Times 1 -Exactly -ParameterFilter { $Message -eq "Unable to resolve user 'alice@contoso.com': Insufficient privileges." -and $Level -eq 'ERROR' }
         Should -Invoke Find-UserRecipient -Times 0 -Exactly
     }
+
+    It 'collects non-not-found failures in FailedIdentifier and leaves not-found identifiers out' {
+        $script:calls = 0
+        Mock Invoke-MgGraphRequest {
+            $script:calls++
+            if ($script:calls -eq 1) {
+                return @{
+                    responses = @(
+                        @{ id = '1'; status = 403; body = @{ error = @{ code = 'Authorization_RequestDenied'; message = 'Insufficient privileges.' } } }
+                        @{ id = '2'; status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'missing' } } }
+                    )
+                }
+            }
+            throw 'unexpected second batch'
+        }
+        Mock Find-UserRecipient {}
+
+        $failed = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $null = Resolve-NCGraphUserBatch -Identifier @('denied@contoso.com', 'ghost@contoso.com') -FailedIdentifier $failed
+
+        $failed.Contains('DENIED@contoso.com') | Should -BeTrue
+        $failed.Contains('ghost@contoso.com') | Should -BeFalse
+        $failed.Count | Should -Be 1
+    }
 }
 
 Describe 'Get-NCGraphDirectoryObjectUri' {

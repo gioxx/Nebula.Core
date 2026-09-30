@@ -2671,7 +2671,7 @@ function Get-EntraGroupDevice {
 
                 if (-not $result.Success) {
                     $inputWasId = $TreatInputAsId.IsPresent -or $targets[$i].Input -match $guidPattern
-                    if ($inputWasId -and $result.Status -eq 404) {
+                    if ($inputWasId) {
                         Write-NCMessage "Entra device with ID '$($targets[$i].Input)' not found: $($result.ErrorMessage)" -Level ERROR
                     }
                     else {
@@ -3011,8 +3011,9 @@ function Get-EntraGroupUser {
             $nameInputs = @(for ($i = 0; $i -lt $inputs.Count; $i++) {
                     if (-not ($TreatInputAsId.IsPresent -or $inputs[$i] -match $guidPattern)) { $inputs[$i] }
                 })
+            $failedNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             $resolved = if ($nameInputs.Count -gt 0) {
-                Resolve-NCGraphUserBatch -Identifier $nameInputs -Property @('id', 'userPrincipalName', 'displayName')
+                Resolve-NCGraphUserBatch -Identifier $nameInputs -Property @('id', 'userPrincipalName', 'displayName') -FailedIdentifier $failedNames
             }
             else {
                 @{}
@@ -3034,6 +3035,10 @@ function Get-EntraGroupUser {
                 }
                 else {
                     $user = $resolved[$identifier.Trim()]
+                    if (-not $user -and $failedNames.Contains($identifier.Trim())) {
+                        # The resolver already reported this lookup failure.
+                        continue
+                    }
                     if (-not $user) {
                         $escapedUser = $identifier.Replace("'", "''")
                         try {

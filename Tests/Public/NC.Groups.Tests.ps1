@@ -849,6 +849,22 @@ Describe 'Entra group read batching' {
             Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "User 'Nobody Here' not found" -and $Level -eq 'WARNING' }
         }
 
+        It 'reports a failed lookup once and skips the display-name fallback' {
+            Mock Get-MgUser { throw 'display-name search must not run' }
+            Mock Invoke-MgGraphRequest {
+                New-TestBatchResponse -Body $Body -Responder {
+                    param($request)
+                    @{ status = 403; body = @{ error = @{ code = 'Authorization_RequestDenied'; message = 'Insufficient privileges.' } } }
+                }
+            }
+
+            Get-EntraGroupUser -UserIdentifier 'denied@contoso.com'
+
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'ERROR' }
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Unable to resolve user 'denied@contoso.com': Insufficient privileges." -and $Level -eq 'ERROR' }
+            Should -Invoke Get-MgUser -Times 0 -Exactly -Scope It
+        }
+
         It 'reports a missing object ID with the original message' {
             Mock Invoke-MgGraphRequest {
                 New-TestBatchResponse -Body $Body -Responder {

@@ -381,6 +381,8 @@ function Resolve-NCGraphUserBatch {
         User properties to select.
     .PARAMETER Activity
         Write-Progress activity label.
+    .PARAMETER FailedIdentifier
+        When provided, receives the identifiers whose lookup failed for a reason other than not-found; the resolver has already reported them.
     .OUTPUTS
         Case-insensitive ordered dictionary: identifier -> user object, or $null when not found.
     #>
@@ -390,7 +392,8 @@ function Resolve-NCGraphUserBatch {
         [AllowEmptyCollection()]
         [string[]]$Identifier,
         [string[]]$Property = @('id', 'userPrincipalName', 'displayName', 'mail'),
-        [string]$Activity = 'Resolving users'
+        [string]$Activity = 'Resolving users',
+        [System.Collections.Generic.HashSet[string]]$FailedIdentifier
     )
 
     $map = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -427,6 +430,7 @@ function Resolve-NCGraphUserBatch {
             continue
         }
         Write-NCMessage "Unable to resolve user '$($result.Id)': $($result.ErrorMessage)" -Level ERROR
+        $null = if ($null -ne $FailedIdentifier) { $FailedIdentifier.Add([string]$result.Id) }
     }
 
     if ($fallback.Count -eq 0) {
@@ -448,6 +452,7 @@ function Resolve-NCGraphUserBatch {
             }
             else {
                 Write-NCMessage "Unable to resolve user '$($result.Id)': $($result.ErrorMessage)" -Level ERROR
+                $null = if ($null -ne $FailedIdentifier) { $FailedIdentifier.Add([string]$result.Id) }
             }
         }
     }
