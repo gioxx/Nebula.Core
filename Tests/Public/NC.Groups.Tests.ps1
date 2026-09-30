@@ -65,6 +65,11 @@ BeforeAll {
     function Get-MgEnvironment {
         param([string]$Name)
     }
+    function Get-Recipient { param([string]$Identity) }
+    function Get-Mailbox { param([string]$Identity) }
+    function Get-MgContact { param([string]$Filter, [switch]$All) }
+    function Get-MgContactMemberOf { param([string]$OrgContactId, [switch]$All) }
+    function Get-MgGroupMemberOf { param([string]$GroupId, [switch]$All) }
 
     # Builds a $batch response by asking $Responder for each sub-request ({ param($request) @{ status; body } }).
     function New-TestBatchResponse {
@@ -968,5 +973,122 @@ Describe 'Entra group read batching' {
             $result.Id | Should -Not -Contain 'gid44'
             $result[0].GroupType | Should -Be 'Security'
         }
+    }
+}
+
+Describe 'Get-UserGroups and Search-EntraGroup batching' {
+    BeforeEach {
+        Mock Test-MgGraphConnection { $true }
+        Mock Add-EmptyLine {}
+        Mock Write-NCMessage {}
+        Mock Write-Progress {}
+        Mock Start-Sleep {}
+        Mock Get-MgContext { [pscustomobject]@{ Environment = 'Global' } }
+        Mock Find-UserRecipient {
+            if ($PreferGraphIdentity) { return 'guest-id' }
+            return $UserPrincipalName
+        }
+        Mock Get-Recipient { [pscustomobject]@{ RecipientTypeDetails = 'UserMailbox' } }
+        Mock Get-Mailbox { [pscustomobject]@{ WindowsLiveID = $Identity; PrimarySmtpAddress = $Identity } }
+    }
+
+    It 'reads memberships for a tenant member with one direct lookup batch and one membership batch' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                if ($request.url -like '/users/member-id/memberOf*') { return @{ status = 200; body = @{ value = @(@{ id = 'g1'; displayName = 'Cloud Group'; mail = 'cloud-group@contoso.com' }) } } }
+                if ($request.url -like '/users/employee%40contoso.com*') { return @{ status = 200; body = @{ id = 'member-id'; userPrincipalName = 'employee@contoso.com' } } }
+                @{ status = 500 }
+            }
+        }
+
+        $result = @(Get-UserGroups -UserPrincipalName 'employee@contoso.com')
+
+        Should -Invoke Find-UserRecipient -Times 0 -Exactly -Scope It -ParameterFilter { $PreferGraphIdentity }
+        Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
+        $result.Count | Should -Be 1
+        $result[0].PSObject.Properties.Name | Should -Be @('GroupName', 'GroupMail')
+        $result[0].GroupName | Should -Be 'Cloud Group'
+        $result[0].GroupMail | Should -Be 'cloud-group@contoso.com'
+    }
+
+    It 'reads memberships for a guest through a Graph-compatible fallback identity' {
+        Mock Get-Mailbox { throw 'not a mailbox' }
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                if ($request.url -like '/users/guest-id/memberOf*') { return @{ status = 200; body = @{ value = @(@{ id = 'g1'; displayName = 'Cloud Group' }) } } }
+                if ($request.url -like '/users/guest-id*') { return @{ status = 200; body = @{ id = 'guest-id'; userPrincipalName = 'consultant_external.example#EXT#@contoso.onmicrosoft.com' } } }
+                if ($request.url -like '/users/consultant%40external.example*') { return @{ status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'missing' } } } }
+                @{ status = 500 }
+            }
+        }
+
+        $result = @(Get-UserGroups -UserPrincipalName 'consultant@external.example')
+
+        Should -Invoke Find-UserRecipient -Times 1 -Exactly -Scope It -ParameterFilter { $UserPrincipalName -eq 'consultant@external.example' -and $PreferGraphIdentity }
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly -Scope It -ParameterFilter { $Body -like '*/users/guest-id/memberOf*' }
+        $result.Count | Should -Be 1
+    }
+
+    It 'returns the extra properties with -GridView' {
+        Mock Out-GridView {}
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                if ($request.url -like '/users/u1/memberOf*') { return @{ status = 200; body = @{ value = @(@{ id = 'g1'; displayName = 'G'; mail = 'g@contoso.com'; description = 'D'; mailNickname = 'gn'; mailEnabled = $true; groupTypes = @('Unified') }) } } }
+                if ($request.url -like '/users/u1*') { return @{ status = 200; body = @{ id = 'u1'; userPrincipalName = 'u1' } } }
+                @{ status = 500 }
+            }
+        }
+
+        Get-UserGroups -UserPrincipalName 'u1' -GridView
+
+        Should -Invoke Out-GridView -Times 1 -Exactly -Scope It -ParameterFilter {
+            $InputObject -and $InputObject[0].'Group Description' -eq 'D' -and $InputObject[0].'Group Type' -eq 'Unified' -and $InputObject[0].'Group ID' -eq 'g1'
+        }
+    }
+
+    It 'sends 14 piped users in two requests and emits them in input order' {
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                if ($request.url -match '^/users/(\d+)/memberOf') { return @{ status = 200; body = @{ value = @(@{ id = "g$($Matches[1])"; displayName = "Group $($Matches[1])" }) } } }
+                if ($request.url -match '^/users/(\d+)\?') { return @{ status = 200; body = @{ id = $Matches[1]; userPrincipalName = "$($Matches[1])@contoso.com" } } }
+                @{ status = 500 }
+            }
+        }
+
+        $result = @(1..14 | ForEach-Object { "$_" } | Get-UserGroups)
+
+        Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq 'Processing users in Graph batches (20 per request) ...' }
+        $result.Count | Should -Be 14
+    }
+
+    It 'flushes queued users before a contact input so output stays in input order' {
+        Mock Get-Recipient { if ($Identity -eq 'contact@x.com') { [pscustomobject]@{ RecipientTypeDetails = 'MailContact' } } else { [pscustomobject]@{ RecipientTypeDetails = 'UserMailbox' } } }
+        Mock Get-MgContact { [pscustomobject]@{ Id = 'c1' } }
+        Mock Get-MgContactMemberOf { [pscustomobject]@{ Id = 'cg'; AdditionalProperties = @{ displayName = 'Contact Group' } } }
+        Mock Invoke-MgGraphRequest {
+            New-TestBatchResponse -Body $Body -Responder {
+                param($request)
+                if ($request.url -match '^/users/(\w+)/memberOf') { return @{ status = 200; body = @{ value = @(@{ id = 'g'; displayName = "G-$($Matches[1])" }) } } }
+                if ($request.url -match '^/users/(\w+)\?') { return @{ status = 200; body = @{ id = $Matches[1] } } }
+                @{ status = 500 }
+            }
+        }
+
+        $result = @('a', 'contact@x.com', 'b' | Get-UserGroups)
+
+        ($result.GroupName -join ',') | Should -Be 'G-a,Contact Group,G-b'
+    }
+
+    It 'checks the Search-EntraGroup connection once for three piped terms' {
+        Mock Get-MgGroup { @() }
+
+        $null = 'a', 'b', 'c' | Search-EntraGroup
+
+        Should -Invoke Test-MgGraphConnection -Times 1 -Exactly -Scope It
     }
 }

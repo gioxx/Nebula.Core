@@ -3261,30 +3261,127 @@ function Get-UserGroups {
     )
 
     begin {
-        $graphConnected = $null
+        $graphConnected = Test-MgGraphConnection
+        if (-not $graphConnected) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+        }
+
+        $queue = [System.Collections.Generic.List[object]]::new()
+        $state = @{ Started = $false }
+
+        # Builds and emits the output rows for one input.
+        $emit = {
+            param([string]$ResolvedPrincipal, [string]$RecipientType, [object[]]$Memberships)
+
+            Add-EmptyLine
+            Write-Verbose "$RecipientType ($ResolvedPrincipal) - Groups found: $($Memberships.Count)"
+
+            if (-not $Memberships -or $Memberships.Count -eq 0) {
+                Write-NCMessage "No groups found for $ResolvedPrincipal." -Level WARNING
+                return
+            }
+
+            $results = [System.Collections.Generic.List[object]]::new()
+            foreach ($membership in $Memberships) {
+                $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
+                $row = [ordered]@{
+                    GroupName = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
+                    GroupMail = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
+                }
+
+                if ($GridView.IsPresent) {
+                    $row['Group Description'] = if ($props.ContainsKey('description')) { $props.description } else { $null }
+                    $row['Group Mail Nickname'] = if ($props.ContainsKey('mailNickname')) { $props.mailNickname } else { $null }
+                    $row['Group Mail Enabled'] = if ($props.ContainsKey('mailEnabled')) { $props.mailEnabled } else { $null }
+                    $row['Group Type'] = if ($props.ContainsKey('groupTypes')) { ($props.groupTypes -join ', ') } else { $null }
+                    $row['Group ID'] = $membership.Id
+                }
+
+                $results.Add([pscustomobject]$row) | Out-Null
+            }
+
+            if ($GridView.IsPresent) {
+                $results | Out-GridView -Title "M365 User Groups - $ResolvedPrincipal"
+            }
+            else {
+                $results | Sort-Object GroupName
+            }
+        }
+
+        # Resolves the queued user-path inputs and reads their memberships in Graph batches.
+        $flush = {
+            $entries = @($queue)
+            $queue.Clear()
+            if ($entries.Count -eq 0) { return }
+
+            if (-not $state.Started) {
+                $state.Started = $true
+                Write-NCMessage "Processing users in Graph batches (20 per request) ..." -Level INFO
+            }
+
+            # (a) Resolve every queued identity.
+            $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $resolved = Resolve-NCGraphUserBatch -Identifier @($entries | ForEach-Object { $_.UserId }) -Property @('id', 'userPrincipalName', 'displayName') -FailedIdentifier $failedUsers
+
+            # (b) Keep the users that resolved, in input order.
+            $targets = [System.Collections.Generic.List[object]]::new()
+            foreach ($entry in $entries) {
+                $user = $resolved[$entry.UserId.Trim()]
+                if (-not $user -or -not $user.id) {
+                    if (-not $failedUsers.Contains($entry.UserId.Trim())) {
+                        Write-NCMessage "Unable to resolve user $($entry.UserId) in Microsoft Graph: user not found." -Level ERROR
+                    }
+                    continue
+                }
+                $targets.Add([pscustomobject]@{ Entry = $entry; GraphId = [string]$user.id })
+            }
+
+            if ($targets.Count -eq 0) { return }
+
+            # (c) Read memberships for every resolved user.
+            $requests = @(for ($i = 0; $i -lt $targets.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString($targets[$i].GraphId))/memberOf?`$select=id,displayName,mail,groupTypes,securityEnabled,mailEnabled,description,mailNickname" }
+                })
+            $lookup = @{}
+            foreach ($result in @(Invoke-NCGraphBatchCollection -Requests $requests -Activity 'Reading user group memberships')) {
+                $lookup[$result.Id] = $result
+            }
+
+            # (d) Emit per input, in input order.
+            for ($i = 0; $i -lt $targets.Count; $i++) {
+                $entry = $targets[$i].Entry
+                $result = $lookup["m$i"]
+
+                if (-not $result.Success) {
+                    Write-NCMessage "Unable to read group memberships for $($entry.Principal): $($result.ErrorMessage)" -Level ERROR
+                    continue
+                }
+
+                $memberships = @($result.Items | ForEach-Object { ConvertTo-NCGraphDirectoryObject -Item $_ })
+                & $emit $entry.Principal $entry.RecipientType $memberships
+            }
+        }
     }
 
     process {
-        if ($null -eq $graphConnected) {
-            $graphConnected = Test-MgGraphConnection
-            if (-not $graphConnected) {
-                Add-EmptyLine
-                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
-                return
-            }
+        if (-not $graphConnected) {
+            return
         }
 
         $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $UserPrincipalName
         if (-not $resolvedPrincipal) {
+            & $flush
             Write-NCMessage "Unable to resolve user recipient for $UserPrincipalName" -Level ERROR
             return
         }
-        
+
         $recipientType = (Get-Recipient -Identity $resolvedPrincipal).RecipientTypeDetails
         $memberships = @()
 
         switch ($recipientType) {
             'MailContact' {
+                & $flush # Keep output in input order: earlier queued users are emitted first.
                 try {
                     $contact = Get-MgContact -Filter "Mail eq '$resolvedPrincipal'" -All -ErrorAction Stop | Select-Object -First 1
                 }
@@ -3305,8 +3402,11 @@ function Get-UserGroups {
                     Write-NCMessage "Unable to read group memberships for contact ${resolvedPrincipal}: $($_.Exception.Message)" -Level ERROR
                     return
                 }
+
+                & $emit $resolvedPrincipal $recipientType $memberships
             }
             'MailUniversalDistributionGroup' {
+                & $flush # Keep output in input order: earlier queued users are emitted first.
                 try {
                     $group = Get-MgGroup -Filter "Mail eq '$resolvedPrincipal'" -All -ErrorAction Stop | Select-Object -First 1
                 }
@@ -3327,72 +3427,30 @@ function Get-UserGroups {
                     Write-NCMessage "Unable to read memberships for group ${resolvedPrincipal}: $($_.Exception.Message)" -Level ERROR
                     return
                 }
+
+                & $emit $resolvedPrincipal $recipientType $memberships
             }
             default {
-                $userId = $null
-
                 try {
                     $recipient = Get-Mailbox -Identity $resolvedPrincipal -ErrorAction Stop # Preserve the Exchange-first path for regular mailboxes.
                     $userId = if ($recipient.WindowsLiveID) { $recipient.WindowsLiveID } elseif ($recipient.PrimarySmtpAddress) { $recipient.PrimarySmtpAddress } else { $resolvedPrincipal }
                 }
                 catch {
-                    $userId = Find-UserRecipient -UserPrincipalName $resolvedPrincipal -PreferGraphIdentity
-                    if (-not $userId) {
-                        Write-NCMessage "Unable to resolve user $resolvedPrincipal in Microsoft Graph: $($_.Exception.Message)" -Level ERROR
-                        return
-                    }
+                    # Not a regular mailbox: the batch resolver tries the identity directly and falls back to Find-UserRecipient -PreferGraphIdentity on 404.
+                    $userId = $resolvedPrincipal
                 }
 
-                try {
-                    $user = Get-MgUser -UserId $userId -ErrorAction Stop
-                }
-                catch {
-                    Write-NCMessage "Unable to resolve user $userId in Microsoft Graph: $($_.Exception.Message)" -Level ERROR
-                    return
-                }
-
-                try {
-                    $memberships = @(Get-MgUserMemberOf -UserId $user.Id -All -ErrorAction Stop)
-                }
-                catch {
-                    Write-NCMessage "Unable to read group memberships for ${resolvedPrincipal}: $($_.Exception.Message)" -Level ERROR
-                    return
+                $queue.Add([pscustomobject]@{ Principal = [string]$resolvedPrincipal; RecipientType = $recipientType; UserId = [string]$userId })
+                if ($queue.Count -ge 20) {
+                    & $flush
                 }
             }
         }
+    }
 
-        Add-EmptyLine
-        Write-Verbose "$recipientType ($resolvedPrincipal) - Groups found: $($memberships.Count)"
-
-        if (-not $memberships -or $memberships.Count -eq 0) {
-            Write-NCMessage "No groups found for $resolvedPrincipal." -Level WARNING
-            return
-        }
-
-        $results = [System.Collections.Generic.List[object]]::new()
-        foreach ($membership in $memberships) {
-            $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
-            $row = [ordered]@{
-                GroupName = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
-                GroupMail = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
-            }
-
-            if ($GridView.IsPresent) {
-                $row['Group Description'] = if ($props.ContainsKey('description')) { $props.description } else { $null }
-                $row['Group Mail Nickname'] = if ($props.ContainsKey('mailNickname')) { $props.mailNickname } else { $null }
-                $row['Group Mail Enabled'] = if ($props.ContainsKey('mailEnabled')) { $props.mailEnabled } else { $null }
-                $row['Group Type'] = if ($props.ContainsKey('groupTypes')) { ($props.groupTypes -join ', ') } else { $null }
-                $row['Group ID'] = $membership.Id
-            }
-
-            $results.Add([pscustomobject]$row) | Out-Null
-        }
-
-        if ($GridView.IsPresent) {
-            $results | Out-GridView -Title "M365 User Groups - $resolvedPrincipal"
-        }
-        else {
-            $results | Sort-Object GroupName
+    end {
+        if ($graphConnected -and $queue.Count -gt 0) {
+            & $flush
         }
     }
 }
@@ -3999,17 +4057,16 @@ function Search-EntraGroup {
     )
 
     begin {
-        $graphConnected = $null
+        $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        if (-not $graphConnected) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+        }
     }
 
     process {
-        if ($null -eq $graphConnected) {
-            $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
-            if (-not $graphConnected) {
-                Add-EmptyLine
-                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
-                return
-            }
+        if (-not $graphConnected) {
+            return
         }
 
         if ([string]::IsNullOrWhiteSpace($SearchText)) {
