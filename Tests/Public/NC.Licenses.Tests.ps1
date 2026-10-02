@@ -202,7 +202,7 @@ Describe 'License assignment batching' {
         Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
         Should -Invoke Write-NCMessage -Times 14 -Exactly -Scope It -ParameterFilter { $Message -like '*Processing user: User *' }
         Should -Invoke Write-NCMessage -Times 14 -Exactly -Scope It -ParameterFilter { $Message -like "*($global:skuId)" }
-        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -like 'Processing users in Graph batches*' }
+        Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter { $Message -like '*in Graph batches*' }
     }
 
     It 'Get-UserMsolAccountSku reports a missing user once and keeps going' {

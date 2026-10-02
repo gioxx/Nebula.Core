@@ -104,7 +104,7 @@ function Add-EntraGroupDevice {
         $results = [System.Collections.Generic.List[object]]::new()
         $uniqueDevices = @($devices | Select-Object -Unique)
         $membersRefUrl = "/groups/$([uri]::EscapeDataString([string]$resolvedGroup.Id))/members/`$ref"
-        Write-NCMessage "Processing $($uniqueDevices.Count) device(s) in Graph batches (20 per request) ..." -Level INFO
+        Write-NCGraphBatchNotice -Count ($uniqueDevices.Count) -Noun 'device(s)'
 
         for ($offset = 0; $offset -lt $uniqueDevices.Count; $offset += 20) {
             $chunk = @($uniqueDevices[$offset..([Math]::Min($offset + 20, $uniqueDevices.Count) - 1)])
@@ -240,7 +240,7 @@ function Add-EntraGroupOwner {
         $results = [System.Collections.Generic.List[object]]::new()
         $uniqueOwners = @($owners | Select-Object -Unique)
         $ownersRefUrl = "/groups/$([uri]::EscapeDataString([string]$resolvedGroup.Id))/owners/`$ref"
-        Write-NCMessage "Processing $($uniqueOwners.Count) owner(s) in Graph batches (20 per request) ..." -Level INFO
+        Write-NCGraphBatchNotice -Count ($uniqueOwners.Count) -Noun 'owner(s)'
 
         for ($offset = 0; $offset -lt $uniqueOwners.Count; $offset += 20) {
             $chunk = @($uniqueOwners[$offset..([Math]::Min($offset + 20, $uniqueOwners.Count) - 1)])
@@ -436,7 +436,7 @@ function Remove-EntraGroupOwner {
         }
 
         if ($ownersToRemove.Count -gt 0) {
-            Write-NCMessage "Processing $($ownersToRemove.Count) owner(s) in Graph batches (20 per request) ..." -Level INFO
+            Write-NCGraphBatchNotice -Count ($ownersToRemove.Count) -Noun 'owner(s)'
         }
 
         for ($offset = 0; $offset -lt $ownersToRemove.Count; $offset += 20) {
@@ -634,7 +634,7 @@ function Copy-EntraGroupOwner {
 
     if ($pending.Count -gt 0) {
         $ownersRefUrl = "/groups/$([uri]::EscapeDataString([string]$destinationGroup.Id))/owners/`$ref"
-        Write-NCMessage "Processing $($pending.Count) owner(s) in Graph batches (20 per request) ..." -Level INFO
+        Write-NCGraphBatchNotice -Count ($pending.Count) -Noun 'owner(s)'
 
         for ($offset = 0; $offset -lt $pending.Count; $offset += 20) {
             $approved = @($pending[$offset..([Math]::Min($offset + 20, $pending.Count) - 1)])
@@ -950,7 +950,7 @@ function Copy-EntraGroup {
 
             if ($ownerPending.Count -gt 0) {
                 $ownersRefUrl = "/groups/$([uri]::EscapeDataString([string]$destinationGroup.Id))/owners/`$ref"
-                Write-NCMessage "Processing $($ownerPending.Count) owner(s) in Graph batches (20 per request) ..." -Level INFO
+                Write-NCGraphBatchNotice -Count ($ownerPending.Count) -Noun 'owner(s)'
 
                 for ($offset = 0; $offset -lt $ownerPending.Count; $offset += 20) {
                     $approved = @($ownerPending[$offset..([Math]::Min($offset + 20, $ownerPending.Count) - 1)])
@@ -1024,7 +1024,7 @@ function Copy-EntraGroup {
 
             if ($memberPending.Count -gt 0) {
                 $membersRefUrl = "/groups/$([uri]::EscapeDataString([string]$destinationGroup.Id))/members/`$ref"
-                Write-NCMessage "Processing $($memberPending.Count) member(s) in Graph batches (20 per request) ..." -Level INFO
+                Write-NCGraphBatchNotice -Count ($memberPending.Count) -Noun 'member(s)'
 
                 for ($offset = 0; $offset -lt $memberPending.Count; $offset += 20) {
                     $approved = @($memberPending[$offset..([Math]::Min($offset + 20, $memberPending.Count) - 1)])
@@ -1185,7 +1185,7 @@ function Add-EntraGroupUser {
         $results = [System.Collections.Generic.List[object]]::new()
         $uniqueUsers = @($users | Select-Object -Unique)
         $membersRefUrl = "/groups/$($resolvedGroup.Id)/members/`$ref"
-        Write-NCMessage "Processing $($uniqueUsers.Count) user(s) in Graph batches (20 per request) ..." -Level INFO
+        Write-NCGraphBatchNotice -Count ($uniqueUsers.Count) -Noun 'user(s)'
 
         for ($offset = 0; $offset -lt $uniqueUsers.Count; $offset += 20) {
             $chunk = @($uniqueUsers[$offset..([Math]::Min($offset + 20, $uniqueUsers.Count) - 1)])
@@ -2031,7 +2031,7 @@ function Export-EmptyEntraGroups {
             $totalGroups = $groups.Count
             $processedCount = 0
 
-            Write-NCMessage "Processing $totalGroups group(s) in Graph batches (20 per request) ..." -Level INFO
+            Write-NCGraphBatchNotice -Count $totalGroups -Noun 'group(s)'
             $memberRequests = @(for ($i = 0; $i -lt $totalGroups; $i++) {
                     @{ Id = "g$i"; Method = 'GET'; Url = "/groups/$([uri]::EscapeDataString([string]$groups[$i].Id))/members?`$select=id&`$top=1" }
                 })
@@ -2651,7 +2651,7 @@ function Get-EntraGroupDevice {
 
             if (-not $state.Started) {
                 $state.Started = $true
-                Write-NCMessage "Processing devices in Graph batches (20 per request) ..." -Level INFO
+                Write-NCGraphBatchNotice -Count ($inputs.Count) -Noun 'devices' -Streaming
             }
 
             $targets = @(Resolve-NCEntraDeviceTargetBatch -DeviceIdentifier $inputs -TreatInputAsId:$TreatInputAsId.IsPresent)
@@ -2858,7 +2858,7 @@ function Get-EntraGroupMembers {
         }
 
         if ($deviceRequests.Count -gt 0) {
-            Write-NCMessage "Processing $($deviceRequests.Count / 2) device(s) in Graph batches (20 per request) ..." -Level INFO
+            Write-NCGraphBatchNotice -Count ([int]($deviceRequests.Count / 2)) -Noun 'device(s)'
             foreach ($result in @(Invoke-NCGraphBatchCollection -Requests @($deviceRequests) -Activity 'Reading device registered owners and users')) {
                 $deviceLookup[$result.Id] = $result
             }
@@ -2992,7 +2992,7 @@ function Get-EntraGroupUser {
 
             if (-not $state.Started) {
                 $state.Started = $true
-                Write-NCMessage "Processing users in Graph batches (20 per request) ..." -Level INFO
+                Write-NCGraphBatchNotice -Count ($inputs.Count) -Noun 'users' -Streaming
             }
 
             # (a) Resolve identities: object IDs with one batched GET, everything else through the user resolver.
@@ -3317,7 +3317,7 @@ function Get-UserGroups {
 
             if (-not $state.Started) {
                 $state.Started = $true
-                Write-NCMessage "Processing users in Graph batches (20 per request) ..." -Level INFO
+                Write-NCGraphBatchNotice -Count ($entries.Count) -Noun 'users' -Streaming
             }
 
             # (a) Resolve every queued identity.
@@ -3729,7 +3729,7 @@ function Remove-EntraGroupDevice {
         }
 
         if ($devicesToRemove.Count -gt 0) {
-            Write-NCMessage "Processing $($devicesToRemove.Count) device(s) in Graph batches (20 per request) ..." -Level INFO
+            Write-NCGraphBatchNotice -Count ($devicesToRemove.Count) -Noun 'device(s)'
         }
         $groupPath = "/groups/$([uri]::EscapeDataString([string]$resolvedGroup.Id))"
 
@@ -3969,7 +3969,7 @@ function Remove-EntraGroupUser {
             }
         }
 
-        Write-NCMessage "Processing $($usersToRemove.Count) user(s) in Graph batches (20 per request) ..." -Level INFO
+        Write-NCGraphBatchNotice -Count ($usersToRemove.Count) -Noun 'user(s)'
 
         for ($offset = 0; $offset -lt $usersToRemove.Count; $offset += 20) {
             $chunk = @($usersToRemove[$offset..([Math]::Min($offset + 20, $usersToRemove.Count) - 1)])

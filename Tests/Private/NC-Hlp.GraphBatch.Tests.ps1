@@ -367,3 +367,36 @@ Describe 'Get-NCGraphDirectoryObjectUri' {
         Get-NCGraphDirectoryObjectUri -Id 'u1' | Should -Be 'https://graph.microsoft.us/v1.0/directoryObjects/u1'
     }
 }
+
+Describe 'Write-NCGraphBatchNotice' {
+    BeforeEach {
+        Mock Write-NCMessage {}
+    }
+
+    It 'stays silent when the total fits one batch request' {
+        Write-NCGraphBatchNotice -Count 1 -Noun 'user(s)'
+        Write-NCGraphBatchNotice -Count 20 -Noun 'user(s)'
+
+        Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It
+    }
+
+    It 'writes the notice with the count when the total spans more than one request' {
+        Write-NCGraphBatchNotice -Count 21 -Noun 'user(s)'
+
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq 'Processing 21 user(s) in Graph batches (20 per request) ...' -and $Level -eq 'INFO' }
+    }
+
+    It 'writes the notice without a count when the first streamed chunk is full' {
+        Write-NCGraphBatchNotice -Count 19 -Noun 'users' -Streaming
+        Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It
+
+        Write-NCGraphBatchNotice -Count 20 -Noun 'users' -Streaming
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq 'Processing users in Graph batches (20 per request) ...' -and $Level -eq 'INFO' }
+    }
+
+    It 'returns whether the notice was written only with PassThru' {
+        Write-NCGraphBatchNotice -Count 5 -Noun 'app(s)' | Should -BeNullOrEmpty
+        Write-NCGraphBatchNotice -Count 5 -Noun 'app(s)' -PassThru | Should -BeFalse
+        Write-NCGraphBatchNotice -Count 30 -Noun 'app(s)' -PassThru | Should -BeTrue
+    }
+}

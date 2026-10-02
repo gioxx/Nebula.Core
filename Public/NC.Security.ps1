@@ -56,7 +56,7 @@ function Disable-UserDevices {
             $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             $queue = @(foreach ($entry in $targets) { if ($dedup.Add($entry)) { $entry } })
 
-            Write-NCMessage ("Processing {0} user(s) in Graph batches (20 per request) ..." -f $queue.Count) -Level INFO
+            Write-NCGraphBatchNotice -Count ($queue.Count) -Noun 'user(s)'
 
             for ($offset = 0; $offset -lt $queue.Count; $offset += 20) {
                 $chunk = @($queue[$offset..([Math]::Min($offset + 20, $queue.Count) - 1)])
@@ -212,7 +212,7 @@ function Disable-UserSignIn {
             $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             $queue = @(foreach ($entry in $targets) { if ($dedup.Add($entry)) { $entry } })
 
-            Write-NCMessage ("Processing {0} user(s) in Graph batches (20 per request) ..." -f $queue.Count) -Level INFO
+            Write-NCGraphBatchNotice -Count ($queue.Count) -Noun 'user(s)'
 
             for ($offset = 0; $offset -lt $queue.Count; $offset += 20) {
                 $chunk = @($queue[$offset..([Math]::Min($offset + 20, $queue.Count) - 1)])
@@ -838,7 +838,7 @@ function Revoke-UserSessions {
                 $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
                 $uniqueTargets = @(foreach ($entry in $targets) { if ($dedup.Add($entry)) { $entry } })
 
-                Write-NCMessage ("Processing {0} user(s) in Graph batches (20 per request) ..." -f $uniqueTargets.Count) -Level INFO
+                Write-NCGraphBatchNotice -Count ($uniqueTargets.Count) -Noun 'user(s)'
 
                 for ($offset = 0; $offset -lt $uniqueTargets.Count; $offset += 20) {
                     $chunk = @($uniqueTargets[$offset..([Math]::Min($offset + 20, $uniqueTargets.Count) - 1)])
@@ -862,7 +862,7 @@ function Revoke-UserSessions {
             }
 
             if ($All.IsPresent) {
-                Write-NCMessage ("Processing {0} user(s) in Graph batches (20 per request) ..." -f $queue.Count) -Level INFO
+                Write-NCGraphBatchNotice -Count ($queue.Count) -Noun 'user(s)'
             }
 
             $results = [System.Collections.Generic.List[object]]::new()

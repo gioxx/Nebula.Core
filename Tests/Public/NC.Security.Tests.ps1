@@ -239,7 +239,7 @@ public class NCScriptedHost : PSHost {
             $patches[0].url | Should -Be '/users/id1'
             $patches[0].body.accountEnabled | Should -BeFalse
             Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'SUCCESS' -and $Message -eq 'Sign-in disabled for 14 users.' }
-            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'INFO' -and $Message -like 'Processing 14 user(s) in Graph batches*' }
+            Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter { $Message -like '*in Graph batches*' }
         }
 
         It 'only reads with -WhatIf' {

@@ -163,6 +163,50 @@ function New-NCGraphBatchFailure {
     }
 }
 
+function Write-NCGraphBatchNotice {
+    <#
+    .SYNOPSIS
+        Writes the "Processing ... in Graph batches" notice only when the work spans more than one $batch request.
+    .DESCRIPTION
+        With a known total, the notice is written when Count exceeds 20 items. With -Streaming (pipeline input
+        processed in chunks), Count is the size of the first chunk: a full chunk (20) means more input may follow,
+        a partial one means the whole input fits a single request; the notice then omits the count.
+    .PARAMETER Count
+        Total number of items, or the size of the first chunk with -Streaming.
+    .PARAMETER Noun
+        Item label, for example 'user(s)' or 'users' (with -Streaming).
+    .PARAMETER Streaming
+        Count is the size of the first chunk instead of the total.
+    .PARAMETER PassThru
+        Returns $true when the notice was written, $false otherwise.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$Count,
+        [Parameter(Mandatory = $true)]
+        [string]$Noun,
+        [switch]$Streaming,
+        [switch]$PassThru
+    )
+
+    $threshold = if ($Streaming.IsPresent) { 20 } else { 21 }
+    $written = $Count -ge $threshold
+    if ($written) {
+        $message = if ($Streaming.IsPresent) {
+            "Processing $Noun in Graph batches (20 per request) ..."
+        }
+        else {
+            "Processing $Count $Noun in Graph batches (20 per request) ..."
+        }
+        Write-NCMessage $message -Level INFO
+    }
+
+    if ($PassThru.IsPresent) {
+        return $written
+    }
+}
+
 function Invoke-NCGraphBatch {
     <#
     .SYNOPSIS

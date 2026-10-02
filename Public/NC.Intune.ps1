@@ -406,8 +406,9 @@ function Export-IntuneAppInventory {
             $appDeviceMap = @{}
             $processed = 0
 
+            $batchNoticeWritten = $false
             if ($devices.Count -gt 0) {
-                Write-NCMessage "Processing $($devices.Count) device(s) in Graph batches (20 per request) ..." -Level INFO
+                $batchNoticeWritten = Write-NCGraphBatchNotice -Count ($devices.Count) -Noun 'device(s)' -PassThru
             }
 
             for ($offset = 0; $offset -lt $devices.Count -and -not $aborted; $offset += 20) {
@@ -503,8 +504,8 @@ function Export-IntuneAppInventory {
                         [pscustomobject]@{ App = $app; AppType = $appType }
                     })
 
-                if ($deployedCandidates.Count -gt 0 -and $devices.Count -eq 0) {
-                    Write-NCMessage "Processing $($deployedCandidates.Count) app(s) in Graph batches (20 per request) ..." -Level INFO
+                if ($deployedCandidates.Count -gt 0 -and -not $batchNoticeWritten) {
+                    $batchNoticeWritten = Write-NCGraphBatchNotice -Count ($deployedCandidates.Count) -Noun 'app(s)' -PassThru
                 }
 
                 # Deployment statuses in Graph batches (beta, 20 apps per request), in app order
@@ -962,8 +963,7 @@ function New-IntuneAppBasedGroup {
 
             Write-NCMessage "Scanning device applications ..." -Level INFO
             if ($devices.Count -gt 0) {
-                Write-NCMessage "Processing $($devices.Count) device(s) in Graph batches (20 per request) ..." -Level INFO
-                $batchNoticeWritten = $true
+                $batchNoticeWritten = Write-NCGraphBatchNotice -Count ($devices.Count) -Noun 'device(s)' -PassThru
             }
 
             for ($offset = 0; $offset -lt $devices.Count; $offset += 20) {
@@ -1062,8 +1062,7 @@ function New-IntuneAppBasedGroup {
                     })
 
                 if ($deployedCandidates.Count -gt 0 -and -not $batchNoticeWritten) {
-                    Write-NCMessage "Processing $($deployedCandidates.Count) app(s) in Graph batches (20 per request) ..." -Level INFO
-                    $batchNoticeWritten = $true
+                    $batchNoticeWritten = Write-NCGraphBatchNotice -Count ($deployedCandidates.Count) -Noun 'app(s)' -PassThru
                 }
 
                 for ($offset = 0; $offset -lt $deployedCandidates.Count; $offset += 20) {
@@ -1204,8 +1203,7 @@ function New-IntuneAppBasedGroup {
             if (-not $DryRun.IsPresent) {
                 $lookupNames = @($targetInfos | Where-Object { $_ } | ForEach-Object { $_.GroupName } | Select-Object -Unique)
                 if ($lookupNames.Count -gt 0 -and -not $batchNoticeWritten) {
-                    Write-NCMessage "Processing $($lookupNames.Count) group(s) in Graph batches (20 per request) ..." -Level INFO
-                    $batchNoticeWritten = $true
+                    $batchNoticeWritten = Write-NCGraphBatchNotice -Count ($lookupNames.Count) -Noun 'group(s)' -PassThru
                 }
 
                 if ($lookupNames.Count -gt 0) {
