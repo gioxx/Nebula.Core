@@ -123,7 +123,7 @@ function Remove-EntraUser {
             $queue.Clear()
 
             if (-not $state.StartLineWritten) {
-                Write-NCMessage "Processing users in Graph batches (20 per request) ..." -Level INFO
+                Write-NCGraphBatchNotice -Count ($items.Count) -Noun 'users' -Streaming
                 $state.StartLineWritten = $true
             }
 

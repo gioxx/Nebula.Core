@@ -553,7 +553,7 @@ function Invoke-NCIntuneGroupUsageCore {
 
     $profilesToRead = $configurationEntities.Count + $policyEntities.Count + $appEntities.Count
     if ($profilesToRead -gt 0) {
-        Write-NCMessage "Processing $profilesToRead Intune profile(s) in Graph batches (20 per request) ..." -Level INFO
+        Write-NCGraphBatchNotice -Count $profilesToRead -Noun 'Intune profile(s)'
     }
 
     $configurationAssignments = Get-NCCoreAssignmentRecordsBatch -EntityType 'deviceConfigurations' -EntityIds @($configurationEntities | ForEach-Object { & $getEntityId $_ }) -EffectiveGroupIds $effectiveGroupIds -RequestedGroupId $resolvedGroup.Id

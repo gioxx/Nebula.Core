@@ -179,7 +179,7 @@ function Add-UserMsolAccountSku {
 
             if (-not $state.Started) {
                 $state.Started = $true
-                Write-NCMessage "Processing users in Graph batches (20 per request) ..." -Level INFO
+                Write-NCGraphBatchNotice -Count ($entries.Count) -Noun 'users' -Streaming
             }
 
             # (a) Resolve every queued user.
@@ -360,7 +360,6 @@ function Copy-UserMsolAccountSku {
             return
         }
 
-        Write-NCMessage "Processing 2 user(s) in Graph batches (20 per request) ..." -Level INFO
         $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $resolvedUsers = Resolve-NCGraphUserBatch -Identifier @($SourceUserPrincipalName, $DestinationUserPrincipalName) -Property @('id', 'userPrincipalName', 'displayName', 'usageLocation') -FailedIdentifier $failedUsers
 
@@ -935,7 +934,7 @@ function Export-MsolAccountSku {
             if (-not $licenseDetailCache.ContainsKey([string]$User.Id)) {
                 if (-not $batchNoticeShown) {
                     $batchNoticeShown = $true
-                    Write-NCMessage ("Processing {0} user(s) in Graph batches (20 per request) ..." -f $totalUsers) -Level INFO
+                    Write-NCGraphBatchNotice -Count $totalUsers -Noun 'user(s)'
                 }
 
                 $pending = [System.Collections.Generic.List[object]]::new()
@@ -1568,7 +1567,7 @@ function Get-UserMsolAccountSku {
 
             if (-not $state.Started) {
                 $state.Started = $true
-                Write-NCMessage "Processing users in Graph batches (20 per request) ..." -Level INFO
+                Write-NCGraphBatchNotice -Count ($entries.Count) -Noun 'users' -Streaming
             }
 
             $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -1762,7 +1761,7 @@ function Get-UserUsageLocation {
                 }
             }
 
-            Write-NCMessage ("Processing {0} user(s) in Graph batches (20 per request) ..." -f $queue.Count) -Level INFO
+            Write-NCGraphBatchNotice -Count ($queue.Count) -Noun 'user(s)'
 
             $counter = 0
             for ($offset = 0; $offset -lt $queue.Count; $offset += 20) {
@@ -1833,7 +1832,6 @@ function Move-UserMsolAccountSku {
             return
         }
 
-        Write-NCMessage "Processing 2 user(s) in Graph batches (20 per request) ..." -Level INFO
         $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $resolvedUsers = Resolve-NCGraphUserBatch -Identifier @($SourceUserPrincipalName, $DestinationUserPrincipalName) -Property @('id', 'userPrincipalName', 'displayName', 'usageLocation') -FailedIdentifier $failedUsers
 
@@ -2170,7 +2168,7 @@ function Remove-UserMsolAccountSku {
 
             if (-not $state.Started) {
                 $state.Started = $true
-                Write-NCMessage "Processing users in Graph batches (20 per request) ..." -Level INFO
+                Write-NCGraphBatchNotice -Count ($entries.Count) -Noun 'users' -Streaming
             }
 
             # (a) Resolve every queued user.
@@ -2455,7 +2453,7 @@ function Set-UserUsageLocation {
             $skippedCount = 0
             $counter = 0
 
-            Write-NCMessage ("Processing {0} user(s) in Graph batches (20 per request) ..." -f $queue.Count) -Level INFO
+            Write-NCGraphBatchNotice -Count ($queue.Count) -Noun 'user(s)'
 
             for ($offset = 0; $offset -lt $queue.Count; $offset += 20) {
                 $chunk = @($queue[$offset..([Math]::Min($offset + 20, $queue.Count) - 1)])

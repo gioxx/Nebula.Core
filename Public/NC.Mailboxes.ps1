@@ -1095,7 +1095,7 @@ function Get-UserLastSeen {
             $queue.Clear()
 
             if ($graphReady -and -not $state.StartLineWritten) {
-                Write-NCMessage "Processing mailboxes in Graph batches (20 per request) ..." -Level INFO
+                Write-NCGraphBatchNotice -Count ($items.Count) -Noun 'mailboxes' -Streaming
                 $state.StartLineWritten = $true
             }
 
@@ -1817,7 +1817,7 @@ function Test-SharedMailboxCompliance {
         $report = [System.Collections.Generic.List[object]]::new()
         $counter = 0
 
-        Write-NCMessage "Processing $($mailboxes.Count) mailbox(es) in Graph batches (20 per request) ..." -Level INFO
+        Write-NCGraphBatchNotice -Count ($mailboxes.Count) -Noun 'mailbox(es)'
 
         $mailboxList = @($mailboxes)
         for ($offset = 0; $offset -lt $mailboxList.Count; $offset += 20) {

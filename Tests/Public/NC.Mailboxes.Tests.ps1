@@ -133,7 +133,7 @@ Describe 'Sign-in log batching' {
             $result = @(1..14 | ForEach-Object { "user$_@contoso.com" } | Get-UserLastSeen)
             $result.Count | Should -Be 14
             Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly
-            Should -Invoke Write-NCMessage -Times 1 -Exactly -ParameterFilter { $Message -like 'Processing mailboxes in Graph batches*' }
+            Should -Invoke Write-NCMessage -Times 0 -Exactly -ParameterFilter { $Message -like '*in Graph batches*' }
         }
 
         It 'uses 2 Graph calls for 21 mailboxes and keeps input order' {
@@ -253,7 +253,7 @@ Describe 'Sign-in log batching' {
             Should -Invoke Write-NCMessage -Times 1 -Exactly -ParameterFilter {
                 $Message -eq 'Sign-in records found for shared mailbox Shared 1' -and $Level -eq 'WARNING'
             }
-            Should -Invoke Write-NCMessage -Times 1 -Exactly -ParameterFilter { $Message -like 'Processing 14 mailbox(es) in Graph batches*' }
+            Should -Invoke Write-NCMessage -Times 0 -Exactly -ParameterFilter { $Message -like '*in Graph batches*' }
         }
 
         It 'asks Graph for one successful sign-in per mailbox and never follows nextLink' {

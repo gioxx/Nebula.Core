@@ -589,7 +589,7 @@ Describe 'Entra group owner batching' {
             $result.Status | Should -Be @('Added', 'Added', 'Added')
             ($result[0].PSObject.Properties.Name -join ',') | Should -Be 'GroupName,GroupId,OwnerName,OwnerId,Status'
             Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq "Added owner 'a@contoso.com' to group 'Group'." -and $Level -eq 'SUCCESS' }
-            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq 'Processing 3 owner(s) in Graph batches (20 per request) ...' -and $Level -eq 'INFO' }
+            Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter { $Message -like '*in Graph batches*' }
         }
 
         It 'reports Exists and Failed with the original messages' {
@@ -816,7 +816,7 @@ Describe 'Entra group read batching' {
             $users | Get-EntraGroupUser | Out-Null
 
             Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
-            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq 'Processing users in Graph batches (20 per request) ...' -and $Level -eq 'INFO' }
+            Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter { $Message -like '*in Graph batches*' }
         }
 
         It 'emits the same rows, sorted by group name, for each user in input order' {
@@ -1075,7 +1075,7 @@ Describe 'Get-UserGroups and Search-EntraGroup batching' {
         $result = @(1..14 | ForEach-Object { "$_" } | Get-UserGroups)
 
         Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly -Scope It
-        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq 'Processing users in Graph batches (20 per request) ...' }
+        Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter { $Message -like '*in Graph batches*' }
         $result.Count | Should -Be 14
     }
 
