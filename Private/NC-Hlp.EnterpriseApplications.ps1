@@ -510,12 +510,18 @@ function Compare-NCEnterpriseApplicationSnapshot {
         }
     }
 
+    # Graph returns these collections in no stable order: sort them so the same content compares equal
+    $sortedBy = {
+        param($Items, [string[]]$Keys)
+        @(@($Items | Where-Object { $null -ne $_ }) | Sort-Object -Property $Keys)
+    }
+
     & $addIfDifferent 'Application.DisplayName' $ReferenceSnapshot.Application.DisplayName $DifferenceSnapshot.Application.DisplayName
     & $addIfDifferent 'Application.SignInAudience' $ReferenceSnapshot.Application.SignInAudience $DifferenceSnapshot.Application.SignInAudience
     & $addIfDifferent 'Application.IdentifierUris' $ReferenceSnapshot.Application.IdentifierUris $DifferenceSnapshot.Application.IdentifierUris
     & $addIfDifferent 'Application.Notes' $ReferenceSnapshot.Application.Notes $DifferenceSnapshot.Application.Notes
     & $addIfDifferent 'Application.Tags' $ReferenceSnapshot.Application.Tags $DifferenceSnapshot.Application.Tags
-    & $addIfDifferent 'Application.Owners' $ReferenceSnapshot.Application.Owners $DifferenceSnapshot.Application.Owners
+    & $addIfDifferent 'Application.Owners' (& $sortedBy $ReferenceSnapshot.Application.Owners 'Id') (& $sortedBy $DifferenceSnapshot.Application.Owners 'Id')
     & $addIfDifferent 'Application.Web' $ReferenceSnapshot.Application.Web $DifferenceSnapshot.Application.Web
     & $addIfDifferent 'Application.Spa' $ReferenceSnapshot.Application.Spa $DifferenceSnapshot.Application.Spa
     & $addIfDifferent 'Application.PublicClient' $ReferenceSnapshot.Application.PublicClient $DifferenceSnapshot.Application.PublicClient
@@ -528,11 +534,11 @@ function Compare-NCEnterpriseApplicationSnapshot {
     & $addIfDifferent 'ServicePrincipal.LogoUrl' $ReferenceSnapshot.ServicePrincipal.LogoUrl $DifferenceSnapshot.ServicePrincipal.LogoUrl
 
     if ($IncludeAppRoleAssignments.IsPresent) {
-        & $addIfDifferent 'AppRoleAssignments' $ReferenceSnapshot.AppRoleAssignments $DifferenceSnapshot.AppRoleAssignments
+        & $addIfDifferent 'AppRoleAssignments' (& $sortedBy $ReferenceSnapshot.AppRoleAssignments 'PrincipalId', 'AppRoleId') (& $sortedBy $DifferenceSnapshot.AppRoleAssignments 'PrincipalId', 'AppRoleId')
     }
 
-    & $addIfDifferent 'CredentialsMetadata.PasswordCredentials' $ReferenceSnapshot.CredentialsMetadata.PasswordCredentials $DifferenceSnapshot.CredentialsMetadata.PasswordCredentials
-    & $addIfDifferent 'CredentialsMetadata.KeyCredentials' $ReferenceSnapshot.CredentialsMetadata.KeyCredentials $DifferenceSnapshot.CredentialsMetadata.KeyCredentials
+    & $addIfDifferent 'CredentialsMetadata.PasswordCredentials' (& $sortedBy $ReferenceSnapshot.CredentialsMetadata.PasswordCredentials 'KeyId') (& $sortedBy $DifferenceSnapshot.CredentialsMetadata.PasswordCredentials 'KeyId')
+    & $addIfDifferent 'CredentialsMetadata.KeyCredentials' (& $sortedBy $ReferenceSnapshot.CredentialsMetadata.KeyCredentials 'KeyId') (& $sortedBy $DifferenceSnapshot.CredentialsMetadata.KeyCredentials 'KeyId')
 
     return $rows.ToArray()
 }

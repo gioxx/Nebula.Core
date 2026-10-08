@@ -143,6 +143,20 @@ function Import-EnterpriseApplication {
             return
         }
 
+        # Missing collections become empty arrays when applied, which would clear an existing app: check the shape first
+        if ($snapshot.SchemaVersion -ne 1) {
+            Write-NCMessage "Snapshot '$InputPath' has schema version '$($snapshot.SchemaVersion)'; only version 1 (from Export-EnterpriseApplication) is supported." -Level ERROR
+            return
+        }
+        $requiredApplicationProperties = @('DisplayName', 'SignInAudience', 'Tags', 'Web', 'Spa', 'PublicClient', 'RequiredResourceAccess', 'AppRoles', 'Oauth2PermissionScopes', 'Owners')
+        $applicationProperties = if ($snapshot.Application) { @($snapshot.Application.PSObject.Properties.Name) } else { @() }
+        $missingProperties = @($requiredApplicationProperties | Where-Object { $applicationProperties -notcontains $_ } | ForEach-Object { "Application.$_" })
+        if (-not $snapshot.ServicePrincipal) { $missingProperties += 'ServicePrincipal' }
+        if ($missingProperties.Count -gt 0) {
+            Write-NCMessage "Snapshot '$InputPath' is incomplete, nothing was imported. Missing: $($missingProperties -join ', ')." -Level ERROR
+            return
+        }
+
         if (-not $PSCmdlet.ShouldProcess($TargetDisplayName, "Import Enterprise Application from '$InputPath'")) {
             return
         }

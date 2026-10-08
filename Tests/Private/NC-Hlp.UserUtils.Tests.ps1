@@ -244,6 +244,28 @@ Describe 'Resolve-EntraUserSearchResults field selection' {
         Should -Invoke Get-MgUser -Times 1 -Exactly -Scope It -ParameterFilter { $Search -eq '"mail:id-alice"' }
     }
 
+    It 'skips the tenant-wide scan when an exact UPN or object ID resolves directly' {
+        $any = @(Resolve-EntraUserSearchResults -SearchText 'alice@contoso.com' -SearchIn Any)
+        $upn = @(Resolve-EntraUserSearchResults -SearchText 'alice@contoso.com' -SearchIn UserPrincipalName)
+
+        $any.Count | Should -Be 1
+        $upn.Count | Should -Be 1
+        Should -Invoke Get-MgUser -Times 0 -Exactly -Scope It -ParameterFilter { $All -and $null -eq $Search }
+    }
+
+    It 'scans the tenant once when partial matching is needed' {
+        Mock Get-MgUser {
+            if ($UserId) { throw 'not found' }
+            if ($All -and $null -eq $Search) { return @($script:alice) }
+            @()
+        }
+
+        $result = @(Resolve-EntraUserSearchResults -SearchText 'rossi' -SearchIn DisplayName)
+
+        $result.Count | Should -Be 1
+        Should -Invoke Get-MgUser -Times 1 -Exactly -Scope It -ParameterFilter { $All -and $null -eq $Search }
+    }
+
     It 'keeps a direct match whose selected field contains the search text' {
         $result = @(Resolve-EntraUserSearchResults -SearchText 'alice@contoso.com' -SearchIn UserPrincipalName -IndexOnly)
 

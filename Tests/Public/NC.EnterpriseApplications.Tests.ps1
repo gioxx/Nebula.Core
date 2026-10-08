@@ -595,6 +595,25 @@ Describe 'Compare-NCEnterpriseApplicationSnapshot' {
 
         ($rows | Where-Object { $_.Property -eq 'Application.Owners' }).Count | Should -Be 1
     }
+
+    It 'ignores the order of owners, App Role Assignments and credentials' {
+        $jane = [pscustomobject]@{ Id = 'owner-1'; DisplayName = 'Jane Doe'; UserPrincipalName = 'jane@contoso.com' }
+        $john = [pscustomobject]@{ Id = 'owner-2'; DisplayName = 'John Smith'; UserPrincipalName = 'john@contoso.com' }
+        $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @() -Owners @($jane, $john)
+        $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @() -Owners @($john, $jane)
+        $assignment1 = [pscustomobject]@{ PrincipalId = 'p1'; PrincipalDisplayName = 'Group 1'; PrincipalType = 'Group'; AppRoleId = 'r1' }
+        $assignment2 = [pscustomobject]@{ PrincipalId = 'p2'; PrincipalDisplayName = 'Group 2'; PrincipalType = 'Group'; AppRoleId = 'r1' }
+        $a.AppRoleAssignments = @($assignment1, $assignment2)
+        $b.AppRoleAssignments = @($assignment2, $assignment1)
+        $secret1 = [pscustomobject]@{ DisplayName = 's1'; KeyId = 'k1'; EndDateTime = '2027-01-01' }
+        $secret2 = [pscustomobject]@{ DisplayName = 's2'; KeyId = 'k2'; EndDateTime = '2027-06-01' }
+        $a.CredentialsMetadata.PasswordCredentials = @($secret1, $secret2)
+        $b.CredentialsMetadata.PasswordCredentials = @($secret2, $secret1)
+
+        $rows = @(Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $a -DifferenceSnapshot $b -IncludeAppRoleAssignments)
+
+        $rows.Count | Should -Be 0
+    }
 }
 
 Describe 'Export-EnterpriseApplication' {
@@ -659,7 +678,12 @@ Describe 'Import-EnterpriseApplication' {
         Mock Add-EmptyLine {}
         Mock Write-NCMessage {}
         Mock Set-NCEnterpriseApplicationFromSnapshot { $applyResult }
-        '{"Application":{"DisplayName":"Source App"}}' | Set-Content -LiteralPath $inputPath
+        $script:validSnapshot = @{
+            SchemaVersion    = 1
+            Application      = @{ DisplayName = 'Source App'; SignInAudience = 'AzureADMyOrg'; Tags = @(); Web = @{ redirectUris = @() }; Spa = @{ redirectUris = @() }; PublicClient = @{ redirectUris = @() }; RequiredResourceAccess = @(); AppRoles = @(); Oauth2PermissionScopes = @(); Owners = @() }
+            ServicePrincipal = @{ Tags = @(); Homepage = $null }
+        }
+        $script:validSnapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $inputPath
     }
 
     It 'reads the snapshot file and applies it to the target' {
@@ -709,6 +733,34 @@ Describe 'Import-EnterpriseApplication' {
         }
     }
 
+    It 'refuses a snapshot with an unsupported schema version' {
+        $script:validSnapshot.SchemaVersion = 2
+        $script:validSnapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $inputPath
+
+        Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -Confirm:$false
+
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*schema version*' }
+    }
+
+    It 'refuses a snapshot that misses required application properties' {
+        $script:validSnapshot.Application.Remove('RequiredResourceAccess')
+        $script:validSnapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $inputPath
+
+        Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -Confirm:$false
+
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*RequiredResourceAccess*' }
+    }
+
+    It 'refuses a JSON file that is not an Enterprise Application snapshot' {
+        '{"name":"something else"}' | Set-Content -LiteralPath $inputPath
+
+        Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -Confirm:$false
+
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' }
+    }
     It 'errors when the input file contains invalid JSON' {
         Set-Content -LiteralPath $inputPath -Value 'not valid json {{{'
 

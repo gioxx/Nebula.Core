@@ -279,14 +279,14 @@ function Resolve-EntraUserSearchResults {
     )
 
     $searchNeedle = $escapedText.ToLowerInvariant()
-    $allUsers = @()
-    if (-not $IndexOnly.IsPresent) {
+
+    # The tenant-wide scan is slow on large tenants: read it only when partial matching actually needs it
+    $getAllUsers = {
         try {
-            $allUsers = @(Get-MgUser -All -Property $selectProperties -ErrorAction Stop)
+            @(Get-MgUser -All -Property $selectProperties -ErrorAction Stop)
         }
         catch {
-            Write-NCMessage "Unable to load users for fallback matching: $($_.Exception.Message)" -Level ERROR
-            return @()
+            throw "Unable to load users for fallback matching: $($_.Exception.Message)"
         }
     }
 
@@ -315,11 +315,11 @@ function Resolve-EntraUserSearchResults {
             if ($users.Count -eq 0) {
                 $searchClause = "`"$($searchField[$SearchIn]):$escapedText`""
                 $users = @(Get-MgUser -Search $searchClause -ConsistencyLevel eventual -CountVariable count -All -Property $selectProperties -ErrorAction Stop)
-            }
 
-            if (-not $IndexOnly.IsPresent) {
-                $fallbackUsers = @($allUsers | Where-Object $fieldMatch[$SearchIn])
-                $users = @($users + $fallbackUsers | Sort-Object Id -Unique)
+                if (-not $IndexOnly.IsPresent) {
+                    $fallbackUsers = @(& $getAllUsers | Where-Object $fieldMatch[$SearchIn])
+                    $users = @($users + $fallbackUsers | Sort-Object Id -Unique)
+                }
             }
         }
 
@@ -341,7 +341,7 @@ function Resolve-EntraUserSearchResults {
                         $users = @($byDisplay + $byUpn + $byMail | Sort-Object Id -Unique)
                     }
                     else {
-                        $fallbackUsers = @($allUsers | Where-Object {
+                        $fallbackUsers = @(& $getAllUsers | Where-Object {
                             $candidates = @(
                                 $_.DisplayName,
                                 $_.UserPrincipalName,
