@@ -209,3 +209,45 @@ Describe 'Find-UserRecipient batched filter fallback' {
         }
     }
 }
+
+Describe 'Resolve-EntraUserSearchResults field selection' {
+    BeforeAll {
+        function Test-MgGraphConnection { param([string[]]$Scopes, [bool]$EnsureExchangeOnline) $true }
+        function Add-EmptyLine {}
+        function Get-MgUser {
+            [CmdletBinding()]
+            param($UserId, $Property, $Filter, $Search, $ConsistencyLevel, $CountVariable, [switch]$All)
+        }
+        $script:alice = [pscustomobject]@{ Id = 'id-alice'; DisplayName = 'Alice Rossi'; UserPrincipalName = 'alice@contoso.com'; Mail = 'alice@contoso.com' }
+    }
+
+    BeforeEach {
+        Mock Write-NCMessage {}
+        Mock Get-MgUser {
+            if ($UserId -in 'alice@contoso.com', 'id-alice') { return $script:alice }
+            if ($UserId) { throw 'not found' }
+            @()
+        }
+    }
+
+    It 'does not return a direct UPN match when searching only in DisplayName' {
+        $result = @(Resolve-EntraUserSearchResults -SearchText 'alice@contoso.com' -SearchIn DisplayName -IndexOnly)
+
+        $result.Count | Should -Be 0
+        Should -Invoke Get-MgUser -Times 1 -Exactly -Scope It -ParameterFilter { $Search -eq '"displayName:alice@contoso.com"' }
+    }
+
+    It 'does not return a direct object ID match when searching only in Mail' {
+        $result = @(Resolve-EntraUserSearchResults -SearchText 'id-alice' -SearchIn Mail -IndexOnly)
+
+        $result.Count | Should -Be 0
+        Should -Invoke Get-MgUser -Times 1 -Exactly -Scope It -ParameterFilter { $Search -eq '"mail:id-alice"' }
+    }
+
+    It 'keeps a direct match whose selected field contains the search text' {
+        $result = @(Resolve-EntraUserSearchResults -SearchText 'alice@contoso.com' -SearchIn UserPrincipalName -IndexOnly)
+
+        $result.Count | Should -Be 1
+        Should -Invoke Get-MgUser -Times 0 -Exactly -Scope It -ParameterFilter { $null -ne $Search }
+    }
+}

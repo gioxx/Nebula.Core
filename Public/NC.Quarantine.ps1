@@ -251,7 +251,7 @@ function Get-QuarantineForMailbox {
                 Write-NCMessage ("Searching quarantined messages for {0} ..." -f $currentAlias) -Level INFO
 
                 try {
-                    $messages = Get-QuarantineMessage -RecipientAddress $currentAlias -StartReceivedDate $StartReceivedDate -EndReceivedDate $EndReceivedDate -ErrorAction Stop
+                    $messages = @(Get-NCQuarantineMessageAllPages -Parameters @{ RecipientAddress = $currentAlias; StartReceivedDate = $StartReceivedDate; EndReceivedDate = $EndReceivedDate })
                 }
                 catch {
                     Write-NCMessage "Unable to retrieve messages for '$currentAlias'. $($_.Exception.Message)" -Level ERROR
@@ -332,7 +332,7 @@ function Get-QuarantineFrom {
             Write-NCMessage ("Searching quarantined messages from {0} ..." -f $currentSender) -Level INFO
 
             try {
-                $messages = Get-QuarantineMessage -SenderAddress $currentSender -ErrorAction Stop
+                $messages = @(Get-NCQuarantineMessageAllPages -Parameters @{ SenderAddress = $currentSender })
             }
             catch {
                 Write-NCMessage "Unable to retrieve messages for '$currentSender'. $($_.Exception.Message)" -Level ERROR
@@ -410,7 +410,7 @@ function Get-QuarantineFromDomain {
             Write-NCMessage ("Searching quarantined messages from *@{0} ..." -f $domain) -Level INFO
 
             try {
-                $messages = Get-QuarantineMessage -ErrorAction Stop | Where-Object { $_.SenderAddress -like "*@$domain" }
+                $messages = @(Get-NCQuarantineMessageAllPages | Where-Object { $_.SenderAddress -like "*@$domain" })
             }
             catch {
                 Write-NCMessage "Unable to retrieve messages for domain '$domain'. $($_.Exception.Message)" -Level ERROR
@@ -735,7 +735,7 @@ function Unlock-QuarantineFrom {
             Write-NCMessage ("Search for quarantined messages from {0} ..." -f $currentSender) -Level INFO
 
             try {
-                $messages = Get-QuarantineMessage -SenderAddress $currentSender -ErrorAction Stop | Where-Object { $_.ReleaseStatus -ne "Released" -and $null -ne $_.QuarantinedUser }
+                $messages = @(Get-NCQuarantineMessageAllPages -Parameters @{ SenderAddress = $currentSender } | Where-Object { $_.ReleaseStatus -ne "Released" -and $null -ne $_.QuarantinedUser })
                 Write-Verbose "Found $($messages.Count) message(s) from $currentSender not yet released."
             }
             catch {

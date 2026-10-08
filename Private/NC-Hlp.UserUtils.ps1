@@ -292,57 +292,38 @@ function Resolve-EntraUserSearchResults {
 
     $users = @()
 
+    # Field checks for the single-field modes, shared by the direct lookup and the fallback scan
+    $fieldMatch = @{
+        DisplayName       = { $_.DisplayName -and $_.DisplayName.ToLowerInvariant().Contains($searchNeedle) }
+        UserPrincipalName = { $_.UserPrincipalName -and $_.UserPrincipalName.ToLowerInvariant().Contains($searchNeedle) }
+        Mail              = {
+            ($_.Mail -and $_.Mail.ToLowerInvariant().Contains($searchNeedle)) -or
+            ($_.OtherMails -and @($_.OtherMails | Where-Object { $_ -and $_.ToLowerInvariant().Contains($searchNeedle) }).Count -gt 0)
+        }
+    }
+    $searchField = @{ DisplayName = 'displayName'; UserPrincipalName = 'userPrincipalName'; Mail = 'mail' }
+
     try {
+        if ($SearchIn -ne 'Any') {
+            # A UPN or object ID resolves directly, but only counts when the selected field matches too
+            $users = @()
+            try {
+                $users = @(Get-MgUser -UserId $SearchText -Property $selectProperties -ErrorAction Stop | Where-Object $fieldMatch[$SearchIn])
+            }
+            catch {}
+
+            if ($users.Count -eq 0) {
+                $searchClause = "`"$($searchField[$SearchIn]):$escapedText`""
+                $users = @(Get-MgUser -Search $searchClause -ConsistencyLevel eventual -CountVariable count -All -Property $selectProperties -ErrorAction Stop)
+            }
+
+            if (-not $IndexOnly.IsPresent) {
+                $fallbackUsers = @($allUsers | Where-Object $fieldMatch[$SearchIn])
+                $users = @($users + $fallbackUsers | Sort-Object Id -Unique)
+            }
+        }
+
         switch ($SearchIn) {
-            'DisplayName' {
-                try {
-                    $users = @(Get-MgUser -UserId $SearchText -Property $selectProperties -ErrorAction Stop)
-                }
-                catch {
-                    $searchClause = "`"displayName:$escapedText`""
-                    $users = @(Get-MgUser -Search $searchClause -ConsistencyLevel eventual -CountVariable count -All -Property $selectProperties -ErrorAction Stop)
-                }
-
-                if (-not $IndexOnly.IsPresent) {
-                    $fallbackUsers = @($allUsers | Where-Object {
-                        $_.DisplayName -and $_.DisplayName.ToLowerInvariant().Contains($searchNeedle)
-                    })
-                    $users = @($users + $fallbackUsers | Sort-Object Id -Unique)
-                }
-            }
-            'UserPrincipalName' {
-                try {
-                    $users = @(Get-MgUser -UserId $SearchText -Property $selectProperties -ErrorAction Stop)
-                }
-                catch {
-                    $searchClause = "`"userPrincipalName:$escapedText`""
-                    $users = @(Get-MgUser -Search $searchClause -ConsistencyLevel eventual -CountVariable count -All -Property $selectProperties -ErrorAction Stop)
-                }
-
-                if (-not $IndexOnly.IsPresent) {
-                    $fallbackUsers = @($allUsers | Where-Object {
-                        $_.UserPrincipalName -and $_.UserPrincipalName.ToLowerInvariant().Contains($searchNeedle)
-                    })
-                    $users = @($users + $fallbackUsers | Sort-Object Id -Unique)
-                }
-            }
-            'Mail' {
-                try {
-                    $users = @(Get-MgUser -UserId $SearchText -Property $selectProperties -ErrorAction Stop)
-                }
-                catch {
-                    $searchClause = "`"mail:$escapedText`""
-                    $users = @(Get-MgUser -Search $searchClause -ConsistencyLevel eventual -CountVariable count -All -Property $selectProperties -ErrorAction Stop)
-                }
-
-                if (-not $IndexOnly.IsPresent) {
-                    $fallbackUsers = @($allUsers | Where-Object {
-                        ($_.Mail -and $_.Mail.ToLowerInvariant().Contains($searchNeedle)) -or
-                        ($_.OtherMails -and @($_.OtherMails | Where-Object { $_ -and $_.ToLowerInvariant().Contains($searchNeedle) }).Count -gt 0)
-                    })
-                    $users = @($users + $fallbackUsers | Sort-Object Id -Unique)
-                }
-            }
             'Any' {
                 try {
                     $users = @(Get-MgUser -UserId $SearchText -Property $selectProperties -ErrorAction Stop)
