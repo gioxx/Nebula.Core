@@ -391,6 +391,8 @@ function Invoke-NCGraphBatchCollection {
 
     foreach ($result in @(Invoke-NCGraphBatch -Requests $Requests -ApiVersion $ApiVersion -Activity $Activity)) {
         $items = @()
+        $success = $result.Success
+        $errorMessage = $result.ErrorMessage
         if ($result.Success -and $null -ne $result.Body) {
             $body = $result.Body
             if ($null -ne $body.value) {
@@ -398,17 +400,25 @@ function Invoke-NCGraphBatchCollection {
             }
             $nextLink = $body.'@odata.nextLink'
             if ($nextLink) {
-                $items += @(Invoke-NCGraphAllPagesCore -Uri $nextLink)
+                try {
+                    $items += @(Invoke-NCGraphAllPagesCore -Uri $nextLink)
+                }
+                catch {
+                    # Report the item as failed rather than returning the first page as if it were complete
+                    $success = $false
+                    $items = @()
+                    $errorMessage = "Unable to read all result pages: $($_.Exception.Message)"
+                }
             }
         }
 
         [pscustomobject]@{
             Id           = $result.Id
             Status       = $result.Status
-            Success      = $result.Success
+            Success      = $success
             Items        = $items
             ErrorCode    = $result.ErrorCode
-            ErrorMessage = $result.ErrorMessage
+            ErrorMessage = $errorMessage
         }
     }
 }

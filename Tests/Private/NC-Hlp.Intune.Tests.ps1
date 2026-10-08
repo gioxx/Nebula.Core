@@ -72,6 +72,29 @@ Describe 'Invoke-NCGraphAllPagesCore' {
         $result.Count | Should -Be 1
         $result[0].id | Should -Be 'single-object-id'
     }
+
+    It 'throws when a page fails instead of returning a partial collection' {
+        Mock Start-Sleep {}
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -like '*page2*') { throw 'Forbidden' }
+            [pscustomobject]@{ value = @([pscustomobject]@{ id = 'owner-1' }); '@odata.nextLink' = 'v1.0/applications/app-1/owners?page2' }
+        }
+
+        { Invoke-NCGraphAllPagesCore -Uri 'v1.0/applications/app-1/owners' } | Should -Throw '*Forbidden*'
+    }
+}
+
+Describe 'Module source' {
+    It 'never calls exit, which would close the caller''s PowerShell session' {
+        $files = Get-ChildItem "$PSScriptRoot/../../Public", "$PSScriptRoot/../../Private" -Filter '*.ps1'
+        $exits = @(foreach ($file in $files) {
+                $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$null)
+                $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.ExitStatementAst] }, $true) |
+                    ForEach-Object { "$($file.Name):$($_.Extent.StartLineNumber)" }
+            })
+
+        $exits | Should -BeNullOrEmpty
+    }
 }
 
 Describe 'Resolve-NCIntuneManagedDeviceEntraMember batching' {

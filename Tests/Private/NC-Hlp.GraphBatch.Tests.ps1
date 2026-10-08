@@ -245,6 +245,22 @@ Describe 'Invoke-NCGraphBatchCollection' {
         @($result[2].Items).Count | Should -Be 0
         Should -Invoke Invoke-NCGraphAllPagesCore -Times 1 -Exactly -ParameterFilter { $Uri -like '*skiptoken=abc' }
     }
+
+    It 'reports a result as failed when a follow-up page cannot be read' {
+        Mock Invoke-MgGraphRequest {
+            @{
+                responses = @(
+                    @{ id = '1'; status = 200; body = @{ value = @(@{ id = 'g1' }); '@odata.nextLink' = 'v1.0/users/u1/memberOf?$skiptoken=abc' } }
+                )
+            }
+        }
+        Mock Invoke-NCGraphAllPagesCore { throw 'Forbidden' }
+
+        $result = @(Invoke-NCGraphBatchCollection -Requests @(@{ Id = 'a'; Method = 'GET'; Url = '/users/u1/memberOf' }))
+
+        $result[0].Success | Should -BeFalse
+        $result[0].ErrorMessage | Should -BeLike '*Forbidden*'
+    }
 }
 
 Describe 'Resolve-NCGraphUserBatch' {

@@ -665,8 +665,8 @@ function Invoke-NCGraphCollectionRequest {
                 continue
             }
 
-            Write-NCMessage "Error fetching data: $($_.Exception.Message)" -Level WARNING
-            break
+            # A failed page leaves the collection incomplete: let the caller decide instead of returning partial data
+            throw
         }
     }
 
@@ -731,8 +731,8 @@ function Invoke-NCGraphAllPagesCore {
                 continue
             }
 
-            Write-NCMessage "Error fetching data: $($_.Exception.Message)" -Level WARNING
-            break
+            # A failed page leaves the collection incomplete: let the caller decide instead of returning partial data
+            throw
         }
     }
     while ($nextLink)

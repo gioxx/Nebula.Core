@@ -77,8 +77,9 @@ function Get-NCEnterpriseApplicationSnapshot {
         $owners = @(Invoke-NCGraphAllPagesCore -Uri "v1.0/applications/$($app.id)/owners?`$select=id,displayName,userPrincipalName")
     }
     catch {
-        Write-NCMessage "Unable to read owners for '$($app.displayName)': $($_.Exception.Message)" -Level WARNING
-        $owners = @()
+        # An incomplete owner list would make the snapshot (and any copy from it) silently drop owners
+        Write-NCMessage "Unable to read owners for '$($app.displayName)', snapshot not created: $($_.Exception.Message)" -Level ERROR
+        return
     }
 
     $appRoleAssignments = @()
@@ -87,8 +88,8 @@ function Get-NCEnterpriseApplicationSnapshot {
             $appRoleAssignments = @(Invoke-NCGraphAllPagesCore -Uri "v1.0/servicePrincipals/$($sp.id)/appRoleAssignedTo")
         }
         catch {
-            Write-NCMessage "Unable to read App Role Assignments for '$($app.displayName)': $($_.Exception.Message)" -Level WARNING
-            $appRoleAssignments = @()
+            Write-NCMessage "Unable to read App Role Assignments for '$($app.displayName)', snapshot not created: $($_.Exception.Message)" -Level ERROR
+            return
         }
     }
 
@@ -338,17 +339,19 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     # Service Principal under "Enterprise applications" at all; a bare `appId`-only create leaves
     # the app visible in "App registrations" but absent from "Enterprise applications". homepageUrl
     # is applied too; logoUrl is read-only in Graph and is never written.
+    # homepage is always written so an update also clears a value the snapshot doesn't have
     $spWriteBody = [ordered]@{
-        tags = @($Snapshot.ServicePrincipal.Tags)
-    }
-    if ($Snapshot.ServicePrincipal.Homepage) {
-        $spWriteBody.homepage = $Snapshot.ServicePrincipal.Homepage
+        tags     = @($Snapshot.ServicePrincipal.Tags)
+        homepage = if ($Snapshot.ServicePrincipal.Homepage) { $Snapshot.ServicePrincipal.Homepage } else { $null }
     }
 
     $targetSp = @($spResponse.value) | Select-Object -First 1
     if (-not $targetSp) {
         $spCreateBody = [ordered]@{ appId = $targetApp.appId }
-        foreach ($key in $spWriteBody.Keys) { $spCreateBody[$key] = $spWriteBody[$key] }
+        foreach ($key in $spWriteBody.Keys) {
+            if ($key -eq 'homepage' -and $null -eq $spWriteBody[$key]) { continue }
+            $spCreateBody[$key] = $spWriteBody[$key]
+        }
 
         try {
             $targetSp = Invoke-MgGraphRequest -Uri 'v1.0/servicePrincipals' -Method POST -Body ($spCreateBody | ConvertTo-Json -Depth 5) -ContentType 'application/json' -ErrorAction Stop

@@ -741,7 +741,7 @@ function Export-IntuneAppInventory {
         }
         catch {
             Write-NCMessage "Script execution failed: $($_.Exception.Message)" -Level ERROR
-            exit 1
+            return
         }
     }
 }

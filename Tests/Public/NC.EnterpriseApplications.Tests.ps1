@@ -143,6 +143,30 @@ Describe 'Get-NCEnterpriseApplicationSnapshot' {
         $snapshot.Application.Api.RequestedAccessTokenVersion | Should -Be 2
     }
 
+    It 'returns no snapshot when the owners cannot be read completely' {
+        Mock Invoke-NCGraphAllPagesCore {
+            if ($Uri -match '/owners') { throw 'Forbidden' }
+            return @()
+        }
+
+        $snapshot = Get-NCEnterpriseApplicationSnapshot -ApplicationName 'Contoso Test App'
+
+        $snapshot | Should -BeNullOrEmpty
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*owners*Forbidden*' }
+    }
+
+    It 'returns no snapshot when the App Role Assignments cannot be read completely' {
+        Mock Invoke-NCGraphAllPagesCore {
+            if ($Uri -match '/appRoleAssignedTo') { throw 'Forbidden' }
+            return @()
+        }
+
+        $snapshot = Get-NCEnterpriseApplicationSnapshot -ApplicationName 'Contoso Test App' -IncludeAppRoleAssignments
+
+        $snapshot | Should -BeNullOrEmpty
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*App Role Assignments*Forbidden*' }
+    }
+
     It 'includes App Role Assignments only when requested' {
         $snapshot = Get-NCEnterpriseApplicationSnapshot -ApplicationName 'Contoso Test App' -IncludeAppRoleAssignments
 
@@ -300,6 +324,28 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
         $result.Error | Should -BeNullOrEmpty
         Assert-MockCalled Invoke-MgGraphRequest -Scope It -ParameterFilter {
             $Method -eq 'PATCH' -and $Uri -eq 'v1.0/applications/existing-app-id'
+        }
+        # The snapshot has no homepage: the update clears any value left on the destination
+        Assert-MockCalled Invoke-MgGraphRequest -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Method -eq 'PATCH' -and $Uri -eq 'v1.0/servicePrincipals/existing-sp-id' -and
+            ($Body | ConvertFrom-Json).PSObject.Properties.Name -contains 'homepage' -and $null -eq ($Body | ConvertFrom-Json).homepage
+        }
+    }
+
+    It 'does not send an empty homepage when creating a Service Principal' {
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^v1\.0/applications\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/applications') { return [pscustomobject]@{ id = 'new-app-id'; appId = 'new-client-id'; displayName = 'Target App' } }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/servicePrincipals') { return [pscustomobject]@{ id = 'new-sp-id'; appId = 'new-client-id' } }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $null = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        Assert-MockCalled Invoke-MgGraphRequest -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Method -eq 'POST' -and $Uri -eq 'v1.0/servicePrincipals' -and ($Body | ConvertFrom-Json).PSObject.Properties.Name -notcontains 'homepage'
         }
     }
 
