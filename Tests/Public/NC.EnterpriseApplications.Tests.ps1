@@ -119,6 +119,30 @@ Describe 'Get-NCEnterpriseApplicationSnapshot' {
         $snapshot.AppRoleAssignments.Count | Should -Be 0
     }
 
+    It 'captures the writable api settings besides the permission scopes' {
+        $originalApi = $app.api
+        $app.api = [pscustomobject]@{
+            oauth2PermissionScopes      = @([pscustomobject]@{ id = 'scope-1'; value = 'access_as_user' })
+            acceptMappedClaims          = $true
+            knownClientApplications     = @('client-app-1')
+            preAuthorizedApplications   = @([pscustomobject]@{ appId = 'client-app-1'; delegatedPermissionIds = @('scope-1') })
+            requestedAccessTokenVersion = 2
+        }
+
+        try {
+            $snapshot = Get-NCEnterpriseApplicationSnapshot -ApplicationName 'Contoso Test App'
+        }
+        finally {
+            $app.api = $originalApi
+        }
+
+        $snapshot.Application.Oauth2PermissionScopes[0].value | Should -Be 'access_as_user'
+        $snapshot.Application.Api.AcceptMappedClaims | Should -BeTrue
+        $snapshot.Application.Api.KnownClientApplications | Should -Be @('client-app-1')
+        $snapshot.Application.Api.PreAuthorizedApplications[0].appId | Should -Be 'client-app-1'
+        $snapshot.Application.Api.RequestedAccessTokenVersion | Should -Be 2
+    }
+
     It 'includes App Role Assignments only when requested' {
         $snapshot = Get-NCEnterpriseApplicationSnapshot -ApplicationName 'Contoso Test App' -IncludeAppRoleAssignments
 
@@ -202,6 +226,56 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
             $Method -eq 'POST' -and $Uri -eq 'v1.0/applications/new-app-id/owners/$ref' -and
             $Body -match 'https://graph\.example/v1\.0/directoryObjects/'
         }
+    }
+
+    It 'writes the snapshot api settings to the destination application' {
+        $apiSnapshot = $snapshot.PSObject.Copy()
+        $apiSnapshot.Application = $snapshot.Application.PSObject.Copy()
+        $apiSnapshot.Application | Add-Member -NotePropertyName Api -NotePropertyValue ([pscustomobject]@{
+                AcceptMappedClaims          = $true
+                KnownClientApplications     = @('client-app-1')
+                PreAuthorizedApplications   = @([pscustomobject]@{ appId = 'client-app-1'; delegatedPermissionIds = @('scope-1') })
+                RequestedAccessTokenVersion = 2
+            }) -Force
+        $script:appPost = $null
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^v1\.0/applications\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/applications') {
+                $script:appPost = $Body | ConvertFrom-Json
+                return [pscustomobject]@{ id = 'new-app-id'; appId = 'new-client-id'; displayName = 'Target App' }
+            }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/servicePrincipals') { return [pscustomobject]@{ id = 'new-sp-id'; appId = 'new-client-id' } }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $null = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $apiSnapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        $script:appPost.api.acceptMappedClaims | Should -BeTrue
+        $script:appPost.api.knownClientApplications | Should -Be @('client-app-1')
+        $script:appPost.api.preAuthorizedApplications[0].appId | Should -Be 'client-app-1'
+        $script:appPost.api.requestedAccessTokenVersion | Should -Be 2
+    }
+
+    It 'still accepts snapshots saved without api settings' {
+        $script:appPost = $null
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^v1\.0/applications\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/applications') {
+                $script:appPost = $Body | ConvertFrom-Json
+                return [pscustomobject]@{ id = 'new-app-id'; appId = 'new-client-id'; displayName = 'Target App' }
+            }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/servicePrincipals') { return [pscustomobject]@{ id = 'new-sp-id'; appId = 'new-client-id' } }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $result = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        $result.Error | Should -BeNullOrEmpty
+        @($script:appPost.api.PSObject.Properties.Name) | Should -Be @('oauth2PermissionScopes')
     }
 
     It 'updates an existing destination application instead of creating a new one' {
@@ -579,6 +653,16 @@ Describe 'Import-EnterpriseApplication' {
         Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
     }
 
+    It 'requests AppRoleAssignment.ReadWrite.All only when copying App Role Assignments' {
+        Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -Confirm:$false
+        Assert-MockCalled Test-MgGraphConnection -Times 1 -Exactly -Scope It -ParameterFilter { $Scopes -notcontains 'AppRoleAssignment.ReadWrite.All' }
+
+        Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -IncludeAppRoleAssignments -Confirm:$false
+        Assert-MockCalled Test-MgGraphConnection -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Scopes -contains 'AppRoleAssignment.ReadWrite.All' -and $Scopes -contains 'Application.ReadWrite.All'
+        }
+    }
+
     It 'errors when the input file contains invalid JSON' {
         Set-Content -LiteralPath $inputPath -Value 'not valid json {{{'
 
@@ -617,6 +701,16 @@ Describe 'Copy-EnterpriseApplication' {
 
         Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
         Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' }
+    }
+
+    It 'requests AppRoleAssignment.ReadWrite.All only when copying App Role Assignments' {
+        Copy-EnterpriseApplication -SourceApplicationName 'Source App' -TargetDisplayName 'Target App' -Confirm:$false
+        Assert-MockCalled Test-MgGraphConnection -Times 1 -Exactly -Scope It -ParameterFilter { $Scopes -notcontains 'AppRoleAssignment.ReadWrite.All' }
+
+        Copy-EnterpriseApplication -SourceApplicationName 'Source App' -TargetDisplayName 'Target App' -IncludeAppRoleAssignments -Confirm:$false
+        Assert-MockCalled Test-MgGraphConnection -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Scopes -contains 'AppRoleAssignment.ReadWrite.All' -and $Scopes -contains 'Application.ReadWrite.All'
+        }
     }
 
     It 'passes -IncludeAppRoleAssignments through to both helpers' {

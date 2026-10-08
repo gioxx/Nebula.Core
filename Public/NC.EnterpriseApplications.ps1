@@ -113,7 +113,12 @@ function Import-EnterpriseApplication {
     )
 
     begin {
-        $graphReady = Test-MgGraphConnection -Scopes @('Application.ReadWrite.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        $graphScopes = @('Application.ReadWrite.All', 'Directory.Read.All')
+        if ($IncludeAppRoleAssignments.IsPresent) {
+            # POST /servicePrincipals/{id}/appRoleAssignedTo needs its own permission
+            $graphScopes += 'AppRoleAssignment.ReadWrite.All'
+        }
+        $graphReady = Test-MgGraphConnection -Scopes $graphScopes -EnsureExchangeOnline:$false
         if (-not $graphReady) {
             Add-EmptyLine
             Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
@@ -185,7 +190,12 @@ function Copy-EnterpriseApplication {
     )
 
     begin {
-        $graphReady = Test-MgGraphConnection -Scopes @('Application.ReadWrite.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        $graphScopes = @('Application.ReadWrite.All', 'Directory.Read.All')
+        if ($IncludeAppRoleAssignments.IsPresent) {
+            # POST /servicePrincipals/{id}/appRoleAssignedTo needs its own permission
+            $graphScopes += 'AppRoleAssignment.ReadWrite.All'
+        }
+        $graphReady = Test-MgGraphConnection -Scopes $graphScopes -EnsureExchangeOnline:$false
         if (-not $graphReady) {
             Add-EmptyLine
             Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR

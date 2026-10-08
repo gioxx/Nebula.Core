@@ -107,6 +107,13 @@ function Get-NCEnterpriseApplicationSnapshot {
             RequiredResourceAccess = @($app.requiredResourceAccess)
             AppRoles               = @($app.appRoles)
             Oauth2PermissionScopes = @($app.api.oauth2PermissionScopes)
+            # Writable api settings besides the scopes, so a clone keeps pre-authorizations and token version
+            Api                    = [pscustomobject][ordered]@{
+                AcceptMappedClaims          = $app.api.acceptMappedClaims
+                KnownClientApplications     = @($app.api.knownClientApplications)
+                PreAuthorizedApplications   = @($app.api.preAuthorizedApplications)
+                RequestedAccessTokenVersion = $app.api.requestedAccessTokenVersion
+            }
             Owners                 = @($owners | ForEach-Object {
                     [pscustomobject][ordered]@{
                         Id                = $_.id
@@ -223,6 +230,16 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     if ($webSource.logoutUrl) { $cleanWeb.logoutUrl = $webSource.logoutUrl }
     if ($webSource.implicitGrantSettings) { $cleanWeb.implicitGrantSettings = $webSource.implicitGrantSettings }
 
+    $cleanApi = [ordered]@{ oauth2PermissionScopes = @($Snapshot.Application.Oauth2PermissionScopes) }
+    # Snapshots saved before the Api property existed only carry the scopes
+    $apiSource = $Snapshot.Application.Api
+    if ($apiSource) {
+        if ($null -ne $apiSource.AcceptMappedClaims) { $cleanApi.acceptMappedClaims = $apiSource.AcceptMappedClaims }
+        $cleanApi.knownClientApplications = @($apiSource.KnownClientApplications | Where-Object { $_ })
+        $cleanApi.preAuthorizedApplications = @($apiSource.PreAuthorizedApplications | Where-Object { $_ })
+        if ($null -ne $apiSource.RequestedAccessTokenVersion) { $cleanApi.requestedAccessTokenVersion = $apiSource.RequestedAccessTokenVersion }
+    }
+
     $appBody = [ordered]@{
         displayName            = $TargetDisplayName
         signInAudience         = $Snapshot.Application.SignInAudience
@@ -233,7 +250,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         publicClient           = @{ redirectUris = @($Snapshot.Application.PublicClient.redirectUris) }
         requiredResourceAccess = @($Snapshot.Application.RequiredResourceAccess)
         appRoles               = @($Snapshot.Application.AppRoles)
-        api                    = @{ oauth2PermissionScopes = @($Snapshot.Application.Oauth2PermissionScopes) }
+        api                    = $cleanApi
     }
 
     if ($Snapshot.Application.IdentifierUris -and @($Snapshot.Application.IdentifierUris).Count -gt 0) {
@@ -502,6 +519,7 @@ function Compare-NCEnterpriseApplicationSnapshot {
     & $addIfDifferent 'Application.RequiredResourceAccess' $ReferenceSnapshot.Application.RequiredResourceAccess $DifferenceSnapshot.Application.RequiredResourceAccess
     & $addIfDifferent 'Application.AppRoles' $ReferenceSnapshot.Application.AppRoles $DifferenceSnapshot.Application.AppRoles
     & $addIfDifferent 'Application.Oauth2PermissionScopes' $ReferenceSnapshot.Application.Oauth2PermissionScopes $DifferenceSnapshot.Application.Oauth2PermissionScopes
+    & $addIfDifferent 'Application.Api' $ReferenceSnapshot.Application.Api $DifferenceSnapshot.Application.Api
     & $addIfDifferent 'ServicePrincipal.Tags' $ReferenceSnapshot.ServicePrincipal.Tags $DifferenceSnapshot.ServicePrincipal.Tags
     & $addIfDifferent 'ServicePrincipal.Homepage' $ReferenceSnapshot.ServicePrincipal.Homepage $DifferenceSnapshot.ServicePrincipal.Homepage
     & $addIfDifferent 'ServicePrincipal.LogoUrl' $ReferenceSnapshot.ServicePrincipal.LogoUrl $DifferenceSnapshot.ServicePrincipal.LogoUrl

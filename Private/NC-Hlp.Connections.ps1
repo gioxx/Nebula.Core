@@ -251,7 +251,14 @@ function Test-MgGraphConnection {
     }
 
     if (-not [string]::IsNullOrWhiteSpace($LoginHint)) {
-        $connectParams.LoginHint = $LoginHint
+        # -LoginHint only exists from Microsoft.Graph.Authentication 2.39.0
+        $connectCommand = Get-Command Connect-MgGraph -ErrorAction SilentlyContinue
+        if ($connectCommand -and $connectCommand.Parameters.ContainsKey('LoginHint')) {
+            $connectParams.LoginHint = $LoginHint
+        }
+        else {
+            Write-Verbose "Connect-MgGraph has no -LoginHint (added in Microsoft.Graph.Authentication 2.39.0); signing in without it."
+        }
     }
 
     try {
