@@ -627,7 +627,7 @@ function Get-QuarantineToRelease {
         if ($GridView.IsPresent) {
             $itemLabel = if ($items.Count -eq 1) { 'item' } else { 'items' }
             $title = "{0} to {1} - {2} {3}" -f $startDate.Date, $endDate.Date, $items.Count, $itemLabel
-            $selection = $items | Sort-Object -Descending ReceivedTime | Out-GridView -Title $title -PassThru
+            $selection = $items | Sort-Object -Descending ReceivedTime | Out-NCGridView -Title $title -PassThru
             if (-not $selection) {
                 Write-NCMessage "No items selected." -Level WARNING
                 return

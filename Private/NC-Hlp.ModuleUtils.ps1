@@ -322,6 +322,82 @@ function New-File {
     return $candidate
 }
 
+# PowerShell releases where Out-GridView never returns and no window appears
+# (https://github.com/PowerShell/PowerShell/issues/27994).
+$script:NCGridViewBrokenVersions = @('7.6.6')
+
+function Test-NCGridViewSupport {
+    <#
+    .SYNOPSIS
+        Checks whether Out-GridView can be used in the current PowerShell session.
+    .DESCRIPTION
+        Returns $false on PowerShell releases where Out-GridView is known to hang the session
+        (see $script:NCGridViewBrokenVersions), $true otherwise.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+
+    if ($PSVersionTable.PSEdition -ne 'Core') {
+        return $true
+    }
+
+    $version = $PSVersionTable.PSVersion
+    $key = '{0}.{1}.{2}' -f $version.Major, $version.Minor, $version.Patch
+    return -not ($script:NCGridViewBrokenVersions -contains $key)
+}
+
+function Out-NCGridView {
+    <#
+    .SYNOPSIS
+        Sends objects to Out-GridView, falling back to the console where the grid is broken.
+    .DESCRIPTION
+        Wraps Out-GridView for every -GridView switch in the module. On PowerShell releases where
+        Out-GridView hangs the session, writes a warning and emits the input objects to the pipeline
+        instead. With -PassThru (interactive selection), the fallback selects nothing, so callers that
+        act on the selection (release, delete) do not process every row by mistake.
+    .PARAMETER InputObject
+        Objects to display.
+    .PARAMETER Title
+        Grid window title.
+    .PARAMETER PassThru
+        Return the rows selected in the grid.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromPipeline = $true)]
+        [object]$InputObject,
+        [string]$Title,
+        [switch]$PassThru
+    )
+
+    begin {
+        $items = [System.Collections.Generic.List[object]]::new()
+    }
+
+    process {
+        if ($null -ne $InputObject) {
+            $items.Add($InputObject) | Out-Null
+        }
+    }
+
+    end {
+        if (Test-NCGridViewSupport) {
+            $items | Out-GridView -Title $Title -PassThru:$PassThru
+            return
+        }
+
+        $psVersion = $PSVersionTable.PSVersion.ToString()
+        if ($PassThru.IsPresent) {
+            Write-NCMessage "Out-GridView hangs on PowerShell $psVersion (PowerShell/PowerShell#27994), so rows can't be selected interactively: nothing was selected. Use Windows PowerShell 5.1 or another PowerShell 7 release for -GridView." -Level WARNING
+            return
+        }
+
+        Write-NCMessage "Out-GridView hangs on PowerShell $psVersion (PowerShell/PowerShell#27994): showing results in the console instead. Use Windows PowerShell 5.1 or another PowerShell 7 release for -GridView." -Level WARNING
+        $items
+    }
+}
+
 function Restore-ProgressAndInfoPreferences {
     <#
     .SYNOPSIS

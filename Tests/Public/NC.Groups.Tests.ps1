@@ -6,6 +6,15 @@ BeforeAll {
         )
     }
     function Add-EmptyLine {}
+    function Out-NCGridView {
+        param(
+            [Parameter(ValueFromPipeline = $true)]
+            [object]$InputObject,
+            [string]$Title,
+            [switch]$PassThru
+        )
+        process {}
+    }
     function Write-NCMessage {
         param(
             [string]$Message,
@@ -770,14 +779,6 @@ Describe 'Entra group read batching' {
                 [switch]$All
             )
         }
-        function Out-GridView {
-            param(
-                [Parameter(ValueFromPipeline = $true)]
-                [object]$InputObject,
-                [string]$Title
-            )
-            process {}
-        }
     }
 
     BeforeEach {
@@ -832,7 +833,7 @@ Describe 'Entra group read batching' {
 
         It 'emits the extra GridView columns in the original order' {
             $script:gridRows = @()
-            Mock Out-GridView { $script:gridRows += $InputObject }
+            Mock Out-NCGridView { $script:gridRows += $InputObject }
 
             Get-EntraGroupUser -UserIdentifier 'a@contoso.com' -GridView
 
@@ -1045,7 +1046,7 @@ Describe 'Get-UserGroups and Search-EntraGroup batching' {
     }
 
     It 'returns the extra properties with -GridView' {
-        Mock Out-GridView {}
+        Mock Out-NCGridView {}
         Mock Invoke-MgGraphRequest {
             New-TestBatchResponse -Body $Body -Responder {
                 param($request)
@@ -1057,7 +1058,7 @@ Describe 'Get-UserGroups and Search-EntraGroup batching' {
 
         Get-UserGroups -UserPrincipalName 'u1' -GridView
 
-        Should -Invoke Out-GridView -Times 1 -Exactly -Scope It -ParameterFilter {
+        Should -Invoke Out-NCGridView -Times 1 -Exactly -Scope It -ParameterFilter {
             $InputObject -and $InputObject[0].'Group Description' -eq 'D' -and $InputObject[0].'Group Type' -eq 'Unified' -and $InputObject[0].'Group ID' -eq 'g1'
         }
     }

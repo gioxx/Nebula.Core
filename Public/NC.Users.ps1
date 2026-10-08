@@ -80,7 +80,7 @@ function Search-EntraUser {
         }
 
         if ($GridView.IsPresent) {
-            $results | Out-GridView -Title "Entra Users - Search: $SearchText"
+            $results | Out-NCGridView -Title "Entra Users - Search: $SearchText"
         }
         else {
             $results | Sort-Object 'Display Name', 'User Principal Name'

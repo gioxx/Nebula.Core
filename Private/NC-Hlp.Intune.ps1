@@ -605,7 +605,7 @@ function Invoke-NCIntuneGroupUsageCore {
     }
 
     if ($GridView.IsPresent) {
-        $sorted | Out-GridView -Title "Intune Profiles - $($resolvedGroup.DisplayName)"
+        $sorted | Out-NCGridView -Title "Intune Profiles - $($resolvedGroup.DisplayName)"
     }
     else {
         $sorted

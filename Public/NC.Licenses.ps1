@@ -1387,7 +1387,7 @@ function Get-TenantMsolAccountSku {
 
         if ($GridView.IsPresent) {
             $summaryRows = $sorted | Select-Object Name, SkuPartNumber, Total, Consumed, Available
-            $summaryRows | Out-GridView -Title "M365 Tenant Licenses"
+            $summaryRows | Out-NCGridView -Title "M365 Tenant Licenses"
 
             if ($useSampleUsers) {
                 $sampleRows = foreach ($sku in $sorted) {
@@ -1403,7 +1403,7 @@ function Get-TenantMsolAccountSku {
                 }
 
                 if ($sampleRows) {
-                    $sampleRows | Out-GridView -Title "M365 Tenant License Sample Users"
+                    $sampleRows | Out-NCGridView -Title "M365 Tenant License Sample Users"
                 }
             }
         }

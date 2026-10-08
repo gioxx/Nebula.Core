@@ -1904,7 +1904,7 @@ function Test-SharedMailboxCompliance {
 
         $showGrid = if ($PSBoundParameters.ContainsKey('GridView')) { $GridView.IsPresent } else { $true }
         if ($showGrid) {
-            $report | Out-GridView -Title "Shared Mailbox Sign-In Records and Licensing Status"
+            $report | Out-NCGridView -Title "Shared Mailbox Sign-In Records and Licensing Status"
         }
         else {
             $report

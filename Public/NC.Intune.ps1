@@ -184,7 +184,7 @@ function Search-IntuneProfileLocation {
 
         $sorted = $results | Sort-Object 'Profile Name', 'Source' -Unique
         if ($GridView.IsPresent) {
-            $sorted | Out-GridView -Title "Intune Profile Search - $normalizedSearch"
+            $sorted | Out-NCGridView -Title "Intune Profile Search - $normalizedSearch"
         }
         else {
             $sorted

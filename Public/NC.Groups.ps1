@@ -1600,7 +1600,7 @@ function Export-DistributionGroups {
             }
 
             if ($GridView.IsPresent) {
-                $results | Out-GridView -Title "M365 Distribution Groups"
+                $results | Out-NCGridView -Title "M365 Distribution Groups"
             }
             elseif ($emitCsv) {
                 & $writeBuffer $results
@@ -1963,7 +1963,7 @@ function Export-DynamicDistributionGroups {
             }
 
             if ($GridView.IsPresent) {
-                $results | Out-GridView -Title "M365 Dynamic Distribution Groups"
+                $results | Out-NCGridView -Title "M365 Dynamic Distribution Groups"
             }
             elseif ($emitCsv) {
                 & $writeBuffer $results
@@ -2438,7 +2438,7 @@ function Export-M365Group {
             }
 
             if ($GridView.IsPresent) {
-                $results | Out-GridView -Title "M365 Unified Groups"
+                $results | Out-NCGridView -Title "M365 Unified Groups"
             }
             elseif ($emitCsv) {
                 & $writeBuffer $results
@@ -2710,7 +2710,7 @@ function Get-EntraGroupDevice {
                 }
 
                 if ($GridView.IsPresent) {
-                    $results | Out-GridView -Title "Entra Device Groups - $deviceLabel"
+                    $results | Out-NCGridView -Title "Entra Device Groups - $deviceLabel"
                 }
                 else {
                     $results | Sort-Object 'Group Name'
@@ -2940,7 +2940,7 @@ function Get-EntraGroupMembers {
 
     $sorted = $results | Sort-Object 'Member Type', 'Member Name'
     if ($GridView.IsPresent) {
-        $sorted | Out-GridView -Title "Entra Group Members - $($resolvedGroup.DisplayName)"
+        $sorted | Out-NCGridView -Title "Entra Group Members - $($resolvedGroup.DisplayName)"
     }
     else {
         $sorted
@@ -3122,7 +3122,7 @@ function Get-EntraGroupUser {
                 }
 
                 if ($GridView.IsPresent) {
-                    $results | Out-GridView -Title "Entra User Groups - $userLabel"
+                    $results | Out-NCGridView -Title "Entra User Groups - $userLabel"
                 }
                 else {
                     $results | Sort-Object 'Group Name'
@@ -3219,7 +3219,7 @@ function Get-RoleGroupsMembers {
         $sorted = $results | Sort-Object Count -Descending
 
         if ($GridView.IsPresent) {
-            $sorted | Out-GridView -Title "Exchange Role Groups"
+            $sorted | Out-NCGridView -Title "Exchange Role Groups"
         }
         elseif ($AsTable.IsPresent) {
             Show-Table -Rows $sorted -AsTable
@@ -3302,7 +3302,7 @@ function Get-UserGroups {
             }
 
             if ($GridView.IsPresent) {
-                $results | Out-GridView -Title "M365 User Groups - $ResolvedPrincipal"
+                $results | Out-NCGridView -Title "M365 User Groups - $ResolvedPrincipal"
             }
             else {
                 $results | Sort-Object GroupName
@@ -4133,7 +4133,7 @@ function Search-EntraGroup {
         }
 
         if ($GridView.IsPresent) {
-            $results | Out-GridView -Title "Entra Groups - Search: $SearchText"
+            $results | Out-NCGridView -Title "Entra Groups - Search: $SearchText"
         }
         else {
             $results | Sort-Object 'Group Name'
