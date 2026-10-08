@@ -89,6 +89,8 @@ function Import-EnterpriseApplication {
     .DESCRIPTION
         Reads a snapshot produced by Export-EnterpriseApplication and applies its properties to the
         Enterprise Application identified by -TargetDisplayName, creating it if it does not exist.
+        Owners and App Role Assignments are only added: those the destination has and the snapshot
+        doesn't are kept, so an environment's own owners are never removed.
     .PARAMETER InputPath
         Path to the JSON snapshot file.
     .PARAMETER TargetDisplayName
@@ -174,7 +176,8 @@ function Copy-EnterpriseApplication {
         Clones an Enterprise Application directly into a new or existing destination, without an intermediate file.
     .DESCRIPTION
         Combines Get-NCEnterpriseApplicationSnapshot and Set-NCEnterpriseApplicationFromSnapshot to read the
-        source Enterprise Application and apply it to -TargetDisplayName in one step.
+        source Enterprise Application and apply it to -TargetDisplayName in one step. Owners and App Role
+        Assignments are only added: those the destination has and the source doesn't are kept.
     .PARAMETER SourceApplicationName
         Display name of the source Enterprise Application.
     .PARAMETER SourceApplicationId
