@@ -1,6 +1,6 @@
 @{
     RootModule           = 'Nebula.Core.psm1'
-    ModuleVersion        = '1.2.3'
+    ModuleVersion        = '1.3.0'
     GUID                 = '07acc3c0-14dc-4c1d-a1d0-6140e83c2a41'
     Author               = 'Giovanni Solone'
     Description          = 'A PowerShell module that go beyond your workstations. It will make your Microsoft 365 life easier!'
@@ -152,6 +152,7 @@
             LicenseUri   = 'https://opensource.org/licenses/MIT'
             IconUri      = 'https://raw.githubusercontent.com/gioxx/Nebula.Core/main/icon.png'
 ReleaseNotes = @'
+- Note: two defaults change in 1.3.0. CSV exports and imports now use a comma delimiter (it was `;`), and user-facing dates are shown in `Eastern Standard Time` unless `DateTimeTimeZone` is configured. To keep semicolon-separated files or use your own time zone, set `CSV_DefaultLimiter = ';'` and/or `DateTimeTimeZone` (e.g. `W. Europe Standard Time`) in your Nebula.Core `settings.psd1` (see `Get-NebulaConfig`).
 - Add: `Export-EnterpriseApplication`, `Import-EnterpriseApplication`, `Copy-EnterpriseApplication`, and `Compare-EnterpriseApplication` to snapshot, recreate, clone, and diff Enterprise Applications (App Registration + Service Principal) within the same Entra tenant, including optional App Role Assignment copying, owner sync, and CSV/JSON diff reports. Client secrets and certificates are never copied; only their metadata is captured for reporting.
 - Add: `Get-QuarantineForMailbox` to check quarantine across all of a mailbox's SMTP aliases (primary and secondary) in one call, since `Get-QuarantineMessage -RecipientAddress` only matches the exact address a message was sent to; defaults to a 15-day lookback window (vs. `Get-QuarantineMessage`'s own 7-day default), overridable via `-Days` or explicit `-StartReceivedDate`/`-EndReceivedDate`.
 - Fix: `-GridView` no longer freezes the session on PowerShell 7.6.6, where `Out-GridView` never returns and opens no window (PowerShell/PowerShell#27994). On that release Nebula.Core warns and writes the results to the console instead; `Get-QuarantineToRelease -GridView` selects nothing, so `-ReleaseSelected`/`-DeleteSelected` never act on every message by mistake. Other PowerShell versions still open the grid as before.
