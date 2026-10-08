@@ -282,6 +282,34 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
         $script:appPost.api.requestedAccessTokenVersion | Should -Be 2
     }
 
+    It 'sends null api settings so an update clears the destination values' {
+        $apiSnapshot = $snapshot.PSObject.Copy()
+        $apiSnapshot.Application = $snapshot.Application.PSObject.Copy()
+        $apiSnapshot.Application | Add-Member -NotePropertyName Api -NotePropertyValue ([pscustomobject]@{
+                AcceptMappedClaims          = $null
+                KnownClientApplications     = @()
+                PreAuthorizedApplications   = @()
+                RequestedAccessTokenVersion = $null
+            }) -Force
+        $script:appPatch = $null
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^v1\.0/applications\?') {
+                return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-app-id'; appId = 'existing-client-id'; displayName = 'Target App'; appRoles = @(); api = [pscustomobject]@{ oauth2PermissionScopes = @(); requestedAccessTokenVersion = 2; acceptMappedClaims = $true } }) }
+            }
+            if ($Method -eq 'PATCH' -and $Uri -eq 'v1.0/applications/existing-app-id') { $script:appPatch = $Body | ConvertFrom-Json; return $null }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-sp-id'; appId = 'existing-client-id' }) } }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $null = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $apiSnapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        $apiNames = @($script:appPatch.api.PSObject.Properties.Name)
+        $apiNames | Should -Contain 'acceptMappedClaims'
+        $apiNames | Should -Contain 'requestedAccessTokenVersion'
+        $script:appPatch.api.acceptMappedClaims | Should -BeNullOrEmpty
+        $script:appPatch.api.requestedAccessTokenVersion | Should -BeNullOrEmpty
+    }
     It 'still accepts snapshots saved without api settings' {
         $script:appPost = $null
         Mock Invoke-MgGraphRequest {

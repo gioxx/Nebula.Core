@@ -235,10 +235,11 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     # Snapshots saved before the Api property existed only carry the scopes
     $apiSource = $Snapshot.Application.Api
     if ($apiSource) {
-        if ($null -ne $apiSource.AcceptMappedClaims) { $cleanApi.acceptMappedClaims = $apiSource.AcceptMappedClaims }
+        # Nulls are sent too: both settings are nullable, and omitting them would keep the destination's values
+        $cleanApi.acceptMappedClaims = $apiSource.AcceptMappedClaims
         $cleanApi.knownClientApplications = @($apiSource.KnownClientApplications | Where-Object { $_ })
         $cleanApi.preAuthorizedApplications = @($apiSource.PreAuthorizedApplications | Where-Object { $_ })
-        if ($null -ne $apiSource.RequestedAccessTokenVersion) { $cleanApi.requestedAccessTokenVersion = $apiSource.RequestedAccessTokenVersion }
+        $cleanApi.requestedAccessTokenVersion = $apiSource.RequestedAccessTokenVersion
     }
 
     $appBody = [ordered]@{
