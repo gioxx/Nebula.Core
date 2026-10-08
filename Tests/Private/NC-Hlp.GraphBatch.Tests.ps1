@@ -368,6 +368,18 @@ Describe 'Get-NCGraphDirectoryObjectUri' {
     }
 }
 
+Describe 'Graph endpoint usage' {
+    It 'never hard-codes the global Graph endpoint outside Get-NCGraphDirectoryObjectUri' {
+        # Request URIs must be relative so Invoke-MgGraphRequest resolves them against the active cloud
+        $sources = Get-ChildItem "$PSScriptRoot/../../Public", "$PSScriptRoot/../../Private" -Filter '*.ps1'
+        $hits = @($sources | Select-String -SimpleMatch 'https://graph.microsoft.com' | Where-Object {
+                -not ($_.Filename -eq 'NC-Hlp.GraphBatch.ps1' -and $_.Line -match "^\s*(\`$endpoint = 'https://graph\.microsoft\.com'|falling back to https://graph\.microsoft\.com\.)")
+            } | ForEach-Object { "$($_.Filename):$($_.LineNumber)" })
+
+        $hits | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'Write-NCGraphBatchNotice' {
     BeforeEach {
         Mock Write-NCMessage {}

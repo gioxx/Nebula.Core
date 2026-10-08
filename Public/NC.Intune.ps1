@@ -319,7 +319,7 @@ function Export-IntuneAppInventory {
             Write-NCMessage "Starting app inventory reporting ..." -Level INFO
 
             # Pull devices
-            $devicesUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?`$select=id,deviceName,operatingSystem,userPrincipalName,lastSyncDateTime"
+            $devicesUri = "v1.0/deviceManagement/managedDevices?`$select=id,deviceName,operatingSystem,userPrincipalName,lastSyncDateTime"
             if ($MaxDevices -gt 0) {
                 $devicesUri += "&`$top=$MaxDevices"
             }
@@ -493,7 +493,7 @@ function Export-IntuneAppInventory {
             # Optionally incorporate deployment statuses (broadens coverage)
             if ($IncludeDeployedApps) {
                 Write-NCMessage "Including deployed apps device status ..." -Level INFO
-                $appsUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps"
+                $appsUri = "beta/deviceAppManagement/mobileApps"
                 $allApps = @(Invoke-NCGraphAllPagesCore -Uri $appsUri)
 
                 $deployedCandidates = @(foreach ($app in $allApps | Where-Object { $_.displayName -like $ApplicationName }) {
@@ -788,7 +788,7 @@ function Get-IntuneAppPresence {
         }
 
         $escapedDeviceName = $DeviceName.Replace("'", "''")
-        $devicesUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?`$filter=deviceName eq '$escapedDeviceName'&`$select=id,deviceName,operatingSystem,userPrincipalName,lastSyncDateTime"
+        $devicesUri = "v1.0/deviceManagement/managedDevices?`$filter=deviceName eq '$escapedDeviceName'&`$select=id,deviceName,operatingSystem,userPrincipalName,lastSyncDateTime"
         $devices = @(Invoke-MgGraphRequest -Uri $devicesUri -Method GET -ErrorAction Stop).value
         $device = $devices | Select-Object -First 1
 
@@ -806,7 +806,7 @@ function Get-IntuneAppPresence {
             }
         }
 
-        $deviceAppsUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$($device.id)?`$expand=detectedApps"
+        $deviceAppsUri = "beta/deviceManagement/managedDevices/$($device.id)?`$expand=detectedApps"
         $deviceWithApps = Invoke-MgGraphRequest -Uri $deviceAppsUri -Method GET -ErrorAction Stop
         $matches = @($deviceWithApps.detectedApps | Where-Object { $_.displayName -like $ApplicationName })
 
@@ -944,7 +944,7 @@ function New-IntuneAppBasedGroup {
             Write-NCMessage "Starting app-based group creation process ..." -Level INFO
 
             Write-NCMessage "Retrieving managed devices ..." -Level INFO
-            $devicesUri = 'https://graph.microsoft.com/beta/deviceManagement/managedDevices?`$select=id,deviceName,operatingSystem,userPrincipalName,azureADDeviceId,azureActiveDirectoryDeviceId'
+            $devicesUri = "beta/deviceManagement/managedDevices?`$select=id,deviceName,operatingSystem,userPrincipalName,azureADDeviceId,azureActiveDirectoryDeviceId"
             if ($MaxDevices -gt 0) {
                 $devicesUri += "&`$top=$MaxDevices"
             }
@@ -1048,7 +1048,7 @@ function New-IntuneAppBasedGroup {
 
             if ($FilterByType -ne 'All' -or $OnlySuccessfulInstalls.IsPresent) {
                 Write-NCMessage "Retrieving deployed application data ..." -Level INFO
-                $appsUri = 'https://graph.microsoft.com/beta/deviceAppManagement/mobileApps'
+                $appsUri = 'beta/deviceAppManagement/mobileApps'
                 $deployedApps = @(Invoke-NCGraphAllPagesCore -Uri $appsUri)
 
                 $deployedCandidates = @(foreach ($app in $deployedApps) {
@@ -1320,7 +1320,7 @@ function New-IntuneAppBasedGroup {
                 }
 
                 $entraDevices = @()
-                # Removals are only safe when every device was resolved without a Graph error
+                # Removals are only safe when every matching device was resolved to an Entra device
                 $resolutionIncomplete = $false
                 $seenEntraDeviceIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
                 try {
@@ -1349,7 +1349,7 @@ function New-IntuneAppBasedGroup {
                 if ($existingGroup -and $UpdateExisting.IsPresent) {
                     if ($PSCmdlet.ShouldProcess($groupName, 'Update group members')) {
                         try {
-                            $currentMembersUri = "https://graph.microsoft.com/v1.0/groups/$($existingGroup.id)/members"
+                            $currentMembersUri = "v1.0/groups/$($existingGroup.id)/members"
                             $currentMembers = @(Invoke-NCGraphAllPagesCore -Uri $currentMembersUri)
                             $currentMemberIds = $currentMembers | ForEach-Object { $_.id }
                             $currentMemberNames = @{}
@@ -1405,7 +1405,7 @@ function New-IntuneAppBasedGroup {
                                 description     = $groupDescription
                             } | ConvertTo-Json -Depth 10
 
-                            $newGroup = Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/groups' -Method POST -Body $groupBody -ContentType 'application/json'
+                            $newGroup = Invoke-MgGraphRequest -Uri 'v1.0/groups' -Method POST -Body $groupBody -ContentType 'application/json'
                             Write-NCMessage "Created group: $groupName $($newGroup.id)" -Level SUCCESS
                             $groupLookup[$groupName] = [pscustomobject]@{ id = $newGroup.id; displayName = $groupName }
                             $null = $groupLookupFailed.Remove($groupName)

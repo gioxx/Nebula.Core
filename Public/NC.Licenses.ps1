@@ -184,7 +184,7 @@ function Add-UserMsolAccountSku {
 
             # (a) Resolve every queued user.
             $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            $resolvedUsers = Resolve-NCGraphUserBatch -Identifier $entries -Property @('id', 'userPrincipalName', 'displayName', 'usageLocation') -FailedIdentifier $failedUsers
+            $resolvedUsers = Resolve-NCGraphUserBatch -Identifier $entries -Property @('id', 'userPrincipalName', 'displayName', 'usageLocation', 'assignedLicenses') -FailedIdentifier $failedUsers
 
             # (b) Check availability and ask for confirmation per user, in input order.
             $approved = [System.Collections.Generic.List[object]]::new()
@@ -202,9 +202,17 @@ function Add-UserMsolAccountSku {
                 $normalizedTargetUsage = & $normalizeUsageLocation $defaultUsageLocation
                 $targetUsage = if ($normalizedTargetUsage -and $normalizedTargetUsage -ne $normalizedCurrentUsage) { $defaultUsageLocation } else { $null }
 
+                # Skip SKUs the user already has: assigning them again uses no seat and would reset their disabled plans
+                $ownedSkuIds = @($user.assignedLicenses | ForEach-Object { [string]$_.skuId })
+                $namesAlreadyAssigned = @($uniqueAdds | Where-Object { $ownedSkuIds -contains [string]$_.SkuId } | ForEach-Object { $_.Name })
+                if ($namesAlreadyAssigned.Count -gt 0) {
+                    Write-NCMessage ("{0} already has license(s): {1}" -f $upn, (($namesAlreadyAssigned | Select-Object -Unique) -join ', ')) -Level WARNING
+                }
+
                 $assignableItems = @()
                 $namesNoAvailability = @()
                 foreach ($item in $uniqueAdds) {
+                    if ($ownedSkuIds -contains [string]$item.SkuId) { continue }
                     $available = $remaining[[string]$item.SkuId]
                     if ($available -le 0) {
                         Write-NCMessage ("No available units for license {0} ({1}) (available: {2})" -f $item.Name, $item.SkuPartNumber, $available) -Level WARNING
@@ -215,7 +223,9 @@ function Add-UserMsolAccountSku {
                 }
 
                 if ($assignableItems.Count -eq 0) {
-                    Write-NCMessage ("No licenses to assign: none available. Requested: {0}" -f $requestedList) -Level ERROR
+                    if ($namesNoAvailability.Count -gt 0) {
+                        Write-NCMessage ("No licenses to assign: none available. Requested: {0}" -f $requestedList) -Level ERROR
+                    }
                     continue
                 }
 

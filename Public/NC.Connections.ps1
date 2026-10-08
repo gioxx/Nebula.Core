@@ -203,7 +203,10 @@ function Connect-Nebula {
             $UserPrincipalName
         }
         else {
-            Find-UserConnected
+            # Keep an active Graph session's account instead of switching to the workstation identity
+            $activeGraphAccount = $null
+            try { $activeGraphAccount = (Get-MgContext -ErrorAction Stop).Account } catch {}
+            if (-not [string]::IsNullOrWhiteSpace($activeGraphAccount)) { $activeGraphAccount } else { Find-UserConnected }
         }
 
         $graphConnected = Test-MgGraphConnection `
@@ -442,16 +445,23 @@ function Update-NebulaConnections {
     }
 
     $graphScopes = @()
+    $graphAccount = $null
     try {
-        $graphScopes = @((Get-MgContext -ErrorAction Stop).Scopes | Where-Object { $_ })
+        $graphContext = Get-MgContext -ErrorAction Stop
+        $graphScopes = @($graphContext.Scopes | Where-Object { $_ })
+        $graphAccount = $graphContext.Account
     }
     catch {}
     if (-not $graphScopes -or $graphScopes.Count -eq 0) {
         $graphScopes = @('User.Read.All')
     }
+    # Repair the current Graph account instead of switching to the workstation identity
+    if ([string]::IsNullOrWhiteSpace($graphAccount)) {
+        $graphAccount = Find-UserConnected
+    }
 
     try {
-        Test-MgGraphConnection -Scopes $graphScopes -EnsureExchangeOnline:$false -LoginHint (Find-UserConnected) | Out-Null
+        Test-MgGraphConnection -Scopes $graphScopes -EnsureExchangeOnline:$false -LoginHint $graphAccount | Out-Null
     }
     catch {
         Write-NCMessage "Microsoft Graph repair attempt failed. $($_.Exception.Message)" -Level WARNING

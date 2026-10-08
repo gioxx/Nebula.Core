@@ -125,6 +125,18 @@ Describe 'Resolve-NCIntuneManagedDeviceEntraMember batching' {
         Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'WARNING' -and $Message -eq 'No Azure AD Device ID for: unknown' }
     }
 
+    It 'marks every unresolved device as a failed lookup, not only Graph errors' {
+        $devices = @(
+            [pscustomobject]@{ id = 'dev1'; deviceName = 'PC1'; azureADDeviceId = 'az1' },
+            [pscustomobject]@{ id = 'dev2'; deviceName = 'PC2'; azureADDeviceId = 'az-gone' }
+        )
+        $results = @(Resolve-NCIntuneManagedDeviceEntraMembers -ManagedDevices $devices -DeviceIds @('dev1', 'dev2', 'unknown'))
+
+        $results[0].LookupFailed | Should -BeFalse
+        $results[1].LookupFailed | Should -BeTrue
+        $results[2].LookupFailed | Should -BeTrue
+    }
+
     It 'keeps the single-device wrapper working' {
         $devices = @([pscustomobject]@{ id = 'dev1'; deviceName = 'PC1'; azureADDeviceId = 'az1' })
         $resolution = Resolve-NCIntuneManagedDeviceEntraMember -ManagedDevices $devices -DeviceId 'dev1'

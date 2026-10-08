@@ -257,6 +257,7 @@ Describe 'New-IntuneAppBasedGroup batching' {
                             $filter = [uri]::UnescapeDataString($Matches[1])
                             $null = $filter -match "deviceId eq '(az(\d+))'"
                             if ($Matches[1] -eq $global:EntraLookupFailFor) { return @{ status = 403; body = @{ error = @{ code = 'Forbidden'; message = 'denied' } } } }
+                            if ($Matches[1] -eq $global:EntraNotFoundFor) { return @{ status = 200; body = @{ value = @() } } }
                             return @{ status = 200; body = @{ value = @(@{ id = "ent$($Matches[2])" }) } }
                         }
                         if ($method -eq 'GET' -and $url -match '^/groups\?\$filter=') {
@@ -277,7 +278,7 @@ Describe 'New-IntuneAppBasedGroup batching' {
                         @{ status = 500; body = @{ error = @{ code = 'x'; message = "unexpected $method $url" } } }
                     }
                 }
-                if ($Uri -eq 'https://graph.microsoft.com/v1.0/groups' -and $Method -eq 'POST') {
+                if ($Uri -eq 'v1.0/groups' -and $Method -eq 'POST') {
                     return @{ id = 'NEW1' }
                 }
                 throw "unexpected direct call $Method $Uri"
@@ -298,6 +299,7 @@ Describe 'New-IntuneAppBasedGroup batching' {
         $global:ExistsEntraId = ''
         $global:CurrentMembers = @()
         $global:EntraLookupFailFor = ''
+        $global:EntraNotFoundFor = ''
         $global:GroupLookupFails = $false
     }
 
@@ -357,6 +359,21 @@ Describe 'New-IntuneAppBasedGroup batching' {
         Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Message -eq 'Updated group: Devices - Java (Added: 23, Removed: 0)' -and $Level -eq 'SUCCESS' }
     }
 
+    It 'skips every removal when a matching device is not found in Entra' {
+        Set-AppGroupDevices -Count 3
+        Set-AppGroupGraphMock
+        $global:ExistingGroup = $true
+        $global:EntraNotFoundFor = 'az3'
+        $global:CurrentMembers = @(@{ id = 'old1'; displayName = 'Old 1' }, @{ id = 'ent1'; displayName = 'PC1' }, @{ id = 'ent3'; displayName = 'PC3' })
+        New-IntuneAppBasedGroup -ApplicationName 'Java*' -GroupName 'Devices - Java' -UpdateExisting -Confirm:$false
+
+        @($global:SeenRequests | Where-Object { $_.method -eq 'DELETE' }).Count | Should -Be 0
+        @($global:SeenRequests | Where-Object { $_.method -eq 'POST' }).Count | Should -Be 1
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Level -eq 'WARNING' -and $Message -eq "Entra device resolution for group 'Devices - Java' is incomplete. No members will be removed from it in this run."
+        }
+    }
+
     It 'skips every removal when the Entra device resolver throws' {
         Set-AppGroupDevices -Count 3
         Set-AppGroupGraphMock
@@ -378,7 +395,7 @@ Describe 'New-IntuneAppBasedGroup batching' {
         $global:GroupLookupFails = $true
         New-IntuneAppBasedGroup -ApplicationName 'Java*' -GroupName 'Devices - Java' -UpdateExisting -Confirm:$false
 
-        Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly -Scope It -ParameterFilter { $Uri -eq 'https://graph.microsoft.com/v1.0/groups' }
+        Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly -Scope It -ParameterFilter { $Uri -eq 'v1.0/groups' }
         @($global:SeenRequests | Where-Object { $_.method -in 'DELETE', 'POST' }).Count | Should -Be 0
         Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
             $Level -eq 'ERROR' -and $Message -eq "Unable to look up existing group 'Devices - Java', skipping it to avoid creating a duplicate: no access"

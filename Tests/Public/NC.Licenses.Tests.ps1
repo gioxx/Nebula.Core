@@ -71,6 +71,7 @@ Describe 'License assignment batching' {
         $global:UsageLocationForUsers = 'IT'
         $global:PatchFailsFor = ''
         $global:UsageLocationOverride = @{}
+        $global:AssignedFor = @()
     }
 
     BeforeAll {
@@ -85,7 +86,8 @@ Describe 'License assignment batching' {
                     if ($request.method -eq 'GET' -and $url -match '^/users/user(\d+)%40contoso\.com') {
                         $n = $Matches[1]
                         $loc = if ($global:UsageLocationOverride.ContainsKey($n)) { $global:UsageLocationOverride[$n] } elseif ($global:UsageLocationForUsers) { $global:UsageLocationForUsers } else { $null }
-                        return @{ status = 200; body = @{ id = "id$n"; userPrincipalName = "user$n@contoso.com"; displayName = "User $n"; usageLocation = $loc } }
+                        $owned = if ($global:AssignedFor -contains $n) { @(@{ skuId = $global:skuId; disabledPlans = @() }) } else { @() }
+                        return @{ status = 200; body = @{ id = "id$n"; userPrincipalName = "user$n@contoso.com"; displayName = "User $n"; usageLocation = $loc; assignedLicenses = $owned } }
                     }
                     if ($request.method -eq 'GET' -and $url -match '^/users/(id\d+)/licenseDetails') {
                         return @{ status = 200; body = @{ value = @(@{ skuId = $global:skuId; skuPartNumber = 'ENTERPRISEPACK' }) } }
@@ -157,6 +159,23 @@ Describe 'License assignment batching' {
         Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
             $Level -eq 'ERROR' -and $Message -eq 'No licenses to assign: none available. Requested: ENTERPRISEPACK'
         }
+    }
+
+    It 'neither reserves a seat for nor reassigns a license the user already has' {
+        Mock Get-MgSubscribedSku {
+            @([pscustomobject]@{ SkuId = [guid]$global:skuId; SkuPartNumber = 'ENTERPRISEPACK'; PrepaidUnits = [pscustomobject]@{ Enabled = 1 }; ConsumedUnits = 0 })
+        }
+        $global:AssignedFor = @('1')
+        Set-LicenseGraphMock
+        @('user1@contoso.com', 'user2@contoso.com') | Add-UserMsolAccountSku -License 'ENTERPRISEPACK' -Confirm:$false
+
+        $assigns = @($global:SeenRequests | Where-Object { $_.url -like '*/assignLicense' })
+        $assigns.Count | Should -Be 1
+        $assigns[0].url | Should -Be '/users/id2/assignLicense'
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Level -eq 'WARNING' -and $Message -eq 'user1@contoso.com already has license(s): ENTERPRISEPACK'
+        }
+        Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter { $Message -like 'No available units*' }
     }
 
     It 'writes the unresolved-user message once for a user Graph cannot find' {

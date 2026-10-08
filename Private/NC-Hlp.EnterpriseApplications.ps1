@@ -29,7 +29,7 @@ function Get-NCEnterpriseApplicationSnapshot {
 
     if ($PSCmdlet.ParameterSetName -eq 'ById') {
         try {
-            $app = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/applications/$ApplicationId`?`$select=$selectProps" -Method GET -ErrorAction Stop
+            $app = Invoke-MgGraphRequest -Uri "v1.0/applications/$ApplicationId`?`$select=$selectProps" -Method GET -ErrorAction Stop
         }
         catch {
             Write-NCMessage "Enterprise Application with ID '$ApplicationId' not found: $($_.Exception.Message)" -Level ERROR
@@ -39,7 +39,7 @@ function Get-NCEnterpriseApplicationSnapshot {
     else {
         $escapedName = $ApplicationName.Replace("'", "''")
         try {
-            $response = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/applications?`$filter=displayName eq '$escapedName'&`$select=$selectProps" -Method GET -ErrorAction Stop
+            $response = Invoke-MgGraphRequest -Uri "v1.0/applications?`$filter=displayName eq '$escapedName'&`$select=$selectProps" -Method GET -ErrorAction Stop
         }
         catch {
             Write-NCMessage "Unable to resolve Enterprise Application '$ApplicationName': $($_.Exception.Message)" -Level ERROR
@@ -60,7 +60,7 @@ function Get-NCEnterpriseApplicationSnapshot {
     }
 
     try {
-        $spResponse = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$($app.appId)'&`$select=id,appId,displayName,tags,homepage,logoUrl" -Method GET -ErrorAction Stop
+        $spResponse = Invoke-MgGraphRequest -Uri "v1.0/servicePrincipals?`$filter=appId eq '$($app.appId)'&`$select=id,appId,displayName,tags,homepage,logoUrl" -Method GET -ErrorAction Stop
     }
     catch {
         Write-NCMessage "Unable to read Service Principal for '$($app.displayName)': $($_.Exception.Message)" -Level ERROR
@@ -74,7 +74,7 @@ function Get-NCEnterpriseApplicationSnapshot {
     }
 
     try {
-        $owners = @(Invoke-NCGraphAllPagesCore -Uri "https://graph.microsoft.com/v1.0/applications/$($app.id)/owners?`$select=id,displayName,userPrincipalName")
+        $owners = @(Invoke-NCGraphAllPagesCore -Uri "v1.0/applications/$($app.id)/owners?`$select=id,displayName,userPrincipalName")
     }
     catch {
         Write-NCMessage "Unable to read owners for '$($app.displayName)': $($_.Exception.Message)" -Level WARNING
@@ -84,7 +84,7 @@ function Get-NCEnterpriseApplicationSnapshot {
     $appRoleAssignments = @()
     if ($IncludeAppRoleAssignments.IsPresent) {
         try {
-            $appRoleAssignments = @(Invoke-NCGraphAllPagesCore -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($sp.id)/appRoleAssignedTo")
+            $appRoleAssignments = @(Invoke-NCGraphAllPagesCore -Uri "v1.0/servicePrincipals/$($sp.id)/appRoleAssignedTo")
         }
         catch {
             Write-NCMessage "Unable to read App Role Assignments for '$($app.displayName)': $($_.Exception.Message)" -Level WARNING
@@ -173,7 +173,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
 
     $escapedName = $TargetDisplayName.Replace("'", "''")
     try {
-        $existingResponse = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/applications?`$filter=displayName eq '$escapedName'&`$select=id,appId,displayName" -Method GET -ErrorAction Stop
+        $existingResponse = Invoke-MgGraphRequest -Uri "v1.0/applications?`$filter=displayName eq '$escapedName'&`$select=id,appId,displayName" -Method GET -ErrorAction Stop
     }
     catch {
         Write-NCMessage "Unable to resolve target Enterprise Application '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR
@@ -246,7 +246,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         }
 
         try {
-            $targetApp = Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/applications' -Method POST -Body ($appBody | ConvertTo-Json -Depth 10) -ContentType 'application/json' -ErrorAction Stop
+            $targetApp = Invoke-MgGraphRequest -Uri 'v1.0/applications' -Method POST -Body ($appBody | ConvertTo-Json -Depth 10) -ContentType 'application/json' -ErrorAction Stop
             $created = $true
             Write-NCMessage "Created Enterprise Application '$TargetDisplayName'." -Level SUCCESS
         }
@@ -278,7 +278,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         }
 
         try {
-            Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/applications/$($targetApp.id)" -Method PATCH -Body ($patchBody | ConvertTo-Json -Depth 10) -ContentType 'application/json' -ErrorAction Stop | Out-Null
+            Invoke-MgGraphRequest -Uri "v1.0/applications/$($targetApp.id)" -Method PATCH -Body ($patchBody | ConvertTo-Json -Depth 10) -ContentType 'application/json' -ErrorAction Stop | Out-Null
             Write-NCMessage "Updated Enterprise Application '$TargetDisplayName'." -Level SUCCESS
         }
         catch {
@@ -299,7 +299,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     }
 
     try {
-        $spResponse = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$($targetApp.appId)'&`$select=id,appId,displayName" -Method GET -ErrorAction Stop
+        $spResponse = Invoke-MgGraphRequest -Uri "v1.0/servicePrincipals?`$filter=appId eq '$($targetApp.appId)'&`$select=id,appId,displayName" -Method GET -ErrorAction Stop
     }
     catch {
         Write-NCMessage "Unable to check Service Principal for '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR
@@ -334,7 +334,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         foreach ($key in $spWriteBody.Keys) { $spCreateBody[$key] = $spWriteBody[$key] }
 
         try {
-            $targetSp = Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/servicePrincipals' -Method POST -Body ($spCreateBody | ConvertTo-Json -Depth 5) -ContentType 'application/json' -ErrorAction Stop
+            $targetSp = Invoke-MgGraphRequest -Uri 'v1.0/servicePrincipals' -Method POST -Body ($spCreateBody | ConvertTo-Json -Depth 5) -ContentType 'application/json' -ErrorAction Stop
             Write-NCMessage "Created Service Principal for '$TargetDisplayName'." -Level SUCCESS
         }
         catch {
@@ -355,7 +355,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     }
     else {
         try {
-            Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($targetSp.id)" -Method PATCH -Body ($spWriteBody | ConvertTo-Json -Depth 5) -ContentType 'application/json' -ErrorAction Stop | Out-Null
+            Invoke-MgGraphRequest -Uri "v1.0/servicePrincipals/$($targetSp.id)" -Method PATCH -Body ($spWriteBody | ConvertTo-Json -Depth 5) -ContentType 'application/json' -ErrorAction Stop | Out-Null
         }
         catch {
             Write-NCMessage "Unable to update Service Principal tags/homepage for '$TargetDisplayName': $($_.Exception.Message)" -Level WARNING
@@ -366,7 +366,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     $ownersSkipped = 0
     if ($Snapshot.Application.Owners -and @($Snapshot.Application.Owners).Count -gt 0) {
         try {
-            $destinationOwners = @(Invoke-NCGraphAllPagesCore -Uri "https://graph.microsoft.com/v1.0/applications/$($targetApp.id)/owners?`$select=id")
+            $destinationOwners = @(Invoke-NCGraphAllPagesCore -Uri "v1.0/applications/$($targetApp.id)/owners?`$select=id")
         }
         catch {
             Write-NCMessage "Unable to read existing owners for '$TargetDisplayName': $($_.Exception.Message)" -Level WARNING
@@ -381,8 +381,8 @@ function Set-NCEnterpriseApplicationFromSnapshot {
             }
 
             try {
-                $body = @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$($owner.Id)" } | ConvertTo-Json -Depth 3
-                Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/applications/$($targetApp.id)/owners/`$ref" -Method POST -Body $body -ContentType 'application/json' -ErrorAction Stop | Out-Null
+                $body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $owner.Id) } | ConvertTo-Json -Depth 3
+                Invoke-MgGraphRequest -Uri "v1.0/applications/$($targetApp.id)/owners/`$ref" -Method POST -Body $body -ContentType 'application/json' -ErrorAction Stop | Out-Null
                 $ownersAdded++
                 Write-NCMessage "Copied owner '$($owner.DisplayName)' to '$TargetDisplayName'." -Level SUCCESS
             }
@@ -402,7 +402,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     $assignmentsFailed = 0
     if ($IncludeAppRoleAssignments.IsPresent -and $Snapshot.AppRoleAssignments -and @($Snapshot.AppRoleAssignments).Count -gt 0) {
         try {
-            $destinationAssignments = @(Invoke-NCGraphAllPagesCore -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($targetSp.id)/appRoleAssignedTo")
+            $destinationAssignments = @(Invoke-NCGraphAllPagesCore -Uri "v1.0/servicePrincipals/$($targetSp.id)/appRoleAssignedTo")
         }
         catch {
             Write-NCMessage "Unable to read existing App Role Assignments for '$TargetDisplayName': $($_.Exception.Message)" -Level WARNING
@@ -424,7 +424,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
                     resourceId  = $targetSp.id
                     appRoleId   = $assignment.AppRoleId
                 } | ConvertTo-Json -Depth 3
-                Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($targetSp.id)/appRoleAssignedTo" -Method POST -Body $body -ContentType 'application/json' -ErrorAction Stop | Out-Null
+                Invoke-MgGraphRequest -Uri "v1.0/servicePrincipals/$($targetSp.id)/appRoleAssignedTo" -Method POST -Body $body -ContentType 'application/json' -ErrorAction Stop | Out-Null
                 $assignmentsAdded++
                 Write-NCMessage "Assigned '$($assignment.PrincipalDisplayName)' to '$TargetDisplayName'." -Level SUCCESS
             }

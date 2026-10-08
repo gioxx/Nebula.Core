@@ -393,7 +393,7 @@ function Remove-EntraGroupOwner {
             }
 
             try {
-                $ownerResponse = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($resolvedGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName" -Method GET
+                $ownerResponse = Invoke-MgGraphRequest -Uri "v1.0/groups/$($resolvedGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName" -Method GET
                 $ownerItems = @()
                 if ($ownerResponse -and (Test-NCGraphItemProperty -InputObject $ownerResponse -Name 'value')) {
                     $ownerItems = @($ownerResponse.value)
@@ -571,7 +571,7 @@ function Copy-EntraGroupOwner {
     }
 
     try {
-        $ownerResponse = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($sourceGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName" -Method GET
+        $ownerResponse = Invoke-MgGraphRequest -Uri "v1.0/groups/$($sourceGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName" -Method GET
         $sourceOwners = @()
         if ($ownerResponse -and (Test-NCGraphItemProperty -InputObject $ownerResponse -Name 'value')) {
             $sourceOwners = @($ownerResponse.value)
@@ -591,7 +591,7 @@ function Copy-EntraGroupOwner {
     }
 
     try {
-        $destinationOwnerResponse = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($destinationGroup.Id)/owners?`$select=id" -Method GET
+        $destinationOwnerResponse = Invoke-MgGraphRequest -Uri "v1.0/groups/$($destinationGroup.Id)/owners?`$select=id" -Method GET
         $destinationOwners = @()
         if ($destinationOwnerResponse -and (Test-NCGraphItemProperty -InputObject $destinationOwnerResponse -Name 'value')) {
             $destinationOwners = @($destinationOwnerResponse.value)
@@ -869,7 +869,7 @@ function Copy-EntraGroup {
             }
 
             try {
-                $destinationGroup = Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/groups' -Method POST -Body ($createBody | ConvertTo-Json -Depth 10) -ContentType 'application/json'
+                $destinationGroup = Invoke-MgGraphRequest -Uri 'v1.0/groups' -Method POST -Body ($createBody | ConvertTo-Json -Depth 10) -ContentType 'application/json'
                 $destinationCreated = $true
                 Write-NCMessage "Created destination group '$DestinationGroupName' for clone operation." -Level SUCCESS
             }
@@ -881,7 +881,7 @@ function Copy-EntraGroup {
         else {
             if (-not $SkipDescription.IsPresent -and -not [string]::IsNullOrWhiteSpace($sourceGroup.Description) -and $sourceGroup.Description -ne $destinationGroup.Description) {
                 try {
-                    Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($destinationGroup.Id)" -Method PATCH -Body (@{ description = $sourceGroup.Description } | ConvertTo-Json -Depth 10) -ContentType 'application/json' | Out-Null
+                    Invoke-MgGraphRequest -Uri "v1.0/groups/$($destinationGroup.Id)" -Method PATCH -Body (@{ description = $sourceGroup.Description } | ConvertTo-Json -Depth 10) -ContentType 'application/json' | Out-Null
                     Write-NCMessage "Copied description to '$($destinationGroup.DisplayName)'." -Level SUCCESS
                 }
                 catch {
@@ -908,7 +908,7 @@ function Copy-EntraGroup {
 
         if (-not $SkipOwners.IsPresent) {
             try {
-                $destinationOwnerUri = "https://graph.microsoft.com/v1.0/groups/$($destinationGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName"
+                $destinationOwnerUri = "v1.0/groups/$($destinationGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName"
                 $destinationOwnerItems = @(Invoke-NCGraphAllPagesCore -Uri $destinationOwnerUri)
                 $destinationOwnerIds = @($destinationOwnerItems | ForEach-Object { [string]$_.id })
             }
@@ -925,7 +925,7 @@ function Copy-EntraGroup {
 
         if (-not $SkipOwners.IsPresent) {
             try {
-                $sourceOwnerUri = "https://graph.microsoft.com/v1.0/groups/$($sourceGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName"
+                $sourceOwnerUri = "v1.0/groups/$($sourceGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName"
                 $sourceOwners = @(Invoke-NCGraphAllPagesCore -Uri $sourceOwnerUri)
             }
             catch {
@@ -3529,7 +3529,7 @@ function New-EntraSecurityGroup {
     }
 
     try {
-        $createdGroup = Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/groups' -Method POST -Body ($groupBody | ConvertTo-Json -Depth 10) -ContentType 'application/json'
+        $createdGroup = Invoke-MgGraphRequest -Uri 'v1.0/groups' -Method POST -Body ($groupBody | ConvertTo-Json -Depth 10) -ContentType 'application/json'
         Write-NCMessage "Created security group '$GroupName'." -Level SUCCESS
 
         if ($PassThru.IsPresent) {
@@ -4205,7 +4205,7 @@ function Set-EntraGroupDescription {
     }
 
     try {
-        Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($resolvedGroup.Id)" -Method PATCH -Body (@{ description = $Description } | ConvertTo-Json -Depth 10) -ContentType 'application/json' | Out-Null
+        Invoke-MgGraphRequest -Uri "v1.0/groups/$($resolvedGroup.Id)" -Method PATCH -Body (@{ description = $Description } | ConvertTo-Json -Depth 10) -ContentType 'application/json' | Out-Null
         Write-NCMessage "Updated description for group '$($resolvedGroup.DisplayName)'." -Level SUCCESS
 
         if ($PassThru.IsPresent) {
@@ -4320,7 +4320,7 @@ function Set-EntraGroupDisplayName {
     }
 
     try {
-        Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($resolvedGroup.Id)" -Method PATCH -Body (@{ displayName = $DisplayName } | ConvertTo-Json -Depth 10) -ContentType 'application/json' | Out-Null
+        Invoke-MgGraphRequest -Uri "v1.0/groups/$($resolvedGroup.Id)" -Method PATCH -Body (@{ displayName = $DisplayName } | ConvertTo-Json -Depth 10) -ContentType 'application/json' | Out-Null
         Write-NCMessage "Updated display name for group '$($resolvedGroup.DisplayName)' to '$DisplayName'." -Level SUCCESS
 
         if ($PassThru.IsPresent) {
