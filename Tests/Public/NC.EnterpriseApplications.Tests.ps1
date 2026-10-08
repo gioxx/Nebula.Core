@@ -332,6 +332,58 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
         }
     }
 
+    It 'disables obsolete app roles and scopes in a first update before replacing them' {
+        $script:appPatches = [System.Collections.Generic.List[object]]::new()
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^v1\.0/applications\?') {
+                return [pscustomobject]@{ value = @([pscustomobject]@{
+                            id       = 'existing-app-id'; appId = 'existing-client-id'; displayName = 'Target App'
+                            appRoles = @([pscustomobject]@{ id = 'role-old'; value = 'Old.Role'; isEnabled = $true })
+                            api      = [pscustomobject]@{
+                                requestedAccessTokenVersion = 2
+                                oauth2PermissionScopes      = @([pscustomobject]@{ id = 'scope-old'; value = 'old_scope'; isEnabled = $true })
+                                preAuthorizedApplications   = @([pscustomobject]@{ appId = 'client-app-1'; delegatedPermissionIds = @('scope-old') })
+                            }
+                        }) }
+            }
+            if ($Method -eq 'PATCH' -and $Uri -eq 'v1.0/applications/existing-app-id') { $script:appPatches.Add(($Body | ConvertFrom-Json)); return $null }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-sp-id'; appId = 'existing-client-id' }) } }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $result = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        $result.Error | Should -BeNullOrEmpty
+        $script:appPatches.Count | Should -Be 2
+        $staging = $script:appPatches[0]
+        ($staging.appRoles | Where-Object { $_.id -eq 'role-old' }).isEnabled | Should -BeFalse
+        ($staging.api.oauth2PermissionScopes | Where-Object { $_.id -eq 'scope-old' }).isEnabled | Should -BeFalse
+        @($staging.api.preAuthorizedApplications).Count | Should -Be 0
+        $staging.api.requestedAccessTokenVersion | Should -Be 2
+        @($script:appPatches[1].appRoles).Count | Should -Be 0
+    }
+
+    It 'sends a single update when no enabled role or scope would be removed' {
+        $script:appPatches = [System.Collections.Generic.List[object]]::new()
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^v1\.0/applications\?') {
+                return [pscustomobject]@{ value = @([pscustomobject]@{
+                            id = 'existing-app-id'; appId = 'existing-client-id'; displayName = 'Target App'
+                            appRoles = @([pscustomobject]@{ id = 'role-off'; isEnabled = $false })
+                            api = [pscustomobject]@{ oauth2PermissionScopes = @() }
+                        }) }
+            }
+            if ($Method -eq 'PATCH' -and $Uri -eq 'v1.0/applications/existing-app-id') { $script:appPatches.Add(($Body | ConvertFrom-Json)); return $null }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-sp-id'; appId = 'existing-client-id' }) } }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $null = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        $script:appPatches.Count | Should -Be 1
+    }
     It 'does not send an empty homepage when creating a Service Principal' {
         Mock Invoke-MgGraphRequest {
             if ($Uri -match '^v1\.0/applications\?') { return [pscustomobject]@{ value = @() } }

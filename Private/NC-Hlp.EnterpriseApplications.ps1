@@ -181,7 +181,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
 
     $escapedName = $TargetDisplayName.Replace("'", "''")
     try {
-        $existingResponse = Invoke-MgGraphRequest -Uri "v1.0/applications?`$filter=displayName eq '$escapedName'&`$select=id,appId,displayName" -Method GET -ErrorAction Stop
+        $existingResponse = Invoke-MgGraphRequest -Uri "v1.0/applications?`$filter=displayName eq '$escapedName'&`$select=id,appId,displayName,appRoles,api" -Method GET -ErrorAction Stop
     }
     catch {
         Write-NCMessage "Unable to resolve target Enterprise Application '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR
@@ -293,6 +293,66 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         foreach ($key in $appBody.Keys) {
             if ($key -eq 'displayName') { continue }
             $patchBody[$key] = $appBody[$key]
+        }
+
+        # Graph only removes an app role or permission scope that is already disabled: disable the ones the
+        # snapshot drops in a first update, then send the snapshot collections
+        $toTable = {
+            param($Item)
+            $table = [ordered]@{}
+            if ($Item -is [System.Collections.IDictionary]) { foreach ($k in $Item.Keys) { $table[$k] = $Item[$k] } }
+            elseif ($null -ne $Item) { foreach ($property in $Item.PSObject.Properties) { $table[$property.Name] = $property.Value } }
+            $table
+        }
+        $keptRoleIds = @($Snapshot.Application.AppRoles | ForEach-Object { [string]$_.id })
+        $keptScopeIds = @($Snapshot.Application.Oauth2PermissionScopes | ForEach-Object { [string]$_.id })
+        $obsoleteRoleIds = @($targetApp.appRoles | Where-Object { $_.isEnabled -and $keptRoleIds -notcontains [string]$_.id } | ForEach-Object { [string]$_.id })
+        $obsoleteScopeIds = @($targetApp.api.oauth2PermissionScopes | Where-Object { $_.isEnabled -and $keptScopeIds -notcontains [string]$_.id } | ForEach-Object { [string]$_.id })
+
+        if ($obsoleteRoleIds.Count -gt 0 -or $obsoleteScopeIds.Count -gt 0) {
+            $stagingBody = [ordered]@{}
+            if ($obsoleteRoleIds.Count -gt 0) {
+                $stagingBody.appRoles = @($targetApp.appRoles | ForEach-Object {
+                        $role = & $toTable $_
+                        if ($obsoleteRoleIds -contains [string]$role.id) { $role.isEnabled = $false }
+                        $role
+                    })
+            }
+            if ($obsoleteScopeIds.Count -gt 0) {
+                $stagingApi = & $toTable $targetApp.api
+                $stagingApi.oauth2PermissionScopes = @($targetApp.api.oauth2PermissionScopes | ForEach-Object {
+                        $scope = & $toTable $_
+                        if ($obsoleteScopeIds -contains [string]$scope.id) { $scope.isEnabled = $false }
+                        $scope
+                    })
+                # A pre-authorization can't point at a scope that is being disabled
+                $stagingApi.preAuthorizedApplications = @($targetApp.api.preAuthorizedApplications | ForEach-Object {
+                        $preAuthorized = & $toTable $_
+                        $preAuthorized.delegatedPermissionIds = @($preAuthorized.delegatedPermissionIds | Where-Object { $obsoleteScopeIds -notcontains [string]$_ })
+                        if ($preAuthorized.delegatedPermissionIds.Count -gt 0) { $preAuthorized }
+                    })
+                $stagingBody.api = $stagingApi
+            }
+
+            try {
+                Invoke-MgGraphRequest -Uri "v1.0/applications/$($targetApp.id)" -Method PATCH -Body ($stagingBody | ConvertTo-Json -Depth 10) -ContentType 'application/json' -ErrorAction Stop | Out-Null
+                Write-Verbose "Disabled $($obsoleteRoleIds.Count) app role(s) and $($obsoleteScopeIds.Count) permission scope(s) before removing them from '$TargetDisplayName'."
+            }
+            catch {
+                Write-NCMessage "Failed to disable the app roles or permission scopes removed from '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR
+                [pscustomobject][ordered]@{
+                    TargetDisplayName   = $TargetDisplayName
+                    TargetApplicationId = $null
+                    Created             = $false
+                    OwnersAdded         = 0
+                    OwnersSkipped       = 0
+                    AssignmentsAdded    = 0
+                    AssignmentsSkipped  = 0
+                    AssignmentsFailed   = 0
+                    Error               = "Failed to disable the app roles or permission scopes removed from '$TargetDisplayName': $($_.Exception.Message)"
+                }
+                return
+            }
         }
 
         try {

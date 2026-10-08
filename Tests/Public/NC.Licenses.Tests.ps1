@@ -178,6 +178,17 @@ Describe 'License assignment batching' {
         Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter { $Message -like 'No available units*' }
     }
 
+    It 'processes a user listed twice once, so the duplicate takes no seat' {
+        Mock Get-MgSubscribedSku {
+            @([pscustomobject]@{ SkuId = [guid]$global:skuId; SkuPartNumber = 'ENTERPRISEPACK'; PrepaidUnits = [pscustomobject]@{ Enabled = 2 }; ConsumedUnits = 0 })
+        }
+        Set-LicenseGraphMock
+        @('user1@contoso.com', 'USER1@contoso.com', 'user2@contoso.com') | Add-UserMsolAccountSku -License 'ENTERPRISEPACK' -Confirm:$false
+
+        $assigns = @($global:SeenRequests | Where-Object { $_.url -like '*/assignLicense' })
+        @($assigns.url) | Should -Be @('/users/id1/assignLicense', '/users/id2/assignLicense')
+        Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter { $Message -like 'No available units*' }
+    }
     It 'writes the unresolved-user message once for a user Graph cannot find' {
         Mock Invoke-MgGraphRequest {
             New-TestBatchResponse -Body $Body -Responder {

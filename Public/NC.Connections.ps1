@@ -428,21 +428,13 @@ function Update-NebulaConnections {
         return Get-NebulaConnections -SkipHealthCheck
     }
 
-    $exoParams = @{}
+    # Probe first: Test-MgGraphConnection trusts a cached context, so a stale Graph token needs -ForceReconnect
+    $status = $null
     try {
-        $exoUser = (Get-ConnectionInformation -ErrorAction Stop | Select-Object -First 1).UserPrincipalName
-        if (-not [string]::IsNullOrWhiteSpace($exoUser)) {
-            $exoParams.UserPrincipalName = $exoUser
-        }
+        $status = Get-NebulaConnections
     }
     catch {}
-
-    try {
-        Test-EOLConnection @exoParams | Out-Null
-    }
-    catch {
-        Write-NCMessage "Exchange Online repair attempt failed. $($_.Exception.Message)" -Level WARNING
-    }
+    $forceGraphReconnect = [bool]($status -and $status.MicrosoftGraphConnected -and -not $status.MicrosoftGraphHealthy)
 
     $graphScopes = @()
     $graphAccount = $null
@@ -460,11 +452,30 @@ function Update-NebulaConnections {
         $graphAccount = Find-UserConnected
     }
 
+    # Graph before Exchange Online, as in Connect-Nebula, to avoid the cross-module authentication conflict
+    $graphConnected = $false
     try {
-        Test-MgGraphConnection -Scopes $graphScopes -EnsureExchangeOnline:$false -LoginHint $graphAccount | Out-Null
+        $graphConnected = [bool](Test-MgGraphConnection -Scopes $graphScopes -EnsureExchangeOnline:$false -LoginHint $graphAccount -ForceReconnect:$forceGraphReconnect)
     }
     catch {
         Write-NCMessage "Microsoft Graph repair attempt failed. $($_.Exception.Message)" -Level WARNING
+    }
+
+    $exoParams = @{}
+    try {
+        $exoUser = (Get-ConnectionInformation -ErrorAction Stop | Select-Object -First 1).UserPrincipalName
+        if (-not [string]::IsNullOrWhiteSpace($exoUser)) {
+            $exoParams.UserPrincipalName = $exoUser
+        }
+    }
+    catch {}
+
+    try {
+        # With a Graph session in the same process, EXO signs in without WAM (see Connect-Nebula)
+        Test-EOLConnection @exoParams -DisableWAM:$graphConnected | Out-Null
+    }
+    catch {
+        Write-NCMessage "Exchange Online repair attempt failed. $($_.Exception.Message)" -Level WARNING
     }
 
     Get-NebulaConnections

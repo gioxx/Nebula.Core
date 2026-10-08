@@ -188,12 +188,19 @@ function Add-UserMsolAccountSku {
 
             # (b) Check availability and ask for confirmation per user, in input order.
             $approved = [System.Collections.Generic.List[object]]::new()
+            # The same user can arrive under different identifiers: count it, and its seats, once
+            $seenUserIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($entry in $entries) {
                 $user = $resolvedUsers[$entry.Trim()]
                 if (-not $user -or -not $user.id) {
                     if (-not $failedUsers.Contains($entry.Trim())) {
                         Write-NCMessage "Unable to resolve user recipient for $entry" -Level ERROR
                     }
+                    continue
+                }
+
+                if (-not $seenUserIds.Add([string]$user.id)) {
+                    Write-Verbose "Skipping $($entry): $($user.userPrincipalName) is already in this request."
                     continue
                 }
 
