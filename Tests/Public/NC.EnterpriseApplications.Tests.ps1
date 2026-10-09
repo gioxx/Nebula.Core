@@ -919,6 +919,16 @@ Describe 'Compare-NCEnterpriseApplicationSnapshot' {
         $rows.Count | Should -Be 0
     }
 
+    It 'ignores the order of allowed member types inside an app role' {
+        $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
+        $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
+        $a.Application.AppRoles = @([pscustomobject]@{ id = 'r1'; value = 'Read'; allowedMemberTypes = @('User', 'Application') })
+        $b.Application.AppRoles = @([pscustomobject]@{ id = 'r1'; value = 'Read'; allowedMemberTypes = @('Application', 'User') })
+
+        $rows = @(Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $a -DifferenceSnapshot $b)
+
+        $rows.Count | Should -Be 0
+    }
     It 'still reports a real permission difference' {
         $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
         $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
@@ -1144,6 +1154,26 @@ Describe 'Import-EnterpriseApplication' {
 
         Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
         Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*Application.Web.redirectUris*' }
+    }
+    It 'refuses a snapshot whose Api misses some of its settings' {
+        $script:validSnapshot.Application.Api = @{ AcceptMappedClaims = $null; KnownClientApplications = @() }
+        $script:validSnapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $inputPath
+
+        Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -Confirm:$false
+
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter {
+            $Level -eq 'ERROR' -and $Message -like '*Application.Api.PreAuthorizedApplications*' -and $Message -like '*Application.Api.RequestedAccessTokenVersion*'
+        }
+    }
+
+    It 'accepts a snapshot with a complete Api' {
+        $script:validSnapshot.Application.Api = @{ AcceptMappedClaims = $null; KnownClientApplications = @(); PreAuthorizedApplications = @(); RequestedAccessTokenVersion = 2 }
+        $script:validSnapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $inputPath
+
+        Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -Confirm:$false
+
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 1 -Scope It
     }
     It 'refuses a JSON file that is not an Enterprise Application snapshot' {
         '{"name":"something else"}' | Set-Content -LiteralPath $inputPath

@@ -160,6 +160,11 @@ function Import-EnterpriseApplication {
                 $missingProperties += "Application.$redirectContainer.redirectUris"
             }
         }
+        # Api is optional (older snapshots), but when present every setting in it is written
+        if ($applicationProperties -contains 'Api' -and $null -ne $snapshot.Application.Api) {
+            $apiProperties = @($snapshot.Application.Api.PSObject.Properties.Name)
+            $missingProperties += @(@('AcceptMappedClaims', 'KnownClientApplications', 'PreAuthorizedApplications', 'RequestedAccessTokenVersion') | Where-Object { $apiProperties -notcontains $_ } | ForEach-Object { "Application.Api.$_" })
+        }
         if (-not $snapshot.ServicePrincipal) {
             $missingProperties += 'ServicePrincipal'
         }

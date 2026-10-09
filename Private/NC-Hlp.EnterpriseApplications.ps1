@@ -701,6 +701,14 @@ function Compare-NCEnterpriseApplicationSnapshot {
                 }
             })
     }
+    $canonicalAppRoles = {
+        param($Items)
+        @(& $sortedByKey $Items 'id' | ForEach-Object {
+                $role = & $toOrdered $_
+                if ($role.Contains('allowedMemberTypes')) { $role['allowedMemberTypes'] = & $sortedValues $role['allowedMemberTypes'] }
+                [pscustomobject]$role
+            })
+    }
     $canonicalApi = {
         param($Api)
         if ($null -eq $Api) { return $null }
@@ -724,7 +732,7 @@ function Compare-NCEnterpriseApplicationSnapshot {
     & $addIfDifferent 'Application.Spa' (& $canonicalRedirects $ReferenceSnapshot.Application.Spa) (& $canonicalRedirects $DifferenceSnapshot.Application.Spa)
     & $addIfDifferent 'Application.PublicClient' (& $canonicalRedirects $ReferenceSnapshot.Application.PublicClient) (& $canonicalRedirects $DifferenceSnapshot.Application.PublicClient)
     & $addIfDifferent 'Application.RequiredResourceAccess' (& $canonicalPermissions $ReferenceSnapshot.Application.RequiredResourceAccess) (& $canonicalPermissions $DifferenceSnapshot.Application.RequiredResourceAccess)
-    & $addIfDifferent 'Application.AppRoles' (& $sortedByKey $ReferenceSnapshot.Application.AppRoles 'id') (& $sortedByKey $DifferenceSnapshot.Application.AppRoles 'id')
+    & $addIfDifferent 'Application.AppRoles' (& $canonicalAppRoles $ReferenceSnapshot.Application.AppRoles) (& $canonicalAppRoles $DifferenceSnapshot.Application.AppRoles)
     & $addIfDifferent 'Application.Oauth2PermissionScopes' (& $sortedByKey $ReferenceSnapshot.Application.Oauth2PermissionScopes 'id') (& $sortedByKey $DifferenceSnapshot.Application.Oauth2PermissionScopes 'id')
     & $addIfDifferent 'Application.Api' (& $canonicalApi $ReferenceSnapshot.Application.Api) (& $canonicalApi $DifferenceSnapshot.Application.Api)
     & $addIfDifferent 'Application.GroupMembershipClaims' $ReferenceSnapshot.Application.GroupMembershipClaims $DifferenceSnapshot.Application.GroupMembershipClaims
