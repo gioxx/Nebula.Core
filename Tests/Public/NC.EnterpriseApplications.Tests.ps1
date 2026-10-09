@@ -897,6 +897,38 @@ Describe 'Compare-NCEnterpriseApplicationSnapshot' {
         ($rows | Where-Object { $_.Property -eq 'Application.Owners' }).Count | Should -Be 1
     }
 
+    It 'ignores the order of permissions, redirect URIs, app roles, scopes and tags' {
+        $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @('https://a.contoso.com/cb', 'https://b.contoso.com/cb')
+        $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @('https://b.contoso.com/cb', 'https://a.contoso.com/cb')
+        $graphPermissions = [pscustomobject]@{ resourceAppId = 'res-graph'; resourceAccess = @([pscustomobject]@{ id = 'p1'; type = 'Scope' }, [pscustomobject]@{ id = 'p2'; type = 'Role' }) }
+        $graphPermissionsReordered = [pscustomobject]@{ resourceAppId = 'res-graph'; resourceAccess = @([pscustomobject]@{ id = 'p2'; type = 'Role' }, [pscustomobject]@{ id = 'p1'; type = 'Scope' }) }
+        $otherPermissions = [pscustomobject]@{ resourceAppId = 'res-other'; resourceAccess = @([pscustomobject]@{ id = 'p3'; type = 'Scope' }) }
+        $a.Application.RequiredResourceAccess = @($graphPermissions, $otherPermissions)
+        $b.Application.RequiredResourceAccess = @($otherPermissions, $graphPermissionsReordered)
+        $a.Application.AppRoles = @([pscustomobject]@{ id = 'r1'; value = 'Read' }, [pscustomobject]@{ id = 'r2'; value = 'Write' })
+        $b.Application.AppRoles = @([pscustomobject]@{ id = 'r2'; value = 'Write' }, [pscustomobject]@{ id = 'r1'; value = 'Read' })
+        $a.Application.Oauth2PermissionScopes = @([pscustomobject]@{ id = 's1' }, [pscustomobject]@{ id = 's2' })
+        $b.Application.Oauth2PermissionScopes = @([pscustomobject]@{ id = 's2' }, [pscustomobject]@{ id = 's1' })
+        $a.Application.Tags = @('t1', 't2')
+        $b.Application.Tags = @('t2', 't1')
+        $a.ServicePrincipal.Tags = @('WindowsAzureActiveDirectoryIntegratedApp', 'HideApp')
+        $b.ServicePrincipal.Tags = @('HideApp', 'WindowsAzureActiveDirectoryIntegratedApp')
+
+        $rows = @(Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $a -DifferenceSnapshot $b)
+
+        $rows.Count | Should -Be 0
+    }
+
+    It 'still reports a real permission difference' {
+        $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
+        $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
+        $a.Application.RequiredResourceAccess = @([pscustomobject]@{ resourceAppId = 'res-graph'; resourceAccess = @([pscustomobject]@{ id = 'p1'; type = 'Scope' }) })
+        $b.Application.RequiredResourceAccess = @([pscustomobject]@{ resourceAppId = 'res-graph'; resourceAccess = @([pscustomobject]@{ id = 'p1'; type = 'Role' }) })
+
+        $rows = @(Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $a -DifferenceSnapshot $b)
+
+        @($rows.Property) | Should -Contain 'Application.RequiredResourceAccess'
+    }
     It 'reports changed token claims and assignment requirement' {
         $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
         $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @()

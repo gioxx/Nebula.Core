@@ -668,24 +668,69 @@ function Compare-NCEnterpriseApplicationSnapshot {
         param($Items, [string[]]$Keys)
         @(@($Items | Where-Object { $null -ne $_ }) | Sort-Object -Property $Keys)
     }
+    # Items can be objects (live snapshot) or hashtables: sort and copy through key access, which works on both
+    $sortedByKey = {
+        param($Items, [string[]]$Keys)
+        $sortKeys = @(foreach ($key in $Keys) { $sortKey = $key; { [string]$_.$sortKey }.GetNewClosure() })
+        @(@($Items | Where-Object { $null -ne $_ }) | Sort-Object -Property $sortKeys)
+    }
+    $sortedValues = {
+        param($Items)
+        @(@($Items | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) | Sort-Object)
+    }
+    $toOrdered = {
+        param($Item)
+        $table = [ordered]@{}
+        if ($Item -is [System.Collections.IDictionary]) { foreach ($k in $Item.Keys) { $table[[string]$k] = $Item[$k] } }
+        elseif ($null -ne $Item) { foreach ($property in $Item.PSObject.Properties) { $table[$property.Name] = $property.Value } }
+        $table
+    }
+    $canonicalRedirects = {
+        param($Container)
+        if ($null -eq $Container) { return $null }
+        $table = & $toOrdered $Container
+        if ($table.Contains('redirectUris')) { $table['redirectUris'] = & $sortedValues $table['redirectUris'] }
+        [pscustomobject]$table
+    }
+    $canonicalPermissions = {
+        param($Items)
+        @(& $sortedByKey $Items 'resourceAppId' | ForEach-Object {
+                [pscustomobject][ordered]@{
+                    resourceAppId  = [string]$_.resourceAppId
+                    resourceAccess = @(& $sortedByKey $_.resourceAccess 'id', 'type' | ForEach-Object { [pscustomobject][ordered]@{ id = [string]$_.id; type = [string]$_.type } })
+                }
+            })
+    }
+    $canonicalApi = {
+        param($Api)
+        if ($null -eq $Api) { return $null }
+        $table = & $toOrdered $Api
+        if ($table.Contains('KnownClientApplications')) { $table['KnownClientApplications'] = & $sortedValues $table['KnownClientApplications'] }
+        if ($table.Contains('PreAuthorizedApplications')) {
+            $table['PreAuthorizedApplications'] = @(& $sortedByKey $table['PreAuthorizedApplications'] 'appId' | ForEach-Object {
+                    [pscustomobject][ordered]@{ appId = [string]$_.appId; delegatedPermissionIds = & $sortedValues $_.delegatedPermissionIds }
+                })
+        }
+        [pscustomobject]$table
+    }
 
     & $addIfDifferent 'Application.DisplayName' $ReferenceSnapshot.Application.DisplayName $DifferenceSnapshot.Application.DisplayName
     & $addIfDifferent 'Application.SignInAudience' $ReferenceSnapshot.Application.SignInAudience $DifferenceSnapshot.Application.SignInAudience
-    & $addIfDifferent 'Application.IdentifierUris' $ReferenceSnapshot.Application.IdentifierUris $DifferenceSnapshot.Application.IdentifierUris
+    & $addIfDifferent 'Application.IdentifierUris' (& $sortedValues $ReferenceSnapshot.Application.IdentifierUris) (& $sortedValues $DifferenceSnapshot.Application.IdentifierUris)
     & $addIfDifferent 'Application.Notes' $ReferenceSnapshot.Application.Notes $DifferenceSnapshot.Application.Notes
-    & $addIfDifferent 'Application.Tags' $ReferenceSnapshot.Application.Tags $DifferenceSnapshot.Application.Tags
+    & $addIfDifferent 'Application.Tags' (& $sortedValues $ReferenceSnapshot.Application.Tags) (& $sortedValues $DifferenceSnapshot.Application.Tags)
     & $addIfDifferent 'Application.Owners' (& $sortedBy $ReferenceSnapshot.Application.Owners 'Id') (& $sortedBy $DifferenceSnapshot.Application.Owners 'Id')
-    & $addIfDifferent 'Application.Web' $ReferenceSnapshot.Application.Web $DifferenceSnapshot.Application.Web
-    & $addIfDifferent 'Application.Spa' $ReferenceSnapshot.Application.Spa $DifferenceSnapshot.Application.Spa
-    & $addIfDifferent 'Application.PublicClient' $ReferenceSnapshot.Application.PublicClient $DifferenceSnapshot.Application.PublicClient
-    & $addIfDifferent 'Application.RequiredResourceAccess' $ReferenceSnapshot.Application.RequiredResourceAccess $DifferenceSnapshot.Application.RequiredResourceAccess
-    & $addIfDifferent 'Application.AppRoles' $ReferenceSnapshot.Application.AppRoles $DifferenceSnapshot.Application.AppRoles
-    & $addIfDifferent 'Application.Oauth2PermissionScopes' $ReferenceSnapshot.Application.Oauth2PermissionScopes $DifferenceSnapshot.Application.Oauth2PermissionScopes
-    & $addIfDifferent 'Application.Api' $ReferenceSnapshot.Application.Api $DifferenceSnapshot.Application.Api
+    & $addIfDifferent 'Application.Web' (& $canonicalRedirects $ReferenceSnapshot.Application.Web) (& $canonicalRedirects $DifferenceSnapshot.Application.Web)
+    & $addIfDifferent 'Application.Spa' (& $canonicalRedirects $ReferenceSnapshot.Application.Spa) (& $canonicalRedirects $DifferenceSnapshot.Application.Spa)
+    & $addIfDifferent 'Application.PublicClient' (& $canonicalRedirects $ReferenceSnapshot.Application.PublicClient) (& $canonicalRedirects $DifferenceSnapshot.Application.PublicClient)
+    & $addIfDifferent 'Application.RequiredResourceAccess' (& $canonicalPermissions $ReferenceSnapshot.Application.RequiredResourceAccess) (& $canonicalPermissions $DifferenceSnapshot.Application.RequiredResourceAccess)
+    & $addIfDifferent 'Application.AppRoles' (& $sortedByKey $ReferenceSnapshot.Application.AppRoles 'id') (& $sortedByKey $DifferenceSnapshot.Application.AppRoles 'id')
+    & $addIfDifferent 'Application.Oauth2PermissionScopes' (& $sortedByKey $ReferenceSnapshot.Application.Oauth2PermissionScopes 'id') (& $sortedByKey $DifferenceSnapshot.Application.Oauth2PermissionScopes 'id')
+    & $addIfDifferent 'Application.Api' (& $canonicalApi $ReferenceSnapshot.Application.Api) (& $canonicalApi $DifferenceSnapshot.Application.Api)
     & $addIfDifferent 'Application.GroupMembershipClaims' $ReferenceSnapshot.Application.GroupMembershipClaims $DifferenceSnapshot.Application.GroupMembershipClaims
     & $addIfDifferent 'Application.OptionalClaims' $ReferenceSnapshot.Application.OptionalClaims $DifferenceSnapshot.Application.OptionalClaims
     & $addIfDifferent 'Application.IsFallbackPublicClient' $ReferenceSnapshot.Application.IsFallbackPublicClient $DifferenceSnapshot.Application.IsFallbackPublicClient
-    & $addIfDifferent 'ServicePrincipal.Tags' $ReferenceSnapshot.ServicePrincipal.Tags $DifferenceSnapshot.ServicePrincipal.Tags
+    & $addIfDifferent 'ServicePrincipal.Tags' (& $sortedValues $ReferenceSnapshot.ServicePrincipal.Tags) (& $sortedValues $DifferenceSnapshot.ServicePrincipal.Tags)
     & $addIfDifferent 'ServicePrincipal.Homepage' $ReferenceSnapshot.ServicePrincipal.Homepage $DifferenceSnapshot.ServicePrincipal.Homepage
     & $addIfDifferent 'ServicePrincipal.LogoUrl' $ReferenceSnapshot.ServicePrincipal.LogoUrl $DifferenceSnapshot.ServicePrincipal.LogoUrl
     & $addIfDifferent 'ServicePrincipal.AppRoleAssignmentRequired' $ReferenceSnapshot.ServicePrincipal.AppRoleAssignmentRequired $DifferenceSnapshot.ServicePrincipal.AppRoleAssignmentRequired
