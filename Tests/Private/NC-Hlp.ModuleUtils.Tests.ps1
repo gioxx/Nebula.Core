@@ -86,3 +86,30 @@ Describe 'Out-NCGridView' {
         }
     }
 }
+
+Describe 'Format-NCDateTime' {
+    BeforeEach {
+        Mock Write-NCMessage {}
+    }
+
+    AfterEach {
+        Remove-Variable -Name NCVars -Scope Global -ErrorAction SilentlyContinue
+    }
+
+    It 'falls back to local time when the configured time zone cannot be resolved' {
+        $global:NCVars = @{ DateTimeTimeZone = 'Not/AZone'; DateTimeString_Full = 'yyyy-MM-dd HH:mm zzz' }
+        Mock Get-NCDateTimeZoneInfo { $null }
+        $value = [datetimeoffset]::new(2026, 1, 15, 10, 0, 0, [timespan]::Zero)
+
+        $result = Format-NCDateTime -Value $value -AsLocalTime
+
+        $result | Should -Be $value.ToLocalTime().ToString('yyyy-MM-dd HH:mm zzz')
+    }
+
+    It 'converts to the configured time zone when it resolves' {
+        $global:NCVars = @{ DateTimeTimeZone = 'UTC'; DateTimeString_Full = 'yyyy-MM-dd HH:mm zzz' }
+        $value = [datetimeoffset]::new(2026, 1, 15, 10, 0, 0, [timespan]::FromHours(2))
+
+        Format-NCDateTime -Value $value -AsLocalTime | Should -Be '2026-01-15 08:00 +00:00'
+    }
+}

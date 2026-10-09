@@ -39,7 +39,7 @@ function Get-NCEnterpriseApplicationSnapshot {
     else {
         $escapedName = $ApplicationName.Replace("'", "''")
         try {
-            $response = Invoke-MgGraphRequest -Uri "v1.0/applications?`$filter=displayName eq '$escapedName'&`$select=$selectProps" -Method GET -ErrorAction Stop
+            $response = Invoke-MgGraphRequest -Uri "v1.0/applications?`$filter=$([uri]::EscapeDataString("displayName eq '$escapedName'"))&`$select=$selectProps" -Method GET -ErrorAction Stop
         }
         catch {
             Write-NCMessage "Unable to resolve Enterprise Application '$ApplicationName': $($_.Exception.Message)" -Level ERROR
@@ -204,7 +204,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
 
     $escapedName = $TargetDisplayName.Replace("'", "''")
     try {
-        $existingResponse = Invoke-MgGraphRequest -Uri "v1.0/applications?`$filter=displayName eq '$escapedName'&`$select=id,appId,displayName,appRoles,api" -Method GET -ErrorAction Stop
+        $existingResponse = Invoke-MgGraphRequest -Uri "v1.0/applications?`$filter=$([uri]::EscapeDataString("displayName eq '$escapedName'"))&`$select=id,appId,displayName,appRoles,api" -Method GET -ErrorAction Stop
     }
     catch {
         Write-NCMessage "Unable to resolve target Enterprise Application '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR

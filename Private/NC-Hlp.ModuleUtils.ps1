@@ -97,11 +97,14 @@ function Format-NCDateTime {
     }
 
     $targetTimeZoneId = $NCVars.DateTimeTimeZone
+    $timeZoneInfo = $null
     if (-not [string]::IsNullOrWhiteSpace([string]$targetTimeZoneId)) {
         $timeZoneInfo = Get-NCDateTimeZoneInfo -TimeZoneId $targetTimeZoneId
-        if ($timeZoneInfo) {
-            $dateTimeOffset = [System.TimeZoneInfo]::ConvertTime($dateTimeOffset, $timeZoneInfo)
-        }
+    }
+
+    # A configured time zone that can't be resolved is ignored, as if none were set
+    if ($timeZoneInfo) {
+        $dateTimeOffset = [System.TimeZoneInfo]::ConvertTime($dateTimeOffset, $timeZoneInfo)
     }
     elseif ($AsLocalTime) {
         $dateTimeOffset = $dateTimeOffset.ToLocalTime()
@@ -158,7 +161,7 @@ function Get-NCDateTimeZoneInfo {
         }
     }
 
-    Write-NCMessage "Unable to resolve time zone '$TimeZoneId'. Falling back to local time." -Level WARNING
+    Write-NCMessage "Unable to resolve time zone '$TimeZoneId'. Ignoring DateTimeTimeZone: dates use local time where requested, otherwise their original offset." -Level WARNING
     $script:NCTimeZoneCache = [pscustomobject]@{
         TimeZoneId   = $TimeZoneId
         TimeZoneInfo = $null

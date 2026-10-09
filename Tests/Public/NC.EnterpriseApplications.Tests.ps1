@@ -212,6 +212,13 @@ Describe 'Get-NCEnterpriseApplicationSnapshot' {
         $snapshot.AppRoleAssignments[0].PrincipalDisplayName | Should -Be 'Some Group'
     }
 
+    It 'URI-encodes the display name filter so names with & or # resolve' {
+        $null = Get-NCEnterpriseApplicationSnapshot -ApplicationName 'R&D Portal #2'
+
+        Assert-MockCalled Invoke-MgGraphRequest -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Uri -like 'v1.0/applications?$filter=*' -and $Uri -like '*R%26D%20Portal%20%232*' -and $Uri -notlike '*R&D*'
+        }
+    }
     It 'returns nothing and logs an error when the application is not found' {
         Mock Invoke-MgGraphRequest {
             if ($Uri -match '/applications\?') {

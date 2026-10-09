@@ -788,7 +788,7 @@ function Get-IntuneAppPresence {
         }
 
         $escapedDeviceName = $DeviceName.Replace("'", "''")
-        $devicesUri = "v1.0/deviceManagement/managedDevices?`$filter=deviceName eq '$escapedDeviceName'&`$select=id,deviceName,operatingSystem,userPrincipalName,lastSyncDateTime"
+        $devicesUri = "v1.0/deviceManagement/managedDevices?`$filter=$([uri]::EscapeDataString("deviceName eq '$escapedDeviceName'"))&`$select=id,deviceName,operatingSystem,userPrincipalName,lastSyncDateTime"
         $devices = @(Invoke-MgGraphRequest -Uri $devicesUri -Method GET -ErrorAction Stop).value
         $device = $devices | Select-Object -First 1
 
