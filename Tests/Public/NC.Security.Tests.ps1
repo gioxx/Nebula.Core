@@ -571,4 +571,13 @@ Describe 'Get-UserDevices' {
         Should -Invoke Out-NCGridView -Scope It -ParameterFilter { $Title -eq 'User Devices' }
         $script:gridRows.Count | Should -Be 4
     }
+
+    It 'has a table view for Nebula.Core.UserDevice in the module format file' {
+        [xml]$formats = Get-Content -LiteralPath "$PSScriptRoot/../../Formats/Nebula.Core.Format.ps1xml" -Raw
+        $view = $formats.Configuration.ViewDefinitions.View | Where-Object { $_.ViewSelectedBy.TypeName -eq 'Nebula.Core.UserDevice' }
+
+        $view | Should -Not -BeNullOrEmpty
+        @($view.TableControl.TableRowEntries.TableRowEntry.TableColumnItems.TableColumnItem.PropertyName) |
+            Should -Be @('User', 'DeviceName', 'Model', 'OperatingSystem', 'SerialNumber', 'Source')
+    }
 }
