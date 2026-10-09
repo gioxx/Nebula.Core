@@ -25,7 +25,7 @@ function Get-NCEnterpriseApplicationSnapshot {
         [switch]$IncludeAppRoleAssignments
     )
 
-    $selectProps = 'id,appId,displayName,signInAudience,identifierUris,notes,tags,web,spa,publicClient,requiredResourceAccess,appRoles,api,groupMembershipClaims,optionalClaims,passwordCredentials,keyCredentials'
+    $selectProps = 'id,appId,displayName,signInAudience,identifierUris,notes,tags,web,spa,publicClient,requiredResourceAccess,appRoles,api,groupMembershipClaims,optionalClaims,isFallbackPublicClient,passwordCredentials,keyCredentials'
 
     if ($PSCmdlet.ParameterSetName -eq 'ById') {
         try {
@@ -60,7 +60,7 @@ function Get-NCEnterpriseApplicationSnapshot {
     }
 
     try {
-        $spResponse = Invoke-MgGraphRequest -Uri "v1.0/servicePrincipals?`$filter=appId eq '$($app.appId)'&`$select=id,appId,displayName,tags,homepage,logoUrl,appRoleAssignmentRequired,accountEnabled" -Method GET -ErrorAction Stop
+        $spResponse = Invoke-MgGraphRequest -Uri "v1.0/servicePrincipals?`$filter=appId eq '$($app.appId)'&`$select=id,appId,displayName,tags,homepage,logoUrl,appRoleAssignmentRequired,accountEnabled,preferredSingleSignOnMode" -Method GET -ErrorAction Stop
     }
     catch {
         Write-NCMessage "Unable to read Service Principal for '$($app.displayName)': $($_.Exception.Message)" -Level ERROR
@@ -127,6 +127,8 @@ function Get-NCEnterpriseApplicationSnapshot {
             # Token claim settings: without them a clone issues different ID/access/SAML tokens
             GroupMembershipClaims  = $app.groupMembershipClaims
             OptionalClaims         = $app.optionalClaims
+            # Public client for flows without a redirect URI (e.g. ROPC); the default is confidential
+            IsFallbackPublicClient = $app.isFallbackPublicClient
             Owners                 = @($owners | ForEach-Object {
                     [pscustomobject][ordered]@{
                         Id                = $_.id
@@ -145,6 +147,8 @@ function Get-NCEnterpriseApplicationSnapshot {
             AppRoleAssignmentRequired = [bool]$sp.appRoleAssignmentRequired
             # A disabled Service Principal blocks sign-in for the app; Graph omits it when it is the default (true)
             AccountEnabled            = if ($null -eq $sp.accountEnabled) { $true } else { [bool]$sp.accountEnabled }
+            # Captured for comparison only: SAML and password SSO need settings that are not cloned
+            PreferredSingleSignOnMode = $sp.preferredSingleSignOnMode
             Owners                    = @($servicePrincipalOwners | ForEach-Object {
                     [pscustomobject][ordered]@{
                         Id                = $_.id
@@ -214,6 +218,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
             Created             = $false
             OwnersAdded         = 0
             OwnersSkipped       = 0
+            OwnersFailed        = 0
             AssignmentsAdded    = 0
             AssignmentsSkipped  = 0
             AssignmentsFailed   = 0
@@ -231,6 +236,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
             Created             = $false
             OwnersAdded         = 0
             OwnersSkipped       = 0
+            OwnersFailed        = 0
             AssignmentsAdded    = 0
             AssignmentsSkipped  = 0
             AssignmentsFailed   = 0
@@ -250,9 +256,15 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     $cleanWeb = [ordered]@{
         redirectUris = @($webSource.redirectUris)
     }
-    if ($webSource.homePageUrl) { $cleanWeb.homePageUrl = $webSource.homePageUrl }
-    if ($webSource.logoutUrl) { $cleanWeb.logoutUrl = $webSource.logoutUrl }
-    if ($webSource.implicitGrantSettings) { $cleanWeb.implicitGrantSettings = $webSource.implicitGrantSettings }
+    # Sent even when empty, so an update clears values the snapshot doesn't have
+    $cleanWeb.homePageUrl = if ($webSource.homePageUrl) { $webSource.homePageUrl } else { $null }
+    $cleanWeb.logoutUrl = if ($webSource.logoutUrl) { $webSource.logoutUrl } else { $null }
+    $cleanWeb.implicitGrantSettings = if ($webSource.implicitGrantSettings) {
+        $webSource.implicitGrantSettings
+    }
+    else {
+        [ordered]@{ enableAccessTokenIssuance = $false; enableIdTokenIssuance = $false }
+    }
 
     $cleanApi = [ordered]@{ oauth2PermissionScopes = @($Snapshot.Application.Oauth2PermissionScopes) }
     # Snapshots saved before the Api property existed only carry the scopes
@@ -281,6 +293,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     $snapshotApplicationProperties = @($Snapshot.Application.PSObject.Properties.Name)
     if ($snapshotApplicationProperties -contains 'GroupMembershipClaims') { $appBody.groupMembershipClaims = $Snapshot.Application.GroupMembershipClaims }
     if ($snapshotApplicationProperties -contains 'OptionalClaims') { $appBody.optionalClaims = $Snapshot.Application.OptionalClaims }
+    if ($snapshotApplicationProperties -contains 'IsFallbackPublicClient') { $appBody.isFallbackPublicClient = $Snapshot.Application.IsFallbackPublicClient }
 
     if ($Snapshot.Application.IdentifierUris -and @($Snapshot.Application.IdentifierUris).Count -gt 0) {
         Write-NCMessage "Source Enterprise Application '$($Snapshot.Application.DisplayName)' has identifierUris ($($Snapshot.Application.IdentifierUris -join ', ')). Identifier URIs are unique per tenant and are never copied to the destination app; set them manually if the destination needs to expose an API." -Level WARNING
@@ -304,6 +317,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
                 Created             = $false
                 OwnersAdded         = 0
                 OwnersSkipped       = 0
+                OwnersFailed        = 0
                 AssignmentsAdded    = 0
                 AssignmentsSkipped  = 0
                 AssignmentsFailed   = 0
@@ -374,6 +388,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
                     Created             = $false
                     OwnersAdded         = 0
                     OwnersSkipped       = 0
+                    OwnersFailed        = 0
                     AssignmentsAdded    = 0
                     AssignmentsSkipped  = 0
                     AssignmentsFailed   = 0
@@ -395,6 +410,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
                 Created             = $false
                 OwnersAdded         = 0
                 OwnersSkipped       = 0
+                OwnersFailed        = 0
                 AssignmentsAdded    = 0
                 AssignmentsSkipped  = 0
                 AssignmentsFailed   = 0
@@ -415,6 +431,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
             Created             = $false
             OwnersAdded         = 0
             OwnersSkipped       = 0
+            OwnersFailed        = 0
             AssignmentsAdded    = 0
             AssignmentsSkipped  = 0
             AssignmentsFailed   = 0
@@ -439,6 +456,10 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     if ($snapshotServicePrincipalProperties -contains 'AccountEnabled') {
         $spWriteBody.accountEnabled = [bool]$Snapshot.ServicePrincipal.AccountEnabled
     }
+    # SAML and password SSO depend on signing certificates and SSO settings this cmdlet doesn't copy
+    if (@('saml', 'password') -contains [string]$Snapshot.ServicePrincipal.PreferredSingleSignOnMode) {
+        Write-NCMessage "Source Enterprise Application '$($Snapshot.Application.DisplayName)' uses $($Snapshot.ServicePrincipal.PreferredSingleSignOnMode) single sign-on, which is not copied (signing certificates and SSO settings included). Configure single sign-on on '$TargetDisplayName' manually." -Level WARNING
+    }
 
     $targetSp = @($spResponse.value) | Select-Object -First 1
     if (-not $targetSp) {
@@ -460,6 +481,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
                 Created             = $false
                 OwnersAdded         = 0
                 OwnersSkipped       = 0
+                OwnersFailed        = 0
                 AssignmentsAdded    = 0
                 AssignmentsSkipped  = 0
                 AssignmentsFailed   = 0
@@ -481,6 +503,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
                 Created             = $false
                 OwnersAdded         = 0
                 OwnersSkipped       = 0
+                OwnersFailed        = 0
                 AssignmentsAdded    = 0
                 AssignmentsSkipped  = 0
                 AssignmentsFailed   = 0
@@ -493,10 +516,12 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     # Owners are only added (see Import-EnterpriseApplication): the destination keeps its own
     $ownersAdded = 0
     $ownersSkipped = 0
+    $ownersFailed = 0
     $syncOwners = {
         param([string]$OwnersPath, [object[]]$Owners, [string]$OwnerKind)
         $added = 0
         $skipped = 0
+        $failed = 0
         if ($Owners -and @($Owners).Count -gt 0) {
             try {
                 $destinationOwners = @(Invoke-NCGraphAllPagesCore -Uri "v1.0/$OwnersPath`?`$select=id")
@@ -525,11 +550,12 @@ function Set-NCEnterpriseApplicationFromSnapshot {
                     }
                     else {
                         Write-NCMessage "Failed to copy $OwnerKind owner '$($owner.DisplayName)' to '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR
+                        $failed++
                     }
                 }
             }
         }
-        [pscustomobject]@{ Added = $added; Skipped = $skipped }
+        [pscustomobject]@{ Added = $added; Skipped = $skipped; Failed = $failed }
     }
 
     $ownerResults = @(
@@ -540,6 +566,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     foreach ($ownerResult in $ownerResults) {
         $ownersAdded += $ownerResult.Added
         $ownersSkipped += $ownerResult.Skipped
+        $ownersFailed += $ownerResult.Failed
     }
 
     $assignmentsAdded = 0
@@ -591,6 +618,7 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         Created             = $created
         OwnersAdded         = $ownersAdded
         OwnersSkipped       = $ownersSkipped
+        OwnersFailed        = $ownersFailed
         AssignmentsAdded    = $assignmentsAdded
         AssignmentsSkipped  = $assignmentsSkipped
         AssignmentsFailed   = $assignmentsFailed
@@ -656,11 +684,13 @@ function Compare-NCEnterpriseApplicationSnapshot {
     & $addIfDifferent 'Application.Api' $ReferenceSnapshot.Application.Api $DifferenceSnapshot.Application.Api
     & $addIfDifferent 'Application.GroupMembershipClaims' $ReferenceSnapshot.Application.GroupMembershipClaims $DifferenceSnapshot.Application.GroupMembershipClaims
     & $addIfDifferent 'Application.OptionalClaims' $ReferenceSnapshot.Application.OptionalClaims $DifferenceSnapshot.Application.OptionalClaims
+    & $addIfDifferent 'Application.IsFallbackPublicClient' $ReferenceSnapshot.Application.IsFallbackPublicClient $DifferenceSnapshot.Application.IsFallbackPublicClient
     & $addIfDifferent 'ServicePrincipal.Tags' $ReferenceSnapshot.ServicePrincipal.Tags $DifferenceSnapshot.ServicePrincipal.Tags
     & $addIfDifferent 'ServicePrincipal.Homepage' $ReferenceSnapshot.ServicePrincipal.Homepage $DifferenceSnapshot.ServicePrincipal.Homepage
     & $addIfDifferent 'ServicePrincipal.LogoUrl' $ReferenceSnapshot.ServicePrincipal.LogoUrl $DifferenceSnapshot.ServicePrincipal.LogoUrl
     & $addIfDifferent 'ServicePrincipal.AppRoleAssignmentRequired' $ReferenceSnapshot.ServicePrincipal.AppRoleAssignmentRequired $DifferenceSnapshot.ServicePrincipal.AppRoleAssignmentRequired
     & $addIfDifferent 'ServicePrincipal.AccountEnabled' $ReferenceSnapshot.ServicePrincipal.AccountEnabled $DifferenceSnapshot.ServicePrincipal.AccountEnabled
+    & $addIfDifferent 'ServicePrincipal.PreferredSingleSignOnMode' $ReferenceSnapshot.ServicePrincipal.PreferredSingleSignOnMode $DifferenceSnapshot.ServicePrincipal.PreferredSingleSignOnMode
     & $addIfDifferent 'ServicePrincipal.Owners' (& $sortedBy $ReferenceSnapshot.ServicePrincipal.Owners 'Id') (& $sortedBy $DifferenceSnapshot.ServicePrincipal.Owners 'Id')
 
     if ($IncludeAppRoleAssignments.IsPresent) {

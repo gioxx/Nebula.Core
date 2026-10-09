@@ -205,6 +205,19 @@ Describe 'Get-NCEnterpriseApplicationSnapshot' {
         Get-NCEnterpriseApplicationSnapshot -ApplicationName 'Contoso Test App' | Should -BeNullOrEmpty
         Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*Service Principal owners*' }
     }
+    It 'captures the fallback public client flag and the SSO mode' {
+        $app | Add-Member -NotePropertyName isFallbackPublicClient -NotePropertyValue $true -Force
+        $sp | Add-Member -NotePropertyName preferredSingleSignOnMode -NotePropertyValue 'saml' -Force
+        try {
+            $snapshot = Get-NCEnterpriseApplicationSnapshot -ApplicationName 'Contoso Test App'
+        }
+        finally {
+            $app.PSObject.Properties.Remove('isFallbackPublicClient'); $sp.PSObject.Properties.Remove('preferredSingleSignOnMode')
+        }
+
+        $snapshot.Application.IsFallbackPublicClient | Should -BeTrue
+        $snapshot.ServicePrincipal.PreferredSingleSignOnMode | Should -Be 'saml'
+    }
     It 'includes App Role Assignments only when requested' {
         $snapshot = Get-NCEnterpriseApplicationSnapshot -ApplicationName 'Contoso Test App' -IncludeAppRoleAssignments
 
@@ -400,6 +413,86 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
         Assert-MockCalled Invoke-MgGraphRequest -Times 1 -Exactly -Scope It -ParameterFilter { $Method -eq 'POST' -and $Uri -eq 'v1.0/servicePrincipals/new-sp-id/owners/$ref' -and $Body -match 'sp-owner-1' }
         $result.OwnersAdded | Should -Be 2
     }
+    It 'restores the fallback public client flag' {
+        $flagSnapshot = $snapshot.PSObject.Copy()
+        $flagSnapshot.Application = $snapshot.Application.PSObject.Copy()
+        $flagSnapshot.Application | Add-Member -NotePropertyName IsFallbackPublicClient -NotePropertyValue $true -Force
+        $script:appPost = $null; $script:spPost = $null; $script:ownerPostFails = $false
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^v1\.0/applications\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/applications') { $script:appPost = $Body | ConvertFrom-Json; return [pscustomobject]@{ id = 'new-app-id'; appId = 'new-client-id'; displayName = 'Target App' } }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/servicePrincipals') { $script:spPost = $Body | ConvertFrom-Json; return [pscustomobject]@{ id = 'new-sp-id'; appId = 'new-client-id' } }
+            if ($Method -eq 'POST' -and $Uri -like 'v1.0/*/owners/$ref') { if ($script:ownerPostFails) { throw 'Request_ResourceNotFound: the object does not exist' } ; return $null }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $null = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $flagSnapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        $script:appPost.isFallbackPublicClient | Should -BeTrue
+    }
+
+    It 'warns that SAML or password SSO is not cloned and does not write the SSO mode' {
+        $ssoSnapshot = $snapshot.PSObject.Copy()
+        $ssoSnapshot.ServicePrincipal = $snapshot.ServicePrincipal.PSObject.Copy()
+        $ssoSnapshot.ServicePrincipal | Add-Member -NotePropertyName PreferredSingleSignOnMode -NotePropertyValue 'saml' -Force
+        $script:appPost = $null; $script:spPost = $null; $script:ownerPostFails = $false
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^v1\.0/applications\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/applications') { $script:appPost = $Body | ConvertFrom-Json; return [pscustomobject]@{ id = 'new-app-id'; appId = 'new-client-id'; displayName = 'Target App' } }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/servicePrincipals') { $script:spPost = $Body | ConvertFrom-Json; return [pscustomobject]@{ id = 'new-sp-id'; appId = 'new-client-id' } }
+            if ($Method -eq 'POST' -and $Uri -like 'v1.0/*/owners/$ref') { if ($script:ownerPostFails) { throw 'Request_ResourceNotFound: the object does not exist' } ; return $null }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $null = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $ssoSnapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        @($script:spPost.PSObject.Properties.Name) | Should -Not -Contain 'preferredSingleSignOnMode'
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'WARNING' -and $Message -like '*saml*not copied*' }
+    }
+
+    It 'sends empty web URLs and implicit grant settings so an update can clear them' {
+        $script:appPost = $null; $script:spPost = $null; $script:ownerPostFails = $false
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^v1\.0/applications\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/applications') { $script:appPost = $Body | ConvertFrom-Json; return [pscustomobject]@{ id = 'new-app-id'; appId = 'new-client-id'; displayName = 'Target App' } }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/servicePrincipals') { $script:spPost = $Body | ConvertFrom-Json; return [pscustomobject]@{ id = 'new-sp-id'; appId = 'new-client-id' } }
+            if ($Method -eq 'POST' -and $Uri -like 'v1.0/*/owners/$ref') { if ($script:ownerPostFails) { throw 'Request_ResourceNotFound: the object does not exist' } ; return $null }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $null = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        $webNames = @($script:appPost.web.PSObject.Properties.Name)
+        $webNames | Should -Contain 'homePageUrl'
+        $webNames | Should -Contain 'logoutUrl'
+        $script:appPost.web.homePageUrl | Should -BeNullOrEmpty
+        $script:appPost.web.implicitGrantSettings.enableAccessTokenIssuance | Should -BeFalse
+        $script:appPost.web.implicitGrantSettings.enableIdTokenIssuance | Should -BeFalse
+    }
+
+    It 'counts owners that could not be added' {
+        $script:appPost = $null; $script:spPost = $null; $script:ownerPostFails = $true
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^v1\.0/applications\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/applications') { $script:appPost = $Body | ConvertFrom-Json; return [pscustomobject]@{ id = 'new-app-id'; appId = 'new-client-id'; displayName = 'Target App' } }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/servicePrincipals') { $script:spPost = $Body | ConvertFrom-Json; return [pscustomobject]@{ id = 'new-sp-id'; appId = 'new-client-id' } }
+            if ($Method -eq 'POST' -and $Uri -like 'v1.0/*/owners/$ref') { if ($script:ownerPostFails) { throw 'Request_ResourceNotFound: the object does not exist' } ; return $null }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $result = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        $result.OwnersFailed | Should -Be 1
+        $result.OwnersAdded | Should -Be 0
+    }
     It 'leaves token claims and the assignment requirement alone for older snapshots' {
         $script:appPost = $null; $script:spPost = $null
         Mock Invoke-MgGraphRequest {
@@ -417,6 +510,7 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
         @($script:appPost.PSObject.Properties.Name) | Should -Not -Contain 'optionalClaims'
         @($script:spPost.PSObject.Properties.Name) | Should -Not -Contain 'appRoleAssignmentRequired'
         @($script:spPost.PSObject.Properties.Name) | Should -Not -Contain 'accountEnabled'
+        @($script:appPost.PSObject.Properties.Name) | Should -Not -Contain 'isFallbackPublicClient'
         Assert-MockCalled Invoke-MgGraphRequest -Times 0 -Scope It -ParameterFilter { $Uri -like 'v1.0/servicePrincipals/*/owners/*' }
     }
     It 'still accepts snapshots saved without api settings' {
@@ -830,6 +924,18 @@ Describe 'Compare-NCEnterpriseApplicationSnapshot' {
 
         @($rows.Property) | Should -Contain 'ServicePrincipal.AccountEnabled'
         @($rows.Property) | Should -Contain 'ServicePrincipal.Owners'
+    }
+    It 'reports a changed fallback public client flag and SSO mode' {
+        $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
+        $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
+        $a.Application | Add-Member -NotePropertyName IsFallbackPublicClient -NotePropertyValue $true
+        $b.Application | Add-Member -NotePropertyName IsFallbackPublicClient -NotePropertyValue $false
+        $a.ServicePrincipal | Add-Member -NotePropertyName PreferredSingleSignOnMode -NotePropertyValue 'saml'
+
+        $rows = @(Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $a -DifferenceSnapshot $b)
+
+        @($rows.Property) | Should -Contain 'Application.IsFallbackPublicClient'
+        @($rows.Property) | Should -Contain 'ServicePrincipal.PreferredSingleSignOnMode'
     }
     It 'ignores the order of owners, App Role Assignments and credentials' {
         $jane = [pscustomobject]@{ Id = 'owner-1'; DisplayName = 'Jane Doe'; UserPrincipalName = 'jane@contoso.com' }
