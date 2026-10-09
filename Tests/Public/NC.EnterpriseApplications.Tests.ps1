@@ -182,6 +182,29 @@ Describe 'Get-NCEnterpriseApplicationSnapshot' {
         $snapshot.Application.OptionalClaims.idToken[0].name | Should -Be 'email'
         $snapshot.ServicePrincipal.AppRoleAssignmentRequired | Should -BeTrue
     }
+    It 'captures the Service Principal owners and enabled state' {
+        $sp | Add-Member -NotePropertyName accountEnabled -NotePropertyValue $false -Force
+        try {
+            $snapshot = Get-NCEnterpriseApplicationSnapshot -ApplicationName 'Contoso Test App'
+        }
+        finally {
+            $sp.PSObject.Properties.Remove('accountEnabled')
+        }
+
+        $snapshot.ServicePrincipal.AccountEnabled | Should -BeFalse
+        $snapshot.ServicePrincipal.Owners[0].Id | Should -Be 'owner-1'
+        Assert-MockCalled Invoke-NCGraphAllPagesCore -Times 1 -Exactly -Scope It -ParameterFilter { $Uri -like 'v1.0/servicePrincipals/sp-id-1/owners*' }
+    }
+
+    It 'returns no snapshot when the Service Principal owners cannot be read' {
+        Mock Invoke-NCGraphAllPagesCore {
+            if ($Uri -match '/servicePrincipals/.+/owners') { throw 'Forbidden' }
+            return @()
+        }
+
+        Get-NCEnterpriseApplicationSnapshot -ApplicationName 'Contoso Test App' | Should -BeNullOrEmpty
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*Service Principal owners*' }
+    }
     It 'includes App Role Assignments only when requested' {
         $snapshot = Get-NCEnterpriseApplicationSnapshot -ApplicationName 'Contoso Test App' -IncludeAppRoleAssignments
 
@@ -349,6 +372,27 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
         $script:spPost.appRoleAssignmentRequired | Should -BeTrue
     }
 
+    It 'restores the Service Principal enabled state and adds its owners' {
+        $spSnapshot = $snapshot.PSObject.Copy()
+        $spSnapshot.ServicePrincipal = $snapshot.ServicePrincipal.PSObject.Copy()
+        $spSnapshot.ServicePrincipal | Add-Member -NotePropertyName AccountEnabled -NotePropertyValue $false -Force
+        $spSnapshot.ServicePrincipal | Add-Member -NotePropertyName Owners -NotePropertyValue @([pscustomobject]@{ Id = 'sp-owner-1'; DisplayName = 'SP Owner'; UserPrincipalName = 'spowner@contoso.com' }) -Force
+        $script:spPost = $null
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^v1\.0/applications\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/applications') { return [pscustomobject]@{ id = 'new-app-id'; appId = 'new-client-id'; displayName = 'Target App' } }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/servicePrincipals') { $script:spPost = $Body | ConvertFrom-Json; return [pscustomobject]@{ id = 'new-sp-id'; appId = 'new-client-id' } }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $result = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $spSnapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        $script:spPost.accountEnabled | Should -BeFalse
+        Assert-MockCalled Invoke-MgGraphRequest -Times 1 -Exactly -Scope It -ParameterFilter { $Method -eq 'POST' -and $Uri -eq 'v1.0/servicePrincipals/new-sp-id/owners/$ref' -and $Body -match 'sp-owner-1' }
+        $result.OwnersAdded | Should -Be 2
+    }
     It 'leaves token claims and the assignment requirement alone for older snapshots' {
         $script:appPost = $null; $script:spPost = $null
         Mock Invoke-MgGraphRequest {
@@ -365,6 +409,8 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
         @($script:appPost.PSObject.Properties.Name) | Should -Not -Contain 'groupMembershipClaims'
         @($script:appPost.PSObject.Properties.Name) | Should -Not -Contain 'optionalClaims'
         @($script:spPost.PSObject.Properties.Name) | Should -Not -Contain 'appRoleAssignmentRequired'
+        @($script:spPost.PSObject.Properties.Name) | Should -Not -Contain 'accountEnabled'
+        Assert-MockCalled Invoke-MgGraphRequest -Times 0 -Scope It -ParameterFilter { $Uri -like 'v1.0/servicePrincipals/*/owners/*' }
     }
     It 'still accepts snapshots saved without api settings' {
         $script:appPost = $null
@@ -746,6 +792,19 @@ Describe 'Compare-NCEnterpriseApplicationSnapshot' {
         @($rows.Property) | Should -Contain 'Application.GroupMembershipClaims'
         @($rows.Property) | Should -Contain 'Application.OptionalClaims'
         @($rows.Property) | Should -Contain 'ServicePrincipal.AppRoleAssignmentRequired'
+    }
+    It 'reports changed Service Principal owners and enabled state' {
+        $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
+        $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
+        $a.ServicePrincipal | Add-Member -NotePropertyName AccountEnabled -NotePropertyValue $true
+        $b.ServicePrincipal | Add-Member -NotePropertyName AccountEnabled -NotePropertyValue $false
+        $a.ServicePrincipal | Add-Member -NotePropertyName Owners -NotePropertyValue @([pscustomobject]@{ Id = 'o1' }, [pscustomobject]@{ Id = 'o2' })
+        $b.ServicePrincipal | Add-Member -NotePropertyName Owners -NotePropertyValue @([pscustomobject]@{ Id = 'o2' }, [pscustomobject]@{ Id = 'o3' })
+
+        $rows = @(Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $a -DifferenceSnapshot $b)
+
+        @($rows.Property) | Should -Contain 'ServicePrincipal.AccountEnabled'
+        @($rows.Property) | Should -Contain 'ServicePrincipal.Owners'
     }
     It 'ignores the order of owners, App Role Assignments and credentials' {
         $jane = [pscustomobject]@{ Id = 'owner-1'; DisplayName = 'Jane Doe'; UserPrincipalName = 'jane@contoso.com' }

@@ -60,7 +60,7 @@ function Get-NCEnterpriseApplicationSnapshot {
     }
 
     try {
-        $spResponse = Invoke-MgGraphRequest -Uri "v1.0/servicePrincipals?`$filter=appId eq '$($app.appId)'&`$select=id,appId,displayName,tags,homepage,logoUrl,appRoleAssignmentRequired" -Method GET -ErrorAction Stop
+        $spResponse = Invoke-MgGraphRequest -Uri "v1.0/servicePrincipals?`$filter=appId eq '$($app.appId)'&`$select=id,appId,displayName,tags,homepage,logoUrl,appRoleAssignmentRequired,accountEnabled" -Method GET -ErrorAction Stop
     }
     catch {
         Write-NCMessage "Unable to read Service Principal for '$($app.displayName)': $($_.Exception.Message)" -Level ERROR
@@ -79,6 +79,15 @@ function Get-NCEnterpriseApplicationSnapshot {
     catch {
         # An incomplete owner list would make the snapshot (and any copy from it) silently drop owners
         Write-NCMessage "Unable to read owners for '$($app.displayName)', snapshot not created: $($_.Exception.Message)" -Level ERROR
+        return
+    }
+
+    # Service Principal owners are a separate relationship from the application's owners
+    try {
+        $servicePrincipalOwners = @(Invoke-NCGraphAllPagesCore -Uri "v1.0/servicePrincipals/$($sp.id)/owners?`$select=id,displayName,userPrincipalName")
+    }
+    catch {
+        Write-NCMessage "Unable to read Service Principal owners for '$($app.displayName)', snapshot not created: $($_.Exception.Message)" -Level ERROR
         return
     }
 
@@ -134,6 +143,15 @@ function Get-NCEnterpriseApplicationSnapshot {
             LogoUrl     = $sp.logoUrl
             # When true, only users and groups with an App Role Assignment can sign in
             AppRoleAssignmentRequired = [bool]$sp.appRoleAssignmentRequired
+            # A disabled Service Principal blocks sign-in for the app; Graph omits it when it is the default (true)
+            AccountEnabled            = if ($null -eq $sp.accountEnabled) { $true } else { [bool]$sp.accountEnabled }
+            Owners                    = @($servicePrincipalOwners | ForEach-Object {
+                    [pscustomobject][ordered]@{
+                        Id                = $_.id
+                        DisplayName       = $_.displayName
+                        UserPrincipalName = $_.userPrincipalName
+                    }
+                })
         }
         AppRoleAssignments  = @($appRoleAssignments | ForEach-Object {
                 [pscustomobject][ordered]@{
@@ -414,8 +432,12 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         tags     = @($Snapshot.ServicePrincipal.Tags)
         homepage = if ($Snapshot.ServicePrincipal.Homepage) { $Snapshot.ServicePrincipal.Homepage } else { $null }
     }
-    if (@($Snapshot.ServicePrincipal.PSObject.Properties.Name) -contains 'AppRoleAssignmentRequired') {
+    $snapshotServicePrincipalProperties = @($Snapshot.ServicePrincipal.PSObject.Properties.Name)
+    if ($snapshotServicePrincipalProperties -contains 'AppRoleAssignmentRequired') {
         $spWriteBody.appRoleAssignmentRequired = [bool]$Snapshot.ServicePrincipal.AppRoleAssignmentRequired
+    }
+    if ($snapshotServicePrincipalProperties -contains 'AccountEnabled') {
+        $spWriteBody.accountEnabled = [bool]$Snapshot.ServicePrincipal.AccountEnabled
     }
 
     $targetSp = @($spResponse.value) | Select-Object -First 1
@@ -455,39 +477,56 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         }
     }
 
+    # Owners are only added (see Import-EnterpriseApplication): the destination keeps its own
     $ownersAdded = 0
     $ownersSkipped = 0
-    if ($Snapshot.Application.Owners -and @($Snapshot.Application.Owners).Count -gt 0) {
-        try {
-            $destinationOwners = @(Invoke-NCGraphAllPagesCore -Uri "v1.0/applications/$($targetApp.id)/owners?`$select=id")
-        }
-        catch {
-            Write-NCMessage "Unable to read existing owners for '$TargetDisplayName': $($_.Exception.Message)" -Level WARNING
-            $destinationOwners = @()
-        }
-        $destinationOwnerIds = @($destinationOwners | ForEach-Object { [string]$_.id })
-
-        foreach ($owner in @($Snapshot.Application.Owners)) {
-            if ($destinationOwnerIds -contains $owner.Id) {
-                $ownersSkipped++
-                continue
-            }
-
+    $syncOwners = {
+        param([string]$OwnersPath, [object[]]$Owners, [string]$OwnerKind)
+        $added = 0
+        $skipped = 0
+        if ($Owners -and @($Owners).Count -gt 0) {
             try {
-                $body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $owner.Id) } | ConvertTo-Json -Depth 3
-                Invoke-MgGraphRequest -Uri "v1.0/applications/$($targetApp.id)/owners/`$ref" -Method POST -Body $body -ContentType 'application/json' -ErrorAction Stop | Out-Null
-                $ownersAdded++
-                Write-NCMessage "Copied owner '$($owner.DisplayName)' to '$TargetDisplayName'." -Level SUCCESS
+                $destinationOwners = @(Invoke-NCGraphAllPagesCore -Uri "v1.0/$OwnersPath`?`$select=id")
             }
             catch {
-                if ($_.Exception.Message -match 'already exist' -or $_.Exception.Message -match 'exists') {
-                    $ownersSkipped++
+                Write-NCMessage "Unable to read existing $OwnerKind owners for '$TargetDisplayName': $($_.Exception.Message)" -Level WARNING
+                $destinationOwners = @()
+            }
+            $destinationOwnerIds = @($destinationOwners | ForEach-Object { [string]$_.id })
+
+            foreach ($owner in @($Owners)) {
+                if ($destinationOwnerIds -contains $owner.Id) {
+                    $skipped++
+                    continue
                 }
-                else {
-                    Write-NCMessage "Failed to copy owner '$($owner.DisplayName)' to '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR
+
+                try {
+                    $body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $owner.Id) } | ConvertTo-Json -Depth 3
+                    Invoke-MgGraphRequest -Uri "v1.0/$OwnersPath/`$ref" -Method POST -Body $body -ContentType 'application/json' -ErrorAction Stop | Out-Null
+                    $added++
+                    Write-NCMessage "Copied $OwnerKind owner '$($owner.DisplayName)' to '$TargetDisplayName'." -Level SUCCESS
+                }
+                catch {
+                    if ($_.Exception.Message -match 'already exist' -or $_.Exception.Message -match 'exists') {
+                        $skipped++
+                    }
+                    else {
+                        Write-NCMessage "Failed to copy $OwnerKind owner '$($owner.DisplayName)' to '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR
+                    }
                 }
             }
         }
+        [pscustomobject]@{ Added = $added; Skipped = $skipped }
+    }
+
+    $ownerResults = @(
+        & $syncOwners "applications/$($targetApp.id)/owners" @($Snapshot.Application.Owners) 'application'
+        # Snapshots saved before Service Principal owners were captured carry no Owners there
+        & $syncOwners "servicePrincipals/$($targetSp.id)/owners" @($Snapshot.ServicePrincipal.Owners) 'Service Principal'
+    )
+    foreach ($ownerResult in $ownerResults) {
+        $ownersAdded += $ownerResult.Added
+        $ownersSkipped += $ownerResult.Skipped
     }
 
     $assignmentsAdded = 0
@@ -608,6 +647,8 @@ function Compare-NCEnterpriseApplicationSnapshot {
     & $addIfDifferent 'ServicePrincipal.Homepage' $ReferenceSnapshot.ServicePrincipal.Homepage $DifferenceSnapshot.ServicePrincipal.Homepage
     & $addIfDifferent 'ServicePrincipal.LogoUrl' $ReferenceSnapshot.ServicePrincipal.LogoUrl $DifferenceSnapshot.ServicePrincipal.LogoUrl
     & $addIfDifferent 'ServicePrincipal.AppRoleAssignmentRequired' $ReferenceSnapshot.ServicePrincipal.AppRoleAssignmentRequired $DifferenceSnapshot.ServicePrincipal.AppRoleAssignmentRequired
+    & $addIfDifferent 'ServicePrincipal.AccountEnabled' $ReferenceSnapshot.ServicePrincipal.AccountEnabled $DifferenceSnapshot.ServicePrincipal.AccountEnabled
+    & $addIfDifferent 'ServicePrincipal.Owners' (& $sortedBy $ReferenceSnapshot.ServicePrincipal.Owners 'Id') (& $sortedBy $DifferenceSnapshot.ServicePrincipal.Owners 'Id')
 
     if ($IncludeAppRoleAssignments.IsPresent) {
         & $addIfDifferent 'AppRoleAssignments' (& $sortedBy $ReferenceSnapshot.AppRoleAssignments 'PrincipalId', 'AppRoleId') (& $sortedBy $DifferenceSnapshot.AppRoleAssignments 'PrincipalId', 'AppRoleId')

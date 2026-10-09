@@ -91,6 +91,14 @@ Describe 'Connect-Nebula' {
         Should -Invoke Test-MgGraphConnection -Times 1 -Exactly -Scope It -ParameterFilter { $LoginHint -eq 'workstation@contoso.com' }
     }
 
+    It 'keeps the tenant of an active Graph session when no tenant is given' {
+        Mock Get-MgContext { [pscustomobject]@{ Account = 'admin@contoso.com'; TenantId = 'tenant-guest' } }
+        Mock Test-MgGraphConnection { $true }
+
+        $null = Connect-Nebula
+
+        Should -Invoke Test-MgGraphConnection -Times 1 -Exactly -Scope It -ParameterFilter { $TenantId -eq 'tenant-guest' }
+    }
     It 'prefers an explicit -GraphLoginHint over the active Graph account' {
         Mock Get-MgContext { [pscustomobject]@{ Account = 'admin@contoso.com' } }
         Mock Test-MgGraphConnection { $true }
@@ -140,6 +148,13 @@ Describe 'Update-NebulaConnections' {
         Should -Invoke Test-MgGraphConnection -Times 1 -Exactly -Scope It -ParameterFilter { $ForceReconnect }
     }
 
+    It 'repairs Graph against the tenant of the current session' {
+        Mock Get-MgContext { [pscustomobject]@{ Account = 'admin@contoso.com'; Scopes = @('User.Read.All'); TenantId = 'tenant-guest' } }
+
+        Update-NebulaConnections
+
+        Should -Invoke Test-MgGraphConnection -Times 1 -Exactly -Scope It -ParameterFilter { $TenantId -eq 'tenant-guest' }
+    }
     It 'does not force a Graph reconnect when the session is healthy' {
         Mock Get-MgContext { [pscustomobject]@{ Account = 'admin@contoso.com'; Scopes = @('User.Read.All') } }
         Mock Get-NebulaConnections { [pscustomobject]@{ MicrosoftGraphConnected = $true; MicrosoftGraphHealthy = $true; ExchangeOnlineConnected = $true; ExchangeOnlineHealthy = $true } }

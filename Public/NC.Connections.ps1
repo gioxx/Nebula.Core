@@ -196,22 +196,32 @@ function Connect-Nebula {
     }
 
     if (-not $SkipGraph) {
+        $activeGraphContext = $null
+        try { $activeGraphContext = Get-MgContext -ErrorAction Stop } catch {}
+
         $graphLoginHint = if (-not [string]::IsNullOrWhiteSpace($GraphLoginHint)) {
             $GraphLoginHint
         }
         elseif (-not [string]::IsNullOrWhiteSpace($UserPrincipalName)) {
             $UserPrincipalName
         }
-        else {
+        elseif ($activeGraphContext -and -not [string]::IsNullOrWhiteSpace($activeGraphContext.Account)) {
             # Keep an active Graph session's account instead of switching to the workstation identity
-            $activeGraphAccount = $null
-            try { $activeGraphAccount = (Get-MgContext -ErrorAction Stop).Account } catch {}
-            if (-not [string]::IsNullOrWhiteSpace($activeGraphAccount)) { $activeGraphAccount } else { Find-UserConnected }
+            $activeGraphContext.Account
+        }
+        else {
+            Find-UserConnected
+        }
+
+        # Keep the active session's tenant (e.g. a guest or delegated tenant) when the same account stays connected
+        $graphTenant = $GraphTenantId
+        if ([string]::IsNullOrWhiteSpace($graphTenant) -and $activeGraphContext -and $activeGraphContext.Account -eq $graphLoginHint) {
+            $graphTenant = $activeGraphContext.TenantId
         }
 
         $graphConnected = Test-MgGraphConnection `
             -Scopes $GraphScopes `
-            -TenantId $GraphTenantId `
+            -TenantId $graphTenant `
             -UseDeviceCode:$GraphDeviceCode.IsPresent `
             -AutoInstall:$AutoInstall.IsPresent `
             -ForceReconnect:$ForceReconnect.IsPresent `
@@ -438,10 +448,13 @@ function Update-NebulaConnections {
 
     $graphScopes = @()
     $graphAccount = $null
+    $graphTenant = $null
     try {
         $graphContext = Get-MgContext -ErrorAction Stop
         $graphScopes = @($graphContext.Scopes | Where-Object { $_ })
         $graphAccount = $graphContext.Account
+        # A reconnect without the tenant would sign the account in to its home tenant
+        $graphTenant = $graphContext.TenantId
     }
     catch {}
     if (-not $graphScopes -or $graphScopes.Count -eq 0) {
@@ -455,7 +468,7 @@ function Update-NebulaConnections {
     # Graph before Exchange Online, as in Connect-Nebula, to avoid the cross-module authentication conflict
     $graphConnected = $false
     try {
-        $graphConnected = [bool](Test-MgGraphConnection -Scopes $graphScopes -EnsureExchangeOnline:$false -LoginHint $graphAccount -ForceReconnect:$forceGraphReconnect)
+        $graphConnected = [bool](Test-MgGraphConnection -Scopes $graphScopes -TenantId $graphTenant -EnsureExchangeOnline:$false -LoginHint $graphAccount -ForceReconnect:$forceGraphReconnect)
     }
     catch {
         Write-NCMessage "Microsoft Graph repair attempt failed. $($_.Exception.Message)" -Level WARNING
