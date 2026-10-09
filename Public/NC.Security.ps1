@@ -159,6 +159,223 @@ function Disable-UserDevices {
     }
 }
 
+function Get-UserDevices {
+    <#
+    .SYNOPSIS
+        Lists the devices of one or more users, from Entra ID and Intune.
+    .DESCRIPTION
+        Resolves each user and reads, in Microsoft Graph batches, the devices the user registered or owns
+        in Entra ID and the devices managed for the user in Intune. Entra and Intune records of the same
+        device (matched on the Azure AD device ID) become one row; devices known to only one source are
+        listed too, and Source says which. If any of the three reads fails for a user, that user is
+        reported as an error and returns no rows.
+    .PARAMETER UserPrincipalName
+        One or more users (UPN, mail, object ID or short identifier). Accepts pipeline input.
+    .PARAMETER GridView
+        Show the rows in a grid instead of returning them.
+    .EXAMPLE
+        Get-UserDevices -UserPrincipalName user1@contoso.com
+    .EXAMPLE
+        'user1@contoso.com', 'user2@contoso.com' | Get-UserDevices | Export-Csv .\devices.csv -NoTypeInformation
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('User', 'UPN', 'Identity')]
+        [string[]]$UserPrincipalName,
+        [switch]$GridView
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $targets = [System.Collections.Generic.List[string]]::new()
+    }
+
+    process {
+        foreach ($upn in $UserPrincipalName) {
+            if (-not [string]::IsNullOrWhiteSpace($upn)) {
+                $targets.Add($upn.Trim()) | Out-Null
+            }
+        }
+    }
+
+    end {
+        try {
+            if ($targets.Count -eq 0) {
+                Write-NCMessage "No user principal names provided." -Level WARNING
+                return
+            }
+
+            $scopes = @('User.Read.All', 'Directory.Read.All', 'DeviceManagementManagedDevices.Read.All')
+            if (-not (Test-MgGraphConnection -Scopes $scopes -EnsureExchangeOnline:$false)) {
+                Add-EmptyLine
+                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+                return
+            }
+
+            # registeredDevices/ownedDevices return directoryObject: the cast makes device properties selectable
+            $entraSelect = 'id,deviceId,displayName,operatingSystem,operatingSystemVersion,manufacturer,model,trustType,accountEnabled,approximateLastSignInDateTime,isCompliant,isManaged'
+            $intuneSelect = 'id,deviceName,manufacturer,model,serialNumber,operatingSystem,osVersion,complianceState,managedDeviceOwnerType,lastSyncDateTime,azureADDeviceId'
+            $joinTypes = @{ AzureAd = 'Entra joined'; ServerAd = 'Hybrid joined'; Workplace = 'Registered' }
+            $emptyDeviceId = '00000000-0000-0000-0000-000000000000'
+
+            $firstValue = {
+                param($Preferred, $Fallback)
+                if (-not [string]::IsNullOrWhiteSpace([string]$Preferred)) { $Preferred } else { $Fallback }
+            }
+            $newRow = {
+                param($User, $Entra, $Intune, [string]$Relationship)
+                $compliance = if ($Intune -and $Intune.complianceState) {
+                    [string]$Intune.complianceState
+                }
+                elseif ($Entra -and $null -ne $Entra.isCompliant) {
+                    if ($Entra.isCompliant) { 'compliant' } else { 'noncompliant' }
+                }
+                else { $null }
+                $joinType = if ($Entra -and $Entra.trustType) {
+                    if ($joinTypes.ContainsKey([string]$Entra.trustType)) { $joinTypes[[string]$Entra.trustType] } else { [string]$Entra.trustType }
+                }
+                else { $null }
+                $source = if ($Entra -and $Intune) { 'Entra+Intune' } elseif ($Entra) { 'Entra' } else { 'Intune' }
+
+                [pscustomobject]@{
+                    PSTypeName      = 'Nebula.Core.UserDevice'
+                    User            = [string]$User.userPrincipalName
+                    DeviceName      = & $firstValue $Entra.displayName $Intune.deviceName
+                    Manufacturer    = & $firstValue $Intune.manufacturer $Entra.manufacturer
+                    Model           = & $firstValue $Intune.model $Entra.model
+                    OperatingSystem = & $firstValue $Intune.operatingSystem $Entra.operatingSystem
+                    OSVersion       = & $firstValue $Intune.osVersion $Entra.operatingSystemVersion
+                    SerialNumber    = $Intune.serialNumber
+                    JoinType        = $joinType
+                    Relationship    = if ($Relationship) { $Relationship } else { $null }
+                    Ownership       = $Intune.managedDeviceOwnerType
+                    Enabled         = $Entra.accountEnabled
+                    Compliance      = $compliance
+                    LastSignIn      = if ($Entra -and $Entra.approximateLastSignInDateTime) { Format-NCDateTime -Value $Entra.approximateLastSignInDateTime -AsLocalTime } else { $null }
+                    LastSync        = if ($Intune -and $Intune.lastSyncDateTime) { Format-NCDateTime -Value $Intune.lastSyncDateTime -AsLocalTime } else { $null }
+                    Source          = $source
+                    EntraObjectId   = $Entra.id
+                    EntraDeviceId   = $Entra.deviceId
+                    IntuneDeviceId  = $Intune.id
+                }
+            }
+
+            $results = [System.Collections.Generic.List[object]]::new()
+            $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $queue = @(foreach ($entry in $targets) { if ($dedup.Add($entry)) { $entry } })
+
+            Write-NCGraphBatchNotice -Count ($queue.Count) -Noun 'user(s)'
+
+            for ($offset = 0; $offset -lt $queue.Count; $offset += 20) {
+                $chunk = @($queue[$offset..([Math]::Min($offset + 20, $queue.Count) - 1)])
+                $percentage = Get-NCProgressPercent -Current $offset -Total $queue.Count
+                Write-Progress -Activity "Reading user devices" -Status "$offset of $($queue.Count) - $percentage%" -PercentComplete $percentage
+
+                # (a) Resolve the whole chunk.
+                $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                $resolvedUsers = Resolve-NCGraphUserBatch -Identifier $chunk -Property @('id', 'userPrincipalName', 'displayName') -FailedIdentifier $failedUsers
+
+                $users = [System.Collections.Generic.List[object]]::new()
+                foreach ($upn in $chunk) {
+                    $user = $resolvedUsers[$upn.Trim()]
+                    if (-not $user -or -not $user.id) {
+                        if (-not $failedUsers.Contains($upn.Trim())) {
+                            Write-NCMessage "Can't find Azure AD account for user $upn." -Level ERROR
+                        }
+                        continue
+                    }
+                    $users.Add($user) | Out-Null
+                }
+                if ($users.Count -eq 0) { continue }
+
+                # (b) Read registered, owned and managed devices of every resolved user.
+                $requests = [System.Collections.Generic.List[hashtable]]::new()
+                for ($i = 0; $i -lt $users.Count; $i++) {
+                    $userSegment = [uri]::EscapeDataString([string]$users[$i].id)
+                    $requests.Add(@{ Id = "r$i"; Method = 'GET'; Url = "/users/$userSegment/registeredDevices/microsoft.graph.device?`$select=$entraSelect" })
+                    $requests.Add(@{ Id = "o$i"; Method = 'GET'; Url = "/users/$userSegment/ownedDevices/microsoft.graph.device?`$select=$entraSelect" })
+                    $requests.Add(@{ Id = "m$i"; Method = 'GET'; Url = "/users/$userSegment/managedDevices?`$select=$intuneSelect" })
+                }
+                $responsesById = @{}
+                foreach ($response in @(Invoke-NCGraphBatchCollection -Requests @($requests) -Activity 'Reading user devices')) {
+                    $responsesById[[string]$response.Id] = $response
+                }
+
+                # (c) Merge per user, in input order.
+                for ($i = 0; $i -lt $users.Count; $i++) {
+                    $user = $users[$i]
+                    $sources = [ordered]@{ Registered = $responsesById["r$i"]; Owner = $responsesById["o$i"]; Intune = $responsesById["m$i"] }
+                    $failures = @(foreach ($name in $sources.Keys) {
+                            if (-not $sources[$name] -or -not $sources[$name].Success) {
+                                $reason = if ($sources[$name]) { $sources[$name].ErrorMessage } else { 'no response' }
+                                "$name devices: $reason"
+                            }
+                        })
+                    if ($failures.Count -gt 0) {
+                        Write-NCMessage "Unable to read the devices of $($user.userPrincipalName). $($failures -join '; ')" -Level ERROR
+                        continue
+                    }
+
+                    $entraDevices = [ordered]@{}
+                    foreach ($relationship in @('Registered', 'Owner')) {
+                        foreach ($device in @($sources[$relationship].Items)) {
+                            if (-not $device -or -not $device.id) { continue }
+                            $key = [string]$device.id
+                            if (-not $entraDevices.Contains($key)) {
+                                $entraDevices[$key] = [pscustomobject]@{ Device = $device; Relationships = [System.Collections.Generic.List[string]]::new() }
+                            }
+                            $entraDevices[$key].Relationships.Add($relationship) | Out-Null
+                        }
+                    }
+
+                    $intuneDevices = @($sources['Intune'].Items | Where-Object { $_ -and $_.id })
+                    $intuneByEntraDeviceId = @{}
+                    foreach ($managed in $intuneDevices) {
+                        $aadId = [string]$managed.azureADDeviceId
+                        if (-not [string]::IsNullOrWhiteSpace($aadId) -and $aadId -ne $emptyDeviceId) {
+                            $intuneByEntraDeviceId[$aadId.ToLowerInvariant()] = $managed
+                        }
+                    }
+
+                    $userRows = [System.Collections.Generic.List[object]]::new()
+                    $matchedIntuneIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                    foreach ($entry in $entraDevices.Values) {
+                        $managed = $null
+                        if ($entry.Device.deviceId) {
+                            $managed = $intuneByEntraDeviceId[([string]$entry.Device.deviceId).ToLowerInvariant()]
+                        }
+                        if ($managed) { $matchedIntuneIds.Add([string]$managed.id) | Out-Null }
+                        $userRows.Add((& $newRow $user $entry.Device $managed ($entry.Relationships -join ', '))) | Out-Null
+                    }
+                    foreach ($managed in $intuneDevices) {
+                        if (-not $matchedIntuneIds.Contains([string]$managed.id)) {
+                            $userRows.Add((& $newRow $user $null $managed $null)) | Out-Null
+                        }
+                    }
+
+                    if ($userRows.Count -eq 0) {
+                        Write-NCMessage "No devices found for $($user.userPrincipalName)." -Level WARNING
+                        continue
+                    }
+                    foreach ($row in @($userRows | Sort-Object DeviceName)) { $results.Add($row) | Out-Null }
+                }
+            }
+
+            if ($GridView.IsPresent) {
+                $results | Out-NCGridView -Title 'User Devices'
+            }
+            else {
+                $results
+            }
+        }
+        finally {
+            Write-Progress -Activity "Reading user devices" -Completed
+            Restore-ProgressAndInfoPreferences
+        }
+    }
+}
+
 function Disable-UserSignIn {
     <#
     .SYNOPSIS

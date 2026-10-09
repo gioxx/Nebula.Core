@@ -68,6 +68,7 @@
         'Get-RoleGroupsMembers',
         'Get-RoomDetails',
         'Get-TenantMsolAccountSku',
+        'Get-UserDevices',
         'Get-UserGroups',
         'Get-UserLastSeen',
         'Get-UserMsolAccountSku',
