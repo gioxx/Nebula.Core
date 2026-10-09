@@ -46,7 +46,9 @@ function Get-NormalizedLicenseKey {
     .SYNOPSIS
         Normalizes SKU identifiers for dictionary lookups.
     .DESCRIPTION
-        Returns $null for blank strings; otherwise uppercases and replaces whitespace, dots and dashes with underscores.
+        Returns $null for blank strings; otherwise strips invisible Unicode format characters (e.g. zero-width
+        spaces occasionally present in SkuPartNumber values returned by Graph for some tenants/SKUs), then
+        uppercases and replaces whitespace, dots and dashes with underscores.
     .PARAMETER Value
         SKU string to normalize.
     #>
@@ -57,7 +59,12 @@ function Get-NormalizedLicenseKey {
         return $null
     }
 
-    return (($Value -replace '[-\.\s]', '_').ToUpperInvariant())
+    $clean = $Value -replace '\p{Cf}', ''
+    if ([string]::IsNullOrWhiteSpace($clean)) {
+        return $null
+    }
+
+    return (($clean -replace '[-\.\s]', '_').ToUpperInvariant())
 }
 
 function New-LicenseLookup {
@@ -147,6 +154,9 @@ function Get-LicenseSourceData {
     $tryParseUtc = {
         param($value)
         if (-not $value) { return $null }
+        if ($value -is [DateTime]) {
+            return $value.ToUniversalTime()
+        }
         try {
             return [DateTime]::ParseExact(
                 [string]$value,
@@ -244,7 +254,19 @@ function Get-LicenseSourceData {
             $currentCommitUtc = $remoteCommitUtc
         }
         catch {
-            throw "Downloading license file failed after $MaxAttempts attempts."
+            if (Test-Path -LiteralPath $cacheFile) {
+                try {
+                    $licenseItems = Get-Content -LiteralPath $cacheFile -Raw | ConvertFrom-Json
+                    $source = 'Cache (stale)'
+                    Write-NCMessage "Downloading license file ($CacheFileName) failed after $MaxAttempts attempts. Falling back to stale cache from $((Get-Item -LiteralPath $cacheFile).LastWriteTimeUtc.ToString('o'))." -Level WARNING
+                }
+                catch {
+                    throw "Downloading license file failed after $MaxAttempts attempts, and cached copy ($CacheFileName) could not be read."
+                }
+            }
+            else {
+                throw "Downloading license file failed after $MaxAttempts attempts."
+            }
         }
     }
 
@@ -338,10 +360,10 @@ function Get-LicenseCatalog {
     }
 
     if ($IncludeMetadata.IsPresent -and $primaryData.LastCommitUtc) {
-        Write-Verbose "License catalog last updated: $($primaryData.LastCommitUtc.ToLocalTime().ToString($NCVars.DateTimeString_Full)) (source: $primaryData.Source)"
+        Write-Verbose "License catalog last updated: $((Format-NCDateTime -Value $primaryData.LastCommitUtc -AsLocalTime)) (source: $primaryData.Source)"
     }
     if ($IncludeMetadata.IsPresent -and $customData -and $customData.LastCommitUtc) {
-        Write-Verbose "Custom license catalog last updated: $($customData.LastCommitUtc.ToLocalTime().ToString($NCVars.DateTimeString_Full)) (source: $customData.Source)"
+        Write-Verbose "Custom license catalog last updated: $((Format-NCDateTime -Value $customData.LastCommitUtc -AsLocalTime)) (source: $customData.Source)"
     }
 
     return [pscustomobject]@{

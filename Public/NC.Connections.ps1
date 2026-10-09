@@ -54,6 +54,12 @@ function Connect-EOL {
             ShowBanner            = $false
             SkipLoadingCmdletHelp = $true
         }
+
+        # Hide Connect-ExchangeOnline's cosmetic "WAM is enabled by default" notice unless the
+        # caller wants verbose diagnostics (e.g. while investigating WAM/broker issues).
+        if ($VerbosePreference -eq 'SilentlyContinue') {
+            $baseConnectParams.WarningAction = 'SilentlyContinue'
+        }
     }
 
     process {
@@ -72,22 +78,38 @@ function Connect-EOL {
             $connectParams.DelegatedOrganization = $DelegatedOrganization
         }
 
+        # -DisableWAM/-Device only exist on ExchangeOnlineManagement 3.7.2+ (WAM-by-default releases).
+        # Older, pinned installs don't expose them; passing them anyway would throw a parameter-binding error.
+        $exoCmd = Get-Command -Name Connect-ExchangeOnline -Module ExchangeOnlineManagement -ErrorAction SilentlyContinue
+        $supportsDisableWAM = $exoCmd -and $exoCmd.Parameters.ContainsKey('DisableWAM')
+        $supportsDevice = $exoCmd -and $exoCmd.Parameters.ContainsKey('Device')
+
         if ($DisableWAM.IsPresent) {
-            $connectParams.DisableWAM = $true
+            if ($supportsDisableWAM) {
+                $connectParams.DisableWAM = $true
+            }
+            else {
+                Write-Verbose "-DisableWAM requested but the installed ExchangeOnlineManagement version does not support it (pre-3.7.2, no WAM by default). Ignoring."
+            }
         }
 
         if ($Device.IsPresent) {
-            $connectParams.Device = $true
+            if ($supportsDevice) {
+                $connectParams.Device = $true
+            }
+            else {
+                Write-NCMessage "-Device requested but the installed ExchangeOnlineManagement version does not support it (pre-3.7.2). Falling back to the standard interactive sign-in." -Level WARNING
+            }
         }
 
-        $authMode = if ($Device.IsPresent) {
+        $authMode = if ($Device.IsPresent -and $supportsDevice) {
             'device code'
         }
-        elseif ($DisableWAM.IsPresent) {
+        elseif ($DisableWAM.IsPresent -and $supportsDisableWAM) {
             'interactive without WAM'
         }
         else {
-            'interactive (WAM)'
+            'interactive'
         }
 
         Write-NCMessage "Connecting to Exchange Online as $UserPrincipalName using $authMode ..." -Level INFO
@@ -96,7 +118,7 @@ function Connect-EOL {
             $session = Connect-ExchangeOnline @connectParams
         }
         catch {
-            $shouldRetryWithoutWam = (-not $DisableWAM.IsPresent) -and (-not $Device.IsPresent) -and (-not $NoWamFallback.IsPresent)
+            $shouldRetryWithoutWam = $supportsDisableWAM -and (-not $DisableWAM.IsPresent) -and (-not $Device.IsPresent) -and (-not $NoWamFallback.IsPresent)
             $exceptionText = $_ | Out-String
 
             if ($shouldRetryWithoutWam -and $exceptionText -match '(?i)(RuntimeBroker|Web Account Manager|\bWAM\b|Error Acquiring Token|NullReferenceException)') {
@@ -121,7 +143,9 @@ function Connect-Nebula {
         Entry point to establish both Exchange Online and Microsoft Graph sessions.
     .DESCRIPTION
         Uses the private Test-* helpers to ensure Exchange Online and Microsoft Graph are connected,
-        optionally forcing reconnects, installing modules, or skipping the Graph portion.
+        connecting Microsoft Graph first so its authentication dependencies are loaded before
+        Exchange Online and using a WAM-disabled EXO sign-in for the combined flow. It can also
+        force reconnects, install modules, or skip Graph.
     .PARAMETER UserPrincipalName
         Optional explicit UPN for the Exchange Online connection.
     .PARAMETER GraphScopes
@@ -136,6 +160,9 @@ function Connect-Nebula {
         Force reconnect (skip health checks) for both services.
     .PARAMETER SkipGraph
         Only establish Exchange Online; skip Microsoft Graph.
+    .PARAMETER GraphLoginHint
+        UPN passed as -LoginHint to Connect-MgGraph, helping the WAM broker resolve the target
+        account without repeatedly prompting. Defaults to UserPrincipalName when not specified.
     #>
     [CmdletBinding()]
     param(
@@ -145,7 +172,8 @@ function Connect-Nebula {
         [switch]$GraphDeviceCode,
         [switch]$AutoInstall,
         [switch]$ForceReconnect,
-        [switch]$SkipGraph
+        [switch]$SkipGraph,
+        [string]$GraphLoginHint
     )
 
     Write-NCMessage "Welcome to Nebula! Connecting, please wait ..." -Level INFO
@@ -167,9 +195,48 @@ function Connect-Nebula {
         Write-NCMessage "Update check failed. $($_.Exception.Message)" -Level WARNING
     }
 
+    if (-not $SkipGraph) {
+        $activeGraphContext = $null
+        try { $activeGraphContext = Get-MgContext -ErrorAction Stop } catch {}
+
+        $graphLoginHint = if (-not [string]::IsNullOrWhiteSpace($GraphLoginHint)) {
+            $GraphLoginHint
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($UserPrincipalName)) {
+            $UserPrincipalName
+        }
+        elseif ($activeGraphContext -and -not [string]::IsNullOrWhiteSpace($activeGraphContext.Account)) {
+            # Keep an active Graph session's account instead of switching to the workstation identity
+            $activeGraphContext.Account
+        }
+        else {
+            Find-UserConnected
+        }
+
+        # Keep the active session's tenant (e.g. a guest or delegated tenant) when the same account stays connected
+        $graphTenant = $GraphTenantId
+        if ([string]::IsNullOrWhiteSpace($graphTenant) -and $activeGraphContext -and $activeGraphContext.Account -eq $graphLoginHint) {
+            $graphTenant = $activeGraphContext.TenantId
+        }
+
+        $graphConnected = Test-MgGraphConnection `
+            -Scopes $GraphScopes `
+            -TenantId $graphTenant `
+            -UseDeviceCode:$GraphDeviceCode.IsPresent `
+            -AutoInstall:$AutoInstall.IsPresent `
+            -ForceReconnect:$ForceReconnect.IsPresent `
+            -EnsureExchangeOnline:$false `
+            -LoginHint $graphLoginHint
+
+        if (-not $graphConnected) {
+            throw "Failed to establish Microsoft Graph session."
+        }
+    }
+
     $exoConnected = Test-EOLConnection -UserPrincipalName $UserPrincipalName `
         -AutoInstall:$AutoInstall.IsPresent `
-        -ForceReconnect:$ForceReconnect.IsPresent
+        -ForceReconnect:$ForceReconnect.IsPresent `
+        -DisableWAM:$(-not $SkipGraph)
 
     if (-not $exoConnected) {
         throw "Failed to establish Exchange Online session."
@@ -180,18 +247,6 @@ function Connect-Nebula {
             ExchangeOnline = $true
             MicrosoftGraph = $false
         }
-    }
-
-    $graphConnected = Test-MgGraphConnection `
-        -Scopes $GraphScopes `
-        -TenantId $GraphTenantId `
-        -UseDeviceCode:$GraphDeviceCode.IsPresent `
-        -AutoInstall:$AutoInstall.IsPresent `
-        -ForceReconnect:$ForceReconnect.IsPresent `
-        -EnsureExchangeOnline:$false
-
-    if (-not $graphConnected) {
-        throw "Failed to establish Microsoft Graph session."
     }
 
     return [pscustomobject]@{
@@ -361,12 +416,14 @@ function Get-NebulaConnections {
 function Update-NebulaConnections {
     <#
     .SYNOPSIS
-        Refreshes Nebula connections status for Exchange Online and Microsoft Graph.
+        Refreshes Nebula connections for Exchange Online and Microsoft Graph, repairing them if unhealthy.
     .DESCRIPTION
-        Explicit refresh entry point that runs the same checks used by Get-NebulaConnections,
-        including lightweight health probes (unless skipped), and returns the connection status.
+        Runs the same health probes as Get-NebulaConnections and, unless skipped, reconnects any
+        service found disconnected or unhealthy (stale/broken session) using the same detected user
+        and, for Microsoft Graph, the scopes already granted to the current session. Returns the
+        resulting connection status.
     .PARAMETER SkipHealthCheck
-        Skip probe calls and only report whether session contexts are currently present.
+        Skip probe/repair entirely and only report whether session contexts are currently present.
     .EXAMPLE
         Update-NebulaConnections
     .EXAMPLE
@@ -377,7 +434,64 @@ function Update-NebulaConnections {
         [switch]$SkipHealthCheck
     )
 
-    Get-NebulaConnections -SkipHealthCheck:$SkipHealthCheck.IsPresent
+    if ($SkipHealthCheck.IsPresent) {
+        return Get-NebulaConnections -SkipHealthCheck
+    }
+
+    # Probe first: Test-MgGraphConnection trusts a cached context, so a stale Graph token needs -ForceReconnect
+    $status = $null
+    try {
+        $status = Get-NebulaConnections
+    }
+    catch {}
+    $forceGraphReconnect = [bool]($status -and $status.MicrosoftGraphConnected -and -not $status.MicrosoftGraphHealthy)
+
+    $graphScopes = @()
+    $graphAccount = $null
+    $graphTenant = $null
+    try {
+        $graphContext = Get-MgContext -ErrorAction Stop
+        $graphScopes = @($graphContext.Scopes | Where-Object { $_ })
+        $graphAccount = $graphContext.Account
+        # A reconnect without the tenant would sign the account in to its home tenant
+        $graphTenant = $graphContext.TenantId
+    }
+    catch {}
+    if (-not $graphScopes -or $graphScopes.Count -eq 0) {
+        $graphScopes = @('User.Read.All')
+    }
+    # Repair the current Graph account instead of switching to the workstation identity
+    if ([string]::IsNullOrWhiteSpace($graphAccount)) {
+        $graphAccount = Find-UserConnected
+    }
+
+    # Graph before Exchange Online, as in Connect-Nebula, to avoid the cross-module authentication conflict
+    $graphConnected = $false
+    try {
+        $graphConnected = [bool](Test-MgGraphConnection -Scopes $graphScopes -TenantId $graphTenant -EnsureExchangeOnline:$false -LoginHint $graphAccount -ForceReconnect:$forceGraphReconnect)
+    }
+    catch {
+        Write-NCMessage "Microsoft Graph repair attempt failed. $($_.Exception.Message)" -Level WARNING
+    }
+
+    $exoParams = @{}
+    try {
+        $exoUser = (Get-ConnectionInformation -ErrorAction Stop | Select-Object -First 1).UserPrincipalName
+        if (-not [string]::IsNullOrWhiteSpace($exoUser)) {
+            $exoParams.UserPrincipalName = $exoUser
+        }
+    }
+    catch {}
+
+    try {
+        # With a Graph session in the same process, EXO signs in without WAM (see Connect-Nebula)
+        Test-EOLConnection @exoParams -DisableWAM:$graphConnected | Out-Null
+    }
+    catch {
+        Write-NCMessage "Exchange Online repair attempt failed. $($_.Exception.Message)" -Level WARNING
+    }
+
+    Get-NebulaConnections
 }
 
 Set-Alias -Name Leave-Nebula -Value Disconnect-Nebula

@@ -1,6 +1,7 @@
 name: Update license file
 permissions:
   contents: write
+  issues: write
 
 on:
   schedule:
@@ -12,20 +13,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout del repository
+      # Checkout the repository
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
 
-      # Configurazione di Git per gestire CRLF e LF
+      # Configure Git to handle CRLF/LF
       - name: Setup git to handle CRLF/LF differences
         run: git config --global core.autocrlf input
 
-      # Download del nuovo file CSV
+      # Download the new CSV file
       - name: Download new CSV file
         run: |
           curl -k -o "Product names and service plan identifiers for licensing.csv" "https://download.microsoft.com/download/e/3/e/e3e9faf2-f28b-490a-9ada-c6089a1fc5b0/Product%20names%20and%20service%20plan%20identifiers%20for%20licensing.csv"
 
-      # Confronto tra i file CSV
+      # Compare the CSV files
       - name: Compare CSV files ignoring whitespace and line endings
         id: compare_files
         run: |
@@ -37,31 +38,31 @@ jobs:
             echo "files_identical=false" >> $GITHUB_ENV
           fi
 
-      # Sostituzione del file CSV se necessario
+      # Replace the CSV file if necessary
       - name: Replace CSV file if necessary
         if: env.files_identical == 'false'
         run: |
           mv "Product names and service plan identifiers for licensing.csv" "JSON/Product names and service plan identifiers for licensing.csv"
 
-      # Installa csvtojson per convertire il CSV in JSON
+      # Install csvtojson to convert the CSV to JSON
       - name: Install csvtojson
         if: env.files_identical == 'false'
         run: npm install -g csvtojson
 
-      # Converti il CSV in JSON
+      # Convert the CSV to JSON
       - name: Convert CSV to JSON
         if: env.files_identical == 'false'
         run: |
           csvtojson "JSON/Product names and service plan identifiers for licensing.csv" > "JSON/M365_licenses.json"
 
-      # Debug: Controlla se Git rileva le modifiche
+      # Debug: check whether Git detects any changes
       - name: Check for changes
         run: |
           git status
           git diff "JSON/Product names and service plan identifiers for licensing.csv"
           git diff "JSON/M365_licenses.json"
 
-      # Commit e push delle modifiche, se necessarie
+      # Commit and push the changes, if any
       - name: Commit and push changes
         if: env.files_identical == 'false'
         env:
@@ -71,6 +72,53 @@ jobs:
           git config --global user.email "actions@github.com"
           git add --renormalize "JSON/Product names and service plan identifiers for licensing.csv" --force
           git add --renormalize "JSON/M365_licenses.json" --force
-          git diff --cached # Verifica se ci sono cambiamenti nell'index
+          git diff --cached # Check for staged changes
           git commit -m "Updated license file and JSON file" || echo "No changes to commit"
           git push
+
+      # Verify that the custom catalog does not contain SKUs already covered by the official catalog
+      - name: Check for duplicate entries in custom license catalog
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          function Get-NormalizedLicenseKey {
+              param([string]$Value)
+              if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+              $clean = $Value -replace '\p{Cf}', ''
+              if ([string]::IsNullOrWhiteSpace($clean)) { return $null }
+              return (($clean -replace '[-\.\s]', '_').ToUpperInvariant())
+          }
+
+          $primary = Get-Content "JSON/M365_licenses.json" -Raw | ConvertFrom-Json
+          $custom  = Get-Content "JSON/M365_licenses_custom.json" -Raw | ConvertFrom-Json
+
+          $primaryKeys = [System.Collections.Generic.HashSet[string]]::new()
+          foreach ($item in $primary) {
+              $key = Get-NormalizedLicenseKey $item.String_Id
+              if ($key) { [void]$primaryKeys.Add($key) }
+          }
+
+          $duplicates = foreach ($item in $custom) {
+              $key = Get-NormalizedLicenseKey $item.String_Id
+              if ($key -and $primaryKeys.Contains($key)) {
+                  [pscustomobject]@{ String_Id = $item.String_Id; Product_Display_Name = $item.Product_Display_Name }
+              }
+          }
+
+          if ($duplicates) {
+              $list = ($duplicates | ForEach-Object { "- ``$($_.String_Id)`` ($($_.Product_Display_Name))" }) -join "`n"
+              $summary = "### Duplicate entries found in ``JSON/M365_licenses_custom.json```n`nThese SKUs are now resolved by the official catalog and can be removed from the custom one:`n`n$list`n"
+              Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+              $issueTitle = "Duplicate entries in M365_licenses_custom.json"
+              $existing = gh issue list --state open --search "`"$issueTitle`" in:title" --json number --jq '.[0].number // empty'
+              if ($existing) {
+                  gh issue comment $existing --body $summary
+              } else {
+                  gh issue create --title $issueTitle --body $summary
+              }
+          } else {
+              Write-Output "No duplicate entries found between the primary and custom license catalogs."
+          }

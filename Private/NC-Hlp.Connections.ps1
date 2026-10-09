@@ -9,19 +9,23 @@ function Test-EOLConnection {
         Makes sure the Exchange Online session is ready to use.
     .DESCRIPTION
         Verifies that the ExchangeOnlineManagement module is present (installing it if asked),
-        checks the current session and, if necessary, reconnects with the detected user.
+        checks the current session and, if necessary, reconnects with the detected user. The
+        combined Connect-Nebula flow can disable WAM after Graph initializes its dependencies.
     .PARAMETER UserPrincipalName
         Optional explicit UPN to use when connecting. Defaults to Find-UserConnected.
     .PARAMETER AutoInstall
         Install the module automatically instead of prompting.
     .PARAMETER ForceReconnect
         Skip the quick connectivity probe and always reconnect.
+    .PARAMETER DisableWAM
+        Disable Web Account Manager for the EXO sign-in flow.
     #>
     [CmdletBinding()]
     param(
         [string]$UserPrincipalName,
         [switch]$AutoInstall,
-        [switch]$ForceReconnect
+        [switch]$ForceReconnect,
+        [switch]$DisableWAM
     )
 
     $moduleAvailable = @(Get-Module -Name ExchangeOnlineManagement -ListAvailable).Count -gt 0
@@ -51,21 +55,42 @@ function Test-EOLConnection {
         }
     }
 
+    $explicitUpnRequested = $PSBoundParameters.ContainsKey('UserPrincipalName') -and -not [string]::IsNullOrWhiteSpace($UserPrincipalName)
+    $resolvedUpn = if ($explicitUpnRequested) { $UserPrincipalName } else { $null }
+
     if (-not $ForceReconnect.IsPresent) {
         try {
             Get-EXOMailbox -ResultSize 1 -ErrorAction Stop | Out-Null
-            return $true
+
+            $currentUpn = $null
+            try {
+                $currentUpn = (Get-ConnectionInformation -ErrorAction Stop | Select-Object -First 1).UserPrincipalName
+            }
+            catch {
+                # Get-ConnectionInformation can throw (e.g. HttpResponseMessage/GetResponseHeader clash when
+                # Microsoft.Graph is also loaded) even though the EXO session above is perfectly healthy.
+                # Skip the UPN comparison rather than forcing an unnecessary reconnect.
+            }
+
+            if (-not $explicitUpnRequested) {
+                # No explicit UPN was requested: keep whatever session is already active, whoever it belongs
+                # to, instead of forcing a reconnect to the Windows AD identity (Find-UserConnected).
+                return $true
+            }
+
+            if ([string]::IsNullOrWhiteSpace($currentUpn) -or $currentUpn -eq $resolvedUpn) {
+                return $true
+            }
+
+            Write-NCMessage "Existing Exchange Online session is for $currentUpn, not $resolvedUpn. Reconnecting ..." -Level WARNING
         }
         catch {
             Write-NCMessage "Existing Exchange Online session not detected. Reconnecting ..." -Level WARNING
         }
     }
 
-    if (-not $PSBoundParameters.ContainsKey('UserPrincipalName') -or [string]::IsNullOrWhiteSpace($UserPrincipalName)) {
+    if (-not $explicitUpnRequested -and [string]::IsNullOrWhiteSpace($resolvedUpn)) {
         $resolvedUpn = Find-UserConnected
-    }
-    else {
-        $resolvedUpn = $UserPrincipalName
     }
 
     $resolvedUpn = if ([string]::IsNullOrWhiteSpace($resolvedUpn)) { $null } else { $resolvedUpn }
@@ -79,10 +104,10 @@ function Test-EOLConnection {
 
     try {
         if ($resolvedUpn) {
-            Connect-EOL -UserPrincipalName $resolvedUpn -ErrorAction Stop
+            Connect-EOL -UserPrincipalName $resolvedUpn -DisableWAM:$DisableWAM.IsPresent -ErrorAction Stop
         }
         else {
-            Connect-EOL -ErrorAction Stop
+            Connect-EOL -DisableWAM:$DisableWAM.IsPresent -ErrorAction Stop
         }
 
         # Run a lightweight cmdlet to be sure the session is alive.
@@ -116,6 +141,9 @@ function Test-MgGraphConnection {
         Skip context validation and force a new Connect-MgGraph call.
     .PARAMETER EnsureExchangeOnline
         Run Test-EOLConnection before attempting Graph (defaults to true for backward compatibility).
+    .PARAMETER LoginHint
+        UPN to pass as -LoginHint to Connect-MgGraph, helping the WAM broker resolve the target
+        account without prompting when it differs from the signed-in Windows account.
     #>
     [CmdletBinding()]
     param(
@@ -124,7 +152,8 @@ function Test-MgGraphConnection {
         [switch]$UseDeviceCode,
         [switch]$AutoInstall,
         [switch]$ForceReconnect,
-        [bool]$EnsureExchangeOnline = $true
+        [bool]$EnsureExchangeOnline = $true,
+        [string]$LoginHint
     )
 
     if ($EnsureExchangeOnline -and -not (Test-EOLConnection -AutoInstall:$AutoInstall.IsPresent)) {
@@ -184,12 +213,17 @@ function Test-MgGraphConnection {
         try {
             $ctx = Get-MgContext -ErrorAction Stop
             if ($ctx -and $ctx.Account) {
-                $missingScopes = &$missingScopeMessage $ctx.Scopes $requestedScopes
-                if (-not $missingScopes -or $missingScopes.Count -eq 0) {
-                    return $true
+                if ((-not [string]::IsNullOrWhiteSpace($LoginHint)) -and $ctx.Account -ne $LoginHint) {
+                    Write-NCMessage "Existing Microsoft Graph session is for $($ctx.Account), not $LoginHint. Reconnecting ..." -Level WARNING
                 }
+                else {
+                    $missingScopes = &$missingScopeMessage $ctx.Scopes $requestedScopes
+                    if (-not $missingScopes -or $missingScopes.Count -eq 0) {
+                        return $true
+                    }
 
-                Write-NCMessage "Existing Microsoft Graph session missing required scopes ($($missingScopes -join ', ')). Reconnecting ..." -Level WARNING
+                    Write-NCMessage "Existing Microsoft Graph session missing required scopes ($($missingScopes -join ', ')). Reconnecting ..." -Level WARNING
+                }
             }
             else {
                 Write-Verbose "Microsoft Graph context not found. Establishing connection ..."
@@ -214,6 +248,17 @@ function Test-MgGraphConnection {
 
     if ($UseDeviceCode.IsPresent) {
         $connectParams.UseDeviceCode = $true
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($LoginHint)) {
+        # -LoginHint only exists from Microsoft.Graph.Authentication 2.39.0
+        $connectCommand = Get-Command Connect-MgGraph -ErrorAction SilentlyContinue
+        if ($connectCommand -and $connectCommand.Parameters.ContainsKey('LoginHint')) {
+            $connectParams.LoginHint = $LoginHint
+        }
+        else {
+            Write-Verbose "Connect-MgGraph has no -LoginHint (added in Microsoft.Graph.Authentication 2.39.0); signing in without it."
+        }
     }
 
     try {

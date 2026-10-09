@@ -33,6 +33,142 @@ function Format-OutputString {
     return $Value.Substring(0, $length - 3) + '...'
 }
 
+function Format-NCDateTime {
+    <#
+    .SYNOPSIS
+        Formats a date value using Nebula.Core conventions.
+    .DESCRIPTION
+        Converts a date-like value to a string using the configured Nebula date format.
+        Returns the original value when it cannot be parsed as a date.
+    .PARAMETER Value
+        Date value to format.
+    .PARAMETER Format
+        Target string format. Defaults to the configured full date/time format.
+    .PARAMETER AsLocalTime
+        Convert the value to local time before formatting.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Value,
+        [string]$Format = $NCVars.DateTimeString_Full,
+        [switch]$AsLocalTime
+    )
+
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        return $null
+    }
+
+    $dateTimeOffset = $null
+    $parsed = $false
+
+    if ($Value -is [datetimeoffset]) {
+        $dateTimeOffset = [datetimeoffset]$Value
+        $parsed = $true
+    }
+    elseif ($Value -is [datetime]) {
+        $dateTimeOffset = [datetimeoffset]::new([datetime]$Value)
+        $parsed = $true
+    }
+    else {
+        $text = [string]$Value
+        $styles = [System.Globalization.DateTimeStyles]::AllowWhiteSpaces -bor [System.Globalization.DateTimeStyles]::RoundtripKind
+        $formats = @(
+            'o',
+            'O',
+            's',
+            'yyyy-MM-ddTHH:mm:ssK',
+            'yyyy-MM-ddTHH:mm:ss.FFFFFFFK',
+            'yyyy-MM-dd HH:mm:ssK',
+            'yyyy-MM-ddTHH:mm:ss',
+            'yyyy-MM-dd HH:mm:ss'
+        )
+
+        foreach ($fmt in $formats) {
+            if ([datetimeoffset]::TryParseExact($text, $fmt, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$dateTimeOffset)) {
+                $parsed = $true
+                break
+            }
+        }
+
+        if (-not $parsed) {
+            return [string]$Value
+        }
+    }
+
+    $targetTimeZoneId = $NCVars.DateTimeTimeZone
+    $timeZoneInfo = $null
+    if (-not [string]::IsNullOrWhiteSpace([string]$targetTimeZoneId)) {
+        $timeZoneInfo = Get-NCDateTimeZoneInfo -TimeZoneId $targetTimeZoneId
+    }
+
+    # A configured time zone that can't be resolved is ignored, as if none were set
+    if ($timeZoneInfo) {
+        $dateTimeOffset = [System.TimeZoneInfo]::ConvertTime($dateTimeOffset, $timeZoneInfo)
+    }
+    elseif ($AsLocalTime) {
+        $dateTimeOffset = $dateTimeOffset.ToLocalTime()
+    }
+
+    return $dateTimeOffset.ToString($Format)
+}
+
+function Get-NCDateTimeZoneInfo {
+    <#
+    .SYNOPSIS
+        Resolves a time zone ID for Nebula.Core date formatting.
+    .DESCRIPTION
+        Tries the provided ID first, then a small alias map for common cross-platform zone names.
+    .PARAMETER TimeZoneId
+        Time zone identifier from configuration.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$TimeZoneId
+    )
+
+    if ([string]::IsNullOrWhiteSpace($TimeZoneId)) {
+        return $null
+    }
+
+    if ($script:NCTimeZoneCache -and $script:NCTimeZoneCache.TimeZoneId -eq $TimeZoneId) {
+        return $script:NCTimeZoneCache.TimeZoneInfo
+    }
+
+    $candidateIds = [System.Collections.Generic.List[string]]::new()
+    $candidateIds.Add($TimeZoneId.Trim())
+
+    $aliasMap = @{
+        'Europe/Rome' = 'W. Europe Standard Time'
+    }
+
+    if ($aliasMap.ContainsKey($TimeZoneId.Trim())) {
+        $candidateIds.Add($aliasMap[$TimeZoneId.Trim()])
+    }
+
+    foreach ($candidateId in $candidateIds) {
+        try {
+            $timeZoneInfo = [System.TimeZoneInfo]::FindSystemTimeZoneById($candidateId)
+            $script:NCTimeZoneCache = [pscustomobject]@{
+                TimeZoneId   = $TimeZoneId
+                TimeZoneInfo = $timeZoneInfo
+            }
+            return $timeZoneInfo
+        }
+        catch {
+            continue
+        }
+    }
+
+    Write-NCMessage "Unable to resolve time zone '$TimeZoneId'. Ignoring DateTimeTimeZone: dates use local time where requested, otherwise their original offset." -Level WARNING
+    $script:NCTimeZoneCache = [pscustomobject]@{
+        TimeZoneId   = $TimeZoneId
+        TimeZoneInfo = $null
+    }
+    return $null
+}
+
 function Get-NormalizedText {
     <#
     .SYNOPSIS
@@ -187,6 +323,82 @@ function New-File {
     }
 
     return $candidate
+}
+
+# PowerShell releases where Out-GridView never returns and no window appears
+# (https://github.com/PowerShell/PowerShell/issues/27994).
+$script:NCGridViewBrokenVersions = @('7.6.6')
+
+function Test-NCGridViewSupport {
+    <#
+    .SYNOPSIS
+        Checks whether Out-GridView can be used in the current PowerShell session.
+    .DESCRIPTION
+        Returns $false on PowerShell releases where Out-GridView is known to hang the session
+        (see $script:NCGridViewBrokenVersions), $true otherwise.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+
+    if ($PSVersionTable.PSEdition -ne 'Core') {
+        return $true
+    }
+
+    $version = $PSVersionTable.PSVersion
+    $key = '{0}.{1}.{2}' -f $version.Major, $version.Minor, $version.Patch
+    return -not ($script:NCGridViewBrokenVersions -contains $key)
+}
+
+function Out-NCGridView {
+    <#
+    .SYNOPSIS
+        Sends objects to Out-GridView, falling back to the console where the grid is broken.
+    .DESCRIPTION
+        Wraps Out-GridView for every -GridView switch in the module. On PowerShell releases where
+        Out-GridView hangs the session, writes a warning and emits the input objects to the pipeline
+        instead. With -PassThru (interactive selection), the fallback selects nothing, so callers that
+        act on the selection (release, delete) do not process every row by mistake.
+    .PARAMETER InputObject
+        Objects to display.
+    .PARAMETER Title
+        Grid window title.
+    .PARAMETER PassThru
+        Return the rows selected in the grid.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromPipeline = $true)]
+        [object]$InputObject,
+        [string]$Title,
+        [switch]$PassThru
+    )
+
+    begin {
+        $items = [System.Collections.Generic.List[object]]::new()
+    }
+
+    process {
+        if ($null -ne $InputObject) {
+            $items.Add($InputObject) | Out-Null
+        }
+    }
+
+    end {
+        if (Test-NCGridViewSupport) {
+            $items | Out-GridView -Title $Title -PassThru:$PassThru
+            return
+        }
+
+        $psVersion = $PSVersionTable.PSVersion.ToString()
+        if ($PassThru.IsPresent) {
+            Write-NCMessage "Out-GridView hangs on PowerShell $psVersion (PowerShell/PowerShell#27994), so rows can't be selected interactively: nothing was selected. Use Windows PowerShell 5.1 or another PowerShell 7 release for -GridView." -Level WARNING
+            return
+        }
+
+        Write-NCMessage "Out-GridView hangs on PowerShell $psVersion (PowerShell/PowerShell#27994): showing results in the console instead. Use Windows PowerShell 5.1 or another PowerShell 7 release for -GridView." -Level WARNING
+        $items
+    }
 }
 
 function Restore-ProgressAndInfoPreferences {

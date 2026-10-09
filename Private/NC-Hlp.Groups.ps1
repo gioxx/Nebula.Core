@@ -14,12 +14,45 @@ function Get-NCGraphObjectLabel {
         return $null
     }
 
-    $props = $InputObject.PSObject.Properties
-    if ($props['userPrincipalName'] -and $InputObject.userPrincipalName) { return [string]$InputObject.userPrincipalName }
-    if ($props['displayName'] -and $InputObject.displayName) { return [string]$InputObject.displayName }
-    if ($props['appDisplayName'] -and $InputObject.appDisplayName) { return [string]$InputObject.appDisplayName }
-    if ($props['id'] -and $InputObject.id) { return [string]$InputObject.id }
+    foreach ($name in @('userPrincipalName', 'displayName', 'appDisplayName', 'id')) {
+        $value = Get-NCGraphItemValue -InputObject $InputObject -Name $name
+        if ($value) { return [string]$value }
+    }
     return [string]$InputObject
+}
+
+function Test-NCGraphItemProperty {
+    <#
+    .SYNOPSIS
+        Tells whether a Graph item (Hashtable from Invoke-MgGraphRequest, or object) carries a property.
+    #>
+    [CmdletBinding()]
+    param(
+        [object]$InputObject,
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if ($null -eq $InputObject) { return $false }
+    if ($InputObject -is [System.Collections.IDictionary]) { return [bool]$InputObject.Contains($Name) }
+    return ($null -ne $InputObject.PSObject.Properties[$Name])
+}
+
+function Get-NCGraphItemValue {
+    <#
+    .SYNOPSIS
+        Reads a property of a Graph item (Hashtable from Invoke-MgGraphRequest, or object); $null when absent.
+    #>
+    [CmdletBinding()]
+    param(
+        [object]$InputObject,
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if (-not (Test-NCGraphItemProperty -InputObject $InputObject -Name $Name)) { return $null }
+    if ($InputObject -is [System.Collections.IDictionary]) { return $InputObject[$Name] }
+    return $InputObject.PSObject.Properties[$Name].Value
 }
 
 function Resolve-NCEntraGroup {
@@ -124,5 +157,227 @@ function Resolve-NCEntraOwner {
     return [pscustomobject]@{
         Id    = [string]$owner.Id
         Label = [string]$ownerLabel
+    }
+}
+
+function Resolve-NCEntraGroupUserTarget {
+    <#
+    .SYNOPSIS
+        Resolves group-membership user inputs to object IDs with batched Graph lookups.
+    .DESCRIPTION
+        Object IDs (or every input when -TreatInputAsId is set) pass through unchanged. Other inputs are
+        resolved through Resolve-NCGraphUserBatch; inputs that cannot be resolved are skipped (the resolver
+        already reported them).
+    .PARAMETER UserIdentifier
+        UPNs, mail addresses, display names or object IDs.
+    .PARAMETER TreatInputAsId
+        Treat every input as an object ID.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$UserIdentifier,
+        [switch]$TreatInputAsId
+    )
+
+    $guidPattern = '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    $isId = { param($value) $TreatInputAsId.IsPresent -or $value -match $guidPattern }
+
+    $lookup = @($UserIdentifier | Where-Object { -not (& $isId $_) })
+    $resolved = if ($lookup.Count -gt 0) {
+        Resolve-NCGraphUserBatch -Identifier $lookup -Property @('id', 'userPrincipalName', 'displayName')
+    }
+    else {
+        @{}
+    }
+
+    foreach ($user in $UserIdentifier) {
+        if (& $isId $user) {
+            [pscustomobject]@{ Input = $user; Id = $user; Label = $user }
+            continue
+        }
+
+        $match = $resolved[$user]
+        if (-not $match) {
+            continue
+        }
+        if (-not $match.id) {
+            Write-NCMessage "Unable to determine object ID for user '$user'." -Level ERROR
+            continue
+        }
+
+        $label = if ($match.userPrincipalName) { $match.userPrincipalName } else { $match.displayName }
+        [pscustomobject]@{ Input = $user; Id = $match.id; Label = $label }
+    }
+}
+
+function Resolve-NCEntraDeviceTargetBatch {
+    <#
+    .SYNOPSIS
+        Resolves device inputs (object IDs or display names) with batched Graph lookups.
+    .DESCRIPTION
+        Object IDs (or every input when -TreatInputAsId is set) pass through unchanged. Display names are
+        looked up with batched GET /devices requests; inputs that cannot be resolved are reported and skipped.
+        When several devices match a name the first one is used (with a warning).
+    .PARAMETER DeviceIdentifier
+        Device object IDs or display names.
+    .PARAMETER TreatInputAsId
+        Treat every input as an object ID.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$DeviceIdentifier,
+        [switch]$TreatInputAsId
+    )
+
+    $guidPattern = '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    $requests = [System.Collections.Generic.List[object]]::new()
+    for ($i = 0; $i -lt $DeviceIdentifier.Count; $i++) {
+        $value = $DeviceIdentifier[$i]
+        if ($TreatInputAsId.IsPresent -or $value -match $guidPattern) { continue }
+        $filter = "displayName eq '$($value.Replace("'", "''"))'"
+        $requests.Add(@{ Id = "d$i"; Method = 'GET'; Url = "/devices?`$filter=$([uri]::EscapeDataString($filter))&`$select=id,displayName,deviceId" })
+    }
+
+    $lookup = @{}
+    if ($requests.Count -gt 0) {
+        foreach ($result in @(Invoke-NCGraphBatchCollection -Requests @($requests) -Activity 'Resolving devices')) {
+            $lookup[$result.Id] = $result
+        }
+    }
+
+    for ($i = 0; $i -lt $DeviceIdentifier.Count; $i++) {
+        $value = $DeviceIdentifier[$i]
+        if ($TreatInputAsId.IsPresent -or $value -match $guidPattern) {
+            [pscustomobject]@{ Input = $value; Id = $value; Label = $value }
+            continue
+        }
+
+        $result = $lookup["d$i"]
+        if (-not $result.Success) {
+            Write-NCMessage "Unable to resolve device '$value': $($result.ErrorMessage)" -Level ERROR
+            continue
+        }
+
+        $found = @($result.Items)
+        if ($found.Count -eq 0) {
+            Write-NCMessage "Device '$value' not found" -Level WARNING
+            continue
+        }
+
+        if ($found.Count -gt 1) {
+            Write-NCMessage "Multiple devices matched '$value'. Using the first result ($($found[0].displayName))" -Level WARNING
+        }
+
+        $device = $found[0]
+        if (-not $device.id) {
+            Write-NCMessage "Unable to determine object ID for device '$value'." -Level ERROR
+            continue
+        }
+
+        [pscustomobject]@{ Input = $value; Id = [string]$device.id; Label = $device.displayName }
+    }
+}
+
+function Resolve-NCEntraOwnerBatch {
+    <#
+    .SYNOPSIS
+        Resolves owner inputs with batched Graph lookups, matching Resolve-NCEntraOwner.
+    .DESCRIPTION
+        Every input is looked up with GET /users/{input} in $batch requests. Inputs that Resolve-NCEntraOwner
+        treats as object IDs (GUIDs, or every input with -TreatInputAsId) fall back to an ID-only placeholder
+        when the lookup fails, exactly like Resolve-NCEntraOwner. Any other input the batch could not resolve
+        as a user is handed to Resolve-NCEntraOwner, which keeps its alias/display-name handling and its
+        messages. The batch itself never prints for a failed lookup, so an input is reported at most once.
+        Output objects have the same properties as Resolve-NCEntraOwner (Id, Label), in input order.
+    .PARAMETER OwnerIdentifier
+        UPNs, mail addresses, display names or object IDs.
+    .PARAMETER TreatInputAsId
+        Treat every input as an object ID.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$OwnerIdentifier,
+        [switch]$TreatInputAsId
+    )
+
+    $guidPattern = '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    $inputs = @($OwnerIdentifier | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($inputs.Count -eq 0) {
+        return
+    }
+
+    $requests = @(for ($i = 0; $i -lt $inputs.Count; $i++) {
+            @{ Id = "o$i"; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString($inputs[$i].Trim()))?`$select=id,userPrincipalName,displayName" }
+        })
+    $lookup = @{}
+    foreach ($result in @(Invoke-NCGraphBatch -Requests $requests -Activity 'Resolving owners')) {
+        $lookup[$result.Id] = $result
+    }
+
+    for ($i = 0; $i -lt $inputs.Count; $i++) {
+        $original = $inputs[$i]
+        $trimmed = $original.Trim()
+        $isId = $TreatInputAsId.IsPresent -or ($trimmed -match $guidPattern)
+        $result = $lookup["o$i"]
+
+        if ($result -and $result.Success) {
+            $owner = $result.Body
+            if (-not $owner -or -not $owner.id) {
+                Write-NCMessage "Unable to determine object ID for owner '$original'." -Level ERROR
+                continue
+            }
+            $ownerLabel = if ($owner.userPrincipalName) { $owner.userPrincipalName } elseif ($owner.displayName) { $owner.displayName } else { $owner.id }
+            [pscustomobject]@{ Id = [string]$owner.id; Label = [string]$ownerLabel }
+            continue
+        }
+
+        if ($isId) {
+            [pscustomobject]@{ Id = $trimmed; Label = $trimmed }
+            continue
+        }
+
+        Resolve-NCEntraOwner -OwnerIdentifier $original
+    }
+}
+
+function ConvertTo-NCGraphDirectoryObject {
+    <#
+    .SYNOPSIS
+        Wraps a raw Graph directory object like the SDK's DirectoryObject (Id + AdditionalProperties).
+    .DESCRIPTION
+        Batch responses return camelCase JSON objects (pscustomobject or hashtable), while the read functions were
+        written against SDK objects that expose Id and an AdditionalProperties dictionary holding every other key
+        (including '@odata.type'). This wrapper keeps those consumers unchanged.
+    .PARAMETER Item
+        Raw directory object from a Graph collection response.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [object]$Item
+    )
+
+    $additional = @{}
+    if ($Item -is [System.Collections.IDictionary]) {
+        foreach ($key in $Item.Keys) {
+            if ($key -ne 'id') { $additional[[string]$key] = $Item[$key] }
+        }
+    }
+    elseif ($null -ne $Item) {
+        foreach ($property in $Item.PSObject.Properties) {
+            if ($property.Name -ne 'id') { $additional[$property.Name] = $property.Value }
+        }
+    }
+
+    [pscustomobject]@{
+        Id                   = $Item.id
+        AdditionalProperties = $additional
     }
 }

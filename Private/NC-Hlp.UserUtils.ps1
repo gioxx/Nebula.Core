@@ -62,12 +62,17 @@ function Find-UserRecipient {
         The UPN or identifier of the user recipient to resolve.
     .PARAMETER PreferGraphIdentity
         Returns a Graph-friendly identity instead of the primary SMTP address.
+    .PARAMETER SkipDirectGraphLookup
+        Skips only the direct Get-MgUser -UserId lookup that follows a failed Get-Recipient (use it when a
+        batched GET /users/{identifier} already returned not found). The filter-based Graph queries still run;
+        the not-found message then carries no direct-lookup error text.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string]$UserPrincipalName,
-        [switch]$PreferGraphIdentity
+        [switch]$PreferGraphIdentity,
+        [switch]$SkipDirectGraphLookup
     )
 
     if ([string]::IsNullOrWhiteSpace($UserPrincipalName)) {
@@ -78,67 +83,90 @@ function Find-UserRecipient {
         $recipient = Get-Recipient -Identity $UserPrincipalName -ErrorAction Stop
     }
     catch {
-        try {
-            $user = Get-MgUser -UserId $UserPrincipalName -Property Id, UserPrincipalName, Mail -ErrorAction Stop
-
-            if ($PreferGraphIdentity.IsPresent) {
-                return $user.Id
-            }
-
-            if ($user.Mail) {
-                return $user.Mail
-            }
-
-            return $user.UserPrincipalName
-        }
-        catch {
-            $escaped = $UserPrincipalName.Replace("'", "''")
-            $queries = @()
-
-            if ($UserPrincipalName -match '@') {
-                $queries += "userPrincipalName eq '$escaped'"
-                $queries += "mail eq '$escaped'"
-            }
-            else {
-                $queries += "mailNickname eq '$escaped'"
-                $queries += "onPremisesSamAccountName eq '$escaped'"
-                $queries += "displayName eq '$escaped'"
-                $queries += "startswith(userPrincipalName,'$escaped@')"
-            }
-
-            $matchedUsers = @()
-            foreach ($query in $queries) {
-                try {
-                    $matchedUsers = @(Get-MgUser -Filter $query -All -Property Id, UserPrincipalName, Mail, DisplayName -ErrorAction Stop)
-                    if ($matchedUsers.Count -gt 0) {
-                        break
-                    }
-                }
-                catch {
-                    continue
-                }
-            }
-
-            if ($matchedUsers.Count -gt 0) {
-                $selectedUser = $matchedUsers | Sort-Object UserPrincipalName | Select-Object -First 1
-
-                if ($matchedUsers.Count -gt 1) {
-                    $selectedLabel = if ($selectedUser.UserPrincipalName) { $selectedUser.UserPrincipalName } else { $selectedUser.DisplayName }
-                    Write-NCMessage "Multiple users matched '$UserPrincipalName'. Using the first result ($selectedLabel)." -Level WARNING
-                }
+        # Direct lookup by id/UPN; skipped when the caller already knows Graph returned not found for it.
+        $directLookupError = $null
+        if (-not $SkipDirectGraphLookup.IsPresent) {
+            try {
+                $user = Get-MgUser -UserId $UserPrincipalName -Property Id, UserPrincipalName, Mail -ErrorAction Stop
 
                 if ($PreferGraphIdentity.IsPresent) {
-                    return $selectedUser.Id
+                    return $user.Id
                 }
 
-                if ($selectedUser.Mail) {
-                    return $selectedUser.Mail
+                if ($user.Mail) {
+                    return $user.Mail
                 }
 
-                return $selectedUser.UserPrincipalName
+                return $user.UserPrincipalName
+            }
+            catch {
+                $directLookupError = $_.Exception.Message
+            }
+        }
+
+        $escaped = $UserPrincipalName.Replace("'", "''")
+        $queries = @()
+
+        if ($UserPrincipalName -match '@') {
+            $queries += "userPrincipalName eq '$escaped'"
+            $queries += "mail eq '$escaped'"
+        }
+        else {
+            $queries += "mailNickname eq '$escaped'"
+            $queries += "onPremisesSamAccountName eq '$escaped'"
+            $queries += "displayName eq '$escaped'"
+            $queries += "startswith(userPrincipalName,'$escaped@')"
+        }
+
+        $requests = @(for ($i = 0; $i -lt $queries.Count; $i++) {
+                @{
+                    Id     = "q$i"
+                    Method = 'GET'
+                    Url    = '/users?$filter=' + [uri]::EscapeDataString($queries[$i]) + '&$select=id,userPrincipalName,mail,displayName'
+                }
+            })
+
+        # One batch for every candidate query; the first query (in order) with results wins.
+        # A failed sub-request counts as "no results".
+        $matchedUsers = @()
+        foreach ($result in @(Invoke-NCGraphBatchCollection -Requests $requests -Activity 'Resolving user')) {
+            if ($result.Success -and @($result.Items).Count -gt 0) {
+                $matchedUsers = @($result.Items | ForEach-Object {
+                        [pscustomobject]@{
+                            Id                = $_.id
+                            UserPrincipalName = $_.userPrincipalName
+                            Mail              = $_.mail
+                            DisplayName       = $_.displayName
+                        }
+                    })
+                break
+            }
+        }
+
+        if ($matchedUsers.Count -gt 0) {
+            $selectedUser = $matchedUsers | Sort-Object UserPrincipalName | Select-Object -First 1
+
+            if ($matchedUsers.Count -gt 1) {
+                $selectedLabel = if ($selectedUser.UserPrincipalName) { $selectedUser.UserPrincipalName } else { $selectedUser.DisplayName }
+                Write-NCMessage "Multiple users matched '$UserPrincipalName'. Using the first result ($selectedLabel)." -Level WARNING
             }
 
-            Write-NCMessage "Recipient not available or not found ($UserPrincipalName). $($_.Exception.Message)" -Level ERROR
+            if ($PreferGraphIdentity.IsPresent) {
+                return $selectedUser.Id
+            }
+
+            if ($selectedUser.Mail) {
+                return $selectedUser.Mail
+            }
+
+            return $selectedUser.UserPrincipalName
+        }
+
+        if ($null -ne $directLookupError) {
+            Write-NCMessage "Recipient not available or not found ($UserPrincipalName). $directLookupError" -Level ERROR
+        }
+        else {
+            Write-NCMessage "Recipient not available or not found ($UserPrincipalName)." -Level ERROR
         }
 
         return
@@ -190,4 +218,210 @@ function Find-UserRecipient {
     }
 
     return $resolvedAddress
+}
+
+function Resolve-EntraUserSearchResults {
+    <#
+    .SYNOPSIS
+        Resolves Entra users by partial or exact identity and returns match metadata.
+    .DESCRIPTION
+        Uses Microsoft Graph search first, then optionally falls back to a broader scan for
+        guest identities and other partial matches.
+    .PARAMETER SearchText
+        Text used to find matching users.
+    .PARAMETER SearchIn
+        Where to search: DisplayName, UserPrincipalName, Mail, or Any.
+    .PARAMETER IndexOnly
+        Use Microsoft Graph indexed search only.
+    .PARAMETER Scopes
+        Microsoft Graph scopes to validate before searching.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SearchText,
+
+        [ValidateSet('DisplayName', 'UserPrincipalName', 'Mail', 'Any')]
+        [string]$SearchIn = 'Any',
+
+        [switch]$IndexOnly,
+
+        [string[]]$Scopes = @('User.Read.All', 'Directory.Read.All')
+    )
+
+    if ([string]::IsNullOrWhiteSpace($SearchText)) {
+        return @()
+    }
+
+    $graphConnected = Test-MgGraphConnection -Scopes $Scopes -EnsureExchangeOnline:$false
+    if (-not $graphConnected) {
+        Add-EmptyLine
+        Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+        return @()
+    }
+
+    $escapedText = $SearchText.Replace('"', '""').Trim()
+    if ([string]::IsNullOrWhiteSpace($escapedText)) {
+        return @()
+    }
+
+    $selectProperties = @(
+        'Id',
+        'DisplayName',
+        'UserPrincipalName',
+        'Mail',
+        'OtherMails',
+        'ProxyAddresses',
+        'UserType',
+        'AccountEnabled',
+        'Department',
+        'JobTitle'
+    )
+
+    $searchNeedle = $escapedText.ToLowerInvariant()
+
+    # The tenant-wide scan is slow on large tenants: read it only when partial matching actually needs it
+    $getAllUsers = {
+        try {
+            @(Get-MgUser -All -Property $selectProperties -ErrorAction Stop)
+        }
+        catch {
+            throw "Unable to load users for fallback matching: $($_.Exception.Message)"
+        }
+    }
+
+    $users = @()
+
+    # Field checks for the single-field modes, shared by the direct lookup and the fallback scan
+    $fieldMatch = @{
+        DisplayName       = { $_.DisplayName -and $_.DisplayName.ToLowerInvariant().Contains($searchNeedle) }
+        UserPrincipalName = { $_.UserPrincipalName -and $_.UserPrincipalName.ToLowerInvariant().Contains($searchNeedle) }
+        Mail              = {
+            ($_.Mail -and $_.Mail.ToLowerInvariant().Contains($searchNeedle)) -or
+            ($_.OtherMails -and @($_.OtherMails | Where-Object { $_ -and $_.ToLowerInvariant().Contains($searchNeedle) }).Count -gt 0)
+        }
+    }
+    $searchField = @{ DisplayName = 'displayName'; UserPrincipalName = 'userPrincipalName'; Mail = 'mail' }
+
+    try {
+        if ($SearchIn -ne 'Any') {
+            # A UPN or object ID resolves directly, but only counts when the selected field matches too
+            $users = @()
+            try {
+                $users = @(Get-MgUser -UserId $SearchText -Property $selectProperties -ErrorAction Stop | Where-Object $fieldMatch[$SearchIn])
+            }
+            catch {}
+
+            if ($users.Count -eq 0) {
+                $searchClause = "`"$($searchField[$SearchIn]):$escapedText`""
+                $users = @(Get-MgUser -Search $searchClause -ConsistencyLevel eventual -CountVariable count -All -Property $selectProperties -ErrorAction Stop)
+
+                if (-not $IndexOnly.IsPresent) {
+                    $fallbackUsers = @(& $getAllUsers | Where-Object $fieldMatch[$SearchIn])
+                    $users = @($users + $fallbackUsers | Sort-Object Id -Unique)
+                }
+            }
+        }
+
+        switch ($SearchIn) {
+            'Any' {
+                try {
+                    $users = @(Get-MgUser -UserId $SearchText -Property $selectProperties -ErrorAction Stop)
+                }
+                catch {
+                    $searchDisplay = "`"displayName:$escapedText`""
+                    $searchUpn = "`"userPrincipalName:$escapedText`""
+                    $searchMail = "`"mail:$escapedText`""
+
+                    $byDisplay = @(Get-MgUser -Search $searchDisplay -ConsistencyLevel eventual -CountVariable countDisplay -All -Property $selectProperties -ErrorAction Stop)
+                    $byUpn = @(Get-MgUser -Search $searchUpn -ConsistencyLevel eventual -CountVariable countUpn -All -Property $selectProperties -ErrorAction Stop)
+                    $byMail = @(Get-MgUser -Search $searchMail -ConsistencyLevel eventual -CountVariable countMail -All -Property $selectProperties -ErrorAction Stop)
+
+                    if ($IndexOnly.IsPresent) {
+                        $users = @($byDisplay + $byUpn + $byMail | Sort-Object Id -Unique)
+                    }
+                    else {
+                        $fallbackUsers = @(& $getAllUsers | Where-Object {
+                            $candidates = @(
+                                $_.DisplayName,
+                                $_.UserPrincipalName,
+                                $_.Mail
+                            )
+
+                            if ($_.OtherMails) {
+                                $candidates += @($_.OtherMails)
+                            }
+
+                            if ($_.ProxyAddresses) {
+                                $candidates += @($_.ProxyAddresses)
+                            }
+
+                            foreach ($candidate in $candidates) {
+                                if ($candidate -and $candidate.ToLowerInvariant().Contains($searchNeedle)) {
+                                    return $true
+                                }
+                            }
+
+                            return $false
+                        })
+
+                        $users = @($byDisplay + $byUpn + $byMail + $fallbackUsers | Sort-Object Id -Unique)
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        Write-NCMessage "Unable to search users with '$SearchText': $($_.Exception.Message)" -Level ERROR
+        return @()
+    }
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    foreach ($user in $users) {
+        $matchedBy = [System.Collections.Generic.List[string]]::new()
+
+        if ($user.DisplayName -and $user.DisplayName.ToLowerInvariant().Contains($searchNeedle)) {
+            $matchedBy.Add('DisplayName') | Out-Null
+        }
+
+        if ($user.UserPrincipalName -and $user.UserPrincipalName.ToLowerInvariant().Contains($searchNeedle)) {
+            $matchedBy.Add('UserPrincipalName') | Out-Null
+        }
+
+        if ($user.Mail -and $user.Mail.ToLowerInvariant().Contains($searchNeedle)) {
+            $matchedBy.Add('Mail') | Out-Null
+        }
+
+        if ($user.OtherMails) {
+            foreach ($otherMail in $user.OtherMails) {
+                if ($otherMail -and $otherMail.ToLowerInvariant().Contains($searchNeedle)) {
+                    $matchedBy.Add('OtherMails') | Out-Null
+                    break
+                }
+            }
+        }
+
+        if ($user.ProxyAddresses) {
+            foreach ($proxyAddress in $user.ProxyAddresses) {
+                if ($proxyAddress -and $proxyAddress.ToLowerInvariant().Contains($searchNeedle)) {
+                    $matchedBy.Add('ProxyAddresses') | Out-Null
+                    break
+                }
+            }
+        }
+
+        $guestFragment = $null
+        if ($user.UserType -eq 'Guest' -and $user.UserPrincipalName -match '^(?<fragment>.+?)#EXT#@') {
+            $guestFragment = $matches.fragment
+        }
+
+        $results.Add([pscustomobject]@{
+            User          = $user
+            MatchedBy     = @($matchedBy)
+            GuestFragment = $guestFragment
+            SearchMode    = if ($IndexOnly.IsPresent) { 'IndexOnly' } else { 'Index + Fallback' }
+        }) | Out-Null
+    }
+
+    return $results
 }

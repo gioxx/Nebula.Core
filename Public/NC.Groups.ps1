@@ -27,15 +27,15 @@ function Add-EntraGroupDevice {
     #>
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
     param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0)]
         [Alias('Group', 'DisplayName')]
         [string]$GroupName,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0)]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Device', 'DeviceName', 'Id', 'DeviceId', 'Name')]
         [string[]]$DeviceIdentifier,
 
@@ -102,59 +102,43 @@ function Add-EntraGroupDevice {
         }
 
         $results = [System.Collections.Generic.List[object]]::new()
-        $uniqueDevices = $devices | Select-Object -Unique
+        $uniqueDevices = @($devices | Select-Object -Unique)
+        $membersRefUrl = "/groups/$([uri]::EscapeDataString([string]$resolvedGroup.Id))/members/`$ref"
+        Write-NCGraphBatchNotice -Count ($uniqueDevices.Count) -Noun 'device(s)'
 
-        foreach ($device in $uniqueDevices) {
-            $deviceId = $null
-            $deviceLabel = $device
+        for ($offset = 0; $offset -lt $uniqueDevices.Count; $offset += 20) {
+            $chunk = @($uniqueDevices[$offset..([Math]::Min($offset + 20, $uniqueDevices.Count) - 1)])
+            $targets = @(Resolve-NCEntraDeviceTargetBatch -DeviceIdentifier $chunk -TreatInputAsId:$TreatInputAsId)
 
-            if ($TreatInputAsId.IsPresent -or $device -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-                $deviceId = $device
+            $approved = [System.Collections.Generic.List[object]]::new()
+            foreach ($target in $targets) {
+                if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add device '$($target.Label)'")) {
+                    $approved.Add($target)
+                }
             }
-            else {
-                $escapedDevice = $device.Replace("'", "''")
-                try {
-                    $deviceMatches = Get-MgDevice -Filter "displayName eq '$escapedDevice'" -All -ErrorAction Stop
-                }
-                catch {
-                    Write-NCMessage "Unable to resolve device '$device': $($_.Exception.Message)" -Level ERROR
-                    continue
-                }
+            if ($approved.Count -eq 0) { continue }
 
-                if (-not $deviceMatches -or $deviceMatches.Count -eq 0) {
-                    Write-NCMessage "Device '$device' not found" -Level WARNING
-                    continue
-                }
+            $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'POST'; Url = $membersRefUrl; Body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $approved[$i].Id) } }
+                })
+            $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Adding devices to $($resolvedGroup.DisplayName)")
 
-                if ($deviceMatches.Count -gt 1) {
-                    Write-NCMessage "Multiple devices matched '$device'. Using the first result ($($deviceMatches[0].DisplayName))" -Level WARNING
-                }
-
-                $selected = $deviceMatches | Select-Object -First 1
-                $deviceId = $selected.Id
-                $deviceLabel = $selected.DisplayName
-            }
-
-            if (-not $deviceId) {
-                Write-NCMessage "Unable to determine object ID for device '$device'." -Level ERROR
-                continue
-            }
-
-            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add device '$deviceLabel'")) {
+            for ($i = 0; $i -lt $approved.Count; $i++) {
+                $deviceId = $approved[$i].Id
+                $deviceLabel = $approved[$i].Label
+                $response = $responses[$i]
                 $status = 'Added'
-                try {
-                    New-MgGroupMember -GroupId $resolvedGroup.Id -DirectoryObjectId $deviceId -ErrorAction Stop | Out-Null
+
+                if ($response.Success) {
                     Write-NCMessage "Added device '$deviceLabel' to group '$($resolvedGroup.DisplayName)'" -Level SUCCESS
                 }
-                catch {
-                    if ($_.Exception.Message -match 'added object references already exist') {
-                        $status = 'Exists'
-                        Write-NCMessage "Device '$deviceLabel' is already a member of '$($resolvedGroup.DisplayName)'" -Level WARNING
-                    }
-                    else {
-                        $status = 'Failed'
-                        Write-NCMessage "Failed to add device '$deviceLabel' to '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
-                    }
+                elseif ($response.ErrorMessage -match 'added object references already exist') {
+                    $status = 'Exists'
+                    Write-NCMessage "Device '$deviceLabel' is already a member of '$($resolvedGroup.DisplayName)'" -Level WARNING
+                }
+                else {
+                    $status = 'Failed'
+                    Write-NCMessage "Failed to add device '$deviceLabel' to '$($resolvedGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
                 }
 
                 if ($PassThru.IsPresent) {
@@ -200,15 +184,15 @@ function Add-EntraGroupOwner {
     #>
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
     param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0)]
         [Alias('Group', 'DisplayName')]
         [string]$GroupName,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0)]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Owner', 'UPN', 'Mail', 'Id', 'UserId', 'Name')]
         [string[]]$OwnerIdentifier,
 
@@ -254,30 +238,42 @@ function Add-EntraGroupOwner {
         }
 
         $results = [System.Collections.Generic.List[object]]::new()
-        $uniqueOwners = $owners | Select-Object -Unique
+        $uniqueOwners = @($owners | Select-Object -Unique)
+        $ownersRefUrl = "/groups/$([uri]::EscapeDataString([string]$resolvedGroup.Id))/owners/`$ref"
+        Write-NCGraphBatchNotice -Count ($uniqueOwners.Count) -Noun 'owner(s)'
 
-        foreach ($owner in $uniqueOwners) {
-            $resolvedOwner = Resolve-NCEntraOwner -OwnerIdentifier $owner -TreatInputAsId:$TreatInputAsId
-            if (-not $resolvedOwner) {
-                continue
+        for ($offset = 0; $offset -lt $uniqueOwners.Count; $offset += 20) {
+            $chunk = @($uniqueOwners[$offset..([Math]::Min($offset + 20, $uniqueOwners.Count) - 1)])
+            $targets = @(Resolve-NCEntraOwnerBatch -OwnerIdentifier $chunk -TreatInputAsId:$TreatInputAsId)
+
+            $approved = [System.Collections.Generic.List[object]]::new()
+            foreach ($target in $targets) {
+                if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add owner '$($target.Label)'")) {
+                    $approved.Add($target)
+                }
             }
+            if ($approved.Count -eq 0) { continue }
 
-            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add owner '$($resolvedOwner.Label)'")) {
+            $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'POST'; Url = $ownersRefUrl; Body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $approved[$i].Id) } }
+                })
+            $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Adding owners to $($resolvedGroup.DisplayName)")
+
+            for ($i = 0; $i -lt $approved.Count; $i++) {
+                $resolvedOwner = $approved[$i]
+                $response = $responses[$i]
                 $status = 'Added'
-                try {
-                    $body = @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$($resolvedOwner.Id)" } | ConvertTo-Json -Depth 3
-                    Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($resolvedGroup.Id)/owners/`$ref" -Method POST -Body $body -ContentType 'application/json' | Out-Null
+
+                if ($response.Success) {
                     Write-NCMessage "Added owner '$($resolvedOwner.Label)' to group '$($resolvedGroup.DisplayName)'." -Level SUCCESS
                 }
-                catch {
-                    if ($_.Exception.Message -match 'already exist' -or $_.Exception.Message -match 'exists') {
-                        $status = 'Exists'
-                        Write-NCMessage "Owner '$($resolvedOwner.Label)' is already an owner of '$($resolvedGroup.DisplayName)'." -Level WARNING
-                    }
-                    else {
-                        $status = 'Failed'
-                        Write-NCMessage "Failed to add owner '$($resolvedOwner.Label)' to '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
-                    }
+                elseif ($response.ErrorMessage -match 'already exist' -or $response.ErrorMessage -match 'exists') {
+                    $status = 'Exists'
+                    Write-NCMessage "Owner '$($resolvedOwner.Label)' is already an owner of '$($resolvedGroup.DisplayName)'." -Level WARNING
+                }
+                else {
+                    $status = 'Failed'
+                    Write-NCMessage "Failed to add owner '$($resolvedOwner.Label)' to '$($resolvedGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
                 }
 
                 if ($PassThru.IsPresent) {
@@ -326,17 +322,17 @@ function Remove-EntraGroupOwner {
     #>
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
     param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0)]
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllByName')]
         [Alias('Group', 'DisplayName')]
         [string]$GroupName,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0)]
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Owner', 'UPN', 'Mail', 'Id', 'UserId', 'Name')]
         [string[]]$OwnerIdentifier,
 
@@ -397,9 +393,9 @@ function Remove-EntraGroupOwner {
             }
 
             try {
-                $ownerResponse = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($resolvedGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName" -Method GET
+                $ownerResponse = Invoke-MgGraphRequest -Uri "v1.0/groups/$($resolvedGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName" -Method GET
                 $ownerItems = @()
-                if ($ownerResponse -and $ownerResponse.PSObject.Properties['value']) {
+                if ($ownerResponse -and (Test-NCGraphItemProperty -InputObject $ownerResponse -Name 'value')) {
                     $ownerItems = @($ownerResponse.value)
                 }
                 elseif ($ownerResponse) {
@@ -412,7 +408,7 @@ function Remove-EntraGroupOwner {
             }
 
             foreach ($ownerItem in $ownerItems) {
-                $ownerId = if ($ownerItem.PSObject.Properties['id']) { [string]$ownerItem.id } else { $null }
+                $ownerId = [string](Get-NCGraphItemValue -InputObject $ownerItem -Name 'id')
                 if ([string]::IsNullOrWhiteSpace($ownerId)) {
                     continue
                 }
@@ -429,14 +425,9 @@ function Remove-EntraGroupOwner {
             }
         }
         else {
-            $uniqueOwners = $owners | Select-Object -Unique
+            $uniqueOwners = @($owners | Select-Object -Unique)
 
-            foreach ($owner in $uniqueOwners) {
-                $resolvedOwner = Resolve-NCEntraOwner -OwnerIdentifier $owner -TreatInputAsId:$TreatInputAsId
-                if (-not $resolvedOwner) {
-                    continue
-                }
-
+            foreach ($resolvedOwner in @(Resolve-NCEntraOwnerBatch -OwnerIdentifier $uniqueOwners -TreatInputAsId:$TreatInputAsId)) {
                 $ownersToRemove.Add([pscustomobject]@{
                         Id    = $resolvedOwner.Id
                         Label = $resolvedOwner.Label
@@ -444,22 +435,41 @@ function Remove-EntraGroupOwner {
             }
         }
 
-        foreach ($entry in $ownersToRemove) {
-            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Remove owner '$($entry.Label)'")) {
+        if ($ownersToRemove.Count -gt 0) {
+            Write-NCGraphBatchNotice -Count ($ownersToRemove.Count) -Noun 'owner(s)'
+        }
+
+        for ($offset = 0; $offset -lt $ownersToRemove.Count; $offset += 20) {
+            $chunk = @($ownersToRemove[$offset..([Math]::Min($offset + 20, $ownersToRemove.Count) - 1)])
+
+            $approved = [System.Collections.Generic.List[object]]::new()
+            foreach ($entry in $chunk) {
+                if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Remove owner '$($entry.Label)'")) {
+                    $approved.Add($entry)
+                }
+            }
+            if ($approved.Count -eq 0) { continue }
+
+            $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'DELETE'; Url = "/groups/$([uri]::EscapeDataString([string]$resolvedGroup.Id))/owners/$([uri]::EscapeDataString([string]$approved[$i].Id))/`$ref" }
+                })
+            $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Removing owners from $($resolvedGroup.DisplayName)")
+
+            for ($i = 0; $i -lt $approved.Count; $i++) {
+                $entry = $approved[$i]
+                $response = $responses[$i]
                 $status = 'Removed'
-                try {
-                    Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($resolvedGroup.Id)/owners/$($entry.Id)/`$ref" -Method DELETE | Out-Null
+
+                if ($response.Success) {
                     Write-NCMessage "Removed owner '$($entry.Label)' from group '$($resolvedGroup.DisplayName)'." -Level SUCCESS
                 }
-                catch {
-                    if ($_.Exception.Message -match 'could not find' -or $_.Exception.Message -match 'does not exist') {
-                        $status = 'NotFound'
-                        Write-NCMessage "Owner '$($entry.Label)' is not an owner of '$($resolvedGroup.DisplayName)'." -Level WARNING
-                    }
-                    else {
-                        $status = 'Failed'
-                        Write-NCMessage "Failed to remove owner '$($entry.Label)' from '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
-                    }
+                elseif ($response.ErrorMessage -match 'could not find' -or $response.ErrorMessage -match 'does not exist') {
+                    $status = 'NotFound'
+                    Write-NCMessage "Owner '$($entry.Label)' is not an owner of '$($resolvedGroup.DisplayName)'." -Level WARNING
+                }
+                else {
+                    $status = 'Failed'
+                    Write-NCMessage "Failed to remove owner '$($entry.Label)' from '$($resolvedGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
                 }
 
                 if ($PassThru.IsPresent) {
@@ -561,9 +571,9 @@ function Copy-EntraGroupOwner {
     }
 
     try {
-        $ownerResponse = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($sourceGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName" -Method GET
+        $ownerResponse = Invoke-MgGraphRequest -Uri "v1.0/groups/$($sourceGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName" -Method GET
         $sourceOwners = @()
-        if ($ownerResponse -and $ownerResponse.PSObject.Properties['value']) {
+        if ($ownerResponse -and (Test-NCGraphItemProperty -InputObject $ownerResponse -Name 'value')) {
             $sourceOwners = @($ownerResponse.value)
         }
         elseif ($ownerResponse) {
@@ -581,9 +591,9 @@ function Copy-EntraGroupOwner {
     }
 
     try {
-        $destinationOwnerResponse = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($destinationGroup.Id)/owners?`$select=id" -Method GET
+        $destinationOwnerResponse = Invoke-MgGraphRequest -Uri "v1.0/groups/$($destinationGroup.Id)/owners?`$select=id" -Method GET
         $destinationOwners = @()
-        if ($destinationOwnerResponse -and $destinationOwnerResponse.PSObject.Properties['value']) {
+        if ($destinationOwnerResponse -and (Test-NCGraphItemProperty -InputObject $destinationOwnerResponse -Name 'value')) {
             $destinationOwners = @($destinationOwnerResponse.value)
         }
         elseif ($destinationOwnerResponse) {
@@ -597,52 +607,71 @@ function Copy-EntraGroupOwner {
 
     $destinationOwnerIds = @($destinationOwners | ForEach-Object { [string]$_.id })
     $results = [System.Collections.Generic.List[object]]::new()
+    $entries = [System.Collections.Generic.List[object]]::new()
 
     foreach ($ownerItem in $sourceOwners) {
-        $ownerId = if ($ownerItem.PSObject.Properties['id']) { [string]$ownerItem.id } else { $null }
+        $ownerId = [string](Get-NCGraphItemValue -InputObject $ownerItem -Name 'id')
         if ([string]::IsNullOrWhiteSpace($ownerId)) {
             continue
         }
 
-        $ownerLabel = Get-NCGraphObjectLabel -InputObject $ownerItem
-        if ($destinationOwnerIds -contains $ownerId) {
-            if ($PassThru.IsPresent) {
-                $results.Add([pscustomobject][ordered]@{
-                        SourceGroup      = $sourceGroup.DisplayName
-                        DestinationGroup = $destinationGroup.DisplayName
-                        OwnerName        = $ownerLabel
-                        OwnerId          = $ownerId
-                        Status           = 'Exists'
-                    }) | Out-Null
-            }
-            continue
-        }
+        $entries.Add([pscustomobject]@{
+                Id     = $ownerId
+                Label  = (Get-NCGraphObjectLabel -InputObject $ownerItem)
+                Status = if ($destinationOwnerIds -contains $ownerId) { 'Exists' } else { $null }
+                Send   = $false
+            })
+    }
 
-        if ($PSCmdlet.ShouldProcess($destinationGroup.DisplayName, "Copy owner '$ownerLabel' from '$($sourceGroup.DisplayName)'")) {
-            $status = 'Added'
-            try {
-                $body = @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$ownerId" } | ConvertTo-Json -Depth 3
-                Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($destinationGroup.Id)/owners/`$ref" -Method POST -Body $body -ContentType 'application/json' | Out-Null
-                Write-NCMessage "Copied owner '$ownerLabel' to '$($destinationGroup.DisplayName)'." -Level SUCCESS
-            }
-            catch {
-                if ($_.Exception.Message -match 'already exist' -or $_.Exception.Message -match 'exists') {
-                    $status = 'Exists'
+    $pending = [System.Collections.Generic.List[object]]::new()
+    foreach ($entry in $entries) {
+        if ($entry.Status -eq 'Exists') { continue }
+        if ($PSCmdlet.ShouldProcess($destinationGroup.DisplayName, "Copy owner '$($entry.Label)' from '$($sourceGroup.DisplayName)'")) {
+            $entry.Send = $true
+            $pending.Add($entry)
+        }
+    }
+
+    if ($pending.Count -gt 0) {
+        $ownersRefUrl = "/groups/$([uri]::EscapeDataString([string]$destinationGroup.Id))/owners/`$ref"
+        Write-NCGraphBatchNotice -Count ($pending.Count) -Noun 'owner(s)'
+
+        for ($offset = 0; $offset -lt $pending.Count; $offset += 20) {
+            $approved = @($pending[$offset..([Math]::Min($offset + 20, $pending.Count) - 1)])
+            $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'POST'; Url = $ownersRefUrl; Body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $approved[$i].Id) } }
+                })
+            $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Copying owners to $($destinationGroup.DisplayName)")
+
+            for ($i = 0; $i -lt $approved.Count; $i++) {
+                $ownerLabel = $approved[$i].Label
+                $response = $responses[$i]
+
+                if ($response.Success) {
+                    $approved[$i].Status = 'Added'
+                    Write-NCMessage "Copied owner '$ownerLabel' to '$($destinationGroup.DisplayName)'." -Level SUCCESS
+                }
+                elseif ($response.ErrorMessage -match 'already exist' -or $response.ErrorMessage -match 'exists') {
+                    $approved[$i].Status = 'Exists'
                     Write-NCMessage "Owner '$ownerLabel' is already an owner of '$($destinationGroup.DisplayName)'." -Level WARNING
                 }
                 else {
-                    $status = 'Failed'
-                    Write-NCMessage "Failed to copy owner '$ownerLabel' to '$($destinationGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
+                    $approved[$i].Status = 'Failed'
+                    Write-NCMessage "Failed to copy owner '$ownerLabel' to '$($destinationGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
                 }
             }
+        }
+    }
 
-            if ($PassThru.IsPresent) {
+    if ($PassThru.IsPresent) {
+        foreach ($entry in $entries) {
+            if ($entry.Status -eq 'Exists' -or $entry.Send) {
                 $results.Add([pscustomobject][ordered]@{
                         SourceGroup      = $sourceGroup.DisplayName
                         DestinationGroup = $destinationGroup.DisplayName
-                        OwnerName        = $ownerLabel
-                        OwnerId          = $ownerId
-                        Status           = $status
+                        OwnerName        = $entry.Label
+                        OwnerId          = $entry.Id
+                        Status           = $entry.Status
                     }) | Out-Null
             }
         }
@@ -840,7 +869,7 @@ function Copy-EntraGroup {
             }
 
             try {
-                $destinationGroup = Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/groups' -Method POST -Body ($createBody | ConvertTo-Json -Depth 10) -ContentType 'application/json'
+                $destinationGroup = Invoke-MgGraphRequest -Uri 'v1.0/groups' -Method POST -Body ($createBody | ConvertTo-Json -Depth 10) -ContentType 'application/json'
                 $destinationCreated = $true
                 Write-NCMessage "Created destination group '$DestinationGroupName' for clone operation." -Level SUCCESS
             }
@@ -852,7 +881,7 @@ function Copy-EntraGroup {
         else {
             if (-not $SkipDescription.IsPresent -and -not [string]::IsNullOrWhiteSpace($sourceGroup.Description) -and $sourceGroup.Description -ne $destinationGroup.Description) {
                 try {
-                    Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($destinationGroup.Id)" -Method PATCH -Body (@{ description = $sourceGroup.Description } | ConvertTo-Json -Depth 10) -ContentType 'application/json' | Out-Null
+                    Invoke-MgGraphRequest -Uri "v1.0/groups/$($destinationGroup.Id)" -Method PATCH -Body (@{ description = $sourceGroup.Description } | ConvertTo-Json -Depth 10) -ContentType 'application/json' | Out-Null
                     Write-NCMessage "Copied description to '$($destinationGroup.DisplayName)'." -Level SUCCESS
                 }
                 catch {
@@ -879,7 +908,7 @@ function Copy-EntraGroup {
 
         if (-not $SkipOwners.IsPresent) {
             try {
-                $destinationOwnerUri = "https://graph.microsoft.com/v1.0/groups/$($destinationGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName"
+                $destinationOwnerUri = "v1.0/groups/$($destinationGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName"
                 $destinationOwnerItems = @(Invoke-NCGraphAllPagesCore -Uri $destinationOwnerUri)
                 $destinationOwnerIds = @($destinationOwnerItems | ForEach-Object { [string]$_.id })
             }
@@ -896,7 +925,7 @@ function Copy-EntraGroup {
 
         if (-not $SkipOwners.IsPresent) {
             try {
-                $sourceOwnerUri = "https://graph.microsoft.com/v1.0/groups/$($sourceGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName"
+                $sourceOwnerUri = "v1.0/groups/$($sourceGroup.Id)/owners?`$select=id,displayName,userPrincipalName,appDisplayName"
                 $sourceOwners = @(Invoke-NCGraphAllPagesCore -Uri $sourceOwnerUri)
             }
             catch {
@@ -904,8 +933,9 @@ function Copy-EntraGroup {
                 return
             }
 
+            $ownerPending = [System.Collections.Generic.List[object]]::new()
             foreach ($owner in $sourceOwners) {
-                $ownerId = if ($owner.PSObject.Properties['id']) { [string]$owner.id } else { $null }
+                $ownerId = [string](Get-NCGraphItemValue -InputObject $owner -Name 'id')
                 if ([string]::IsNullOrWhiteSpace($ownerId)) {
                     continue
                 }
@@ -915,20 +945,35 @@ function Copy-EntraGroup {
                     continue
                 }
 
-                $ownerLabel = Get-NCGraphObjectLabel -InputObject $owner
-                try {
-                    $body = @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$ownerId" } | ConvertTo-Json -Depth 3
-                    Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($destinationGroup.Id)/owners/`$ref" -Method POST -Body $body -ContentType 'application/json' | Out-Null
-                    $ownerCopied++
-                    Write-NCMessage "Copied owner '$ownerLabel' to '$($destinationGroup.DisplayName)'." -Level SUCCESS
-                }
-                catch {
-                    if ($_.Exception.Message -match 'already exist' -or $_.Exception.Message -match 'exists') {
-                        $ownerSkipped++
-                        Write-NCMessage "Owner '$ownerLabel' is already an owner of '$($destinationGroup.DisplayName)'." -Level WARNING
-                    }
-                    else {
-                        Write-NCMessage "Failed to copy owner '$ownerLabel' to '$($destinationGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
+                $ownerPending.Add([pscustomobject]@{ Id = $ownerId; Label = (Get-NCGraphObjectLabel -InputObject $owner) })
+            }
+
+            if ($ownerPending.Count -gt 0) {
+                $ownersRefUrl = "/groups/$([uri]::EscapeDataString([string]$destinationGroup.Id))/owners/`$ref"
+                Write-NCGraphBatchNotice -Count ($ownerPending.Count) -Noun 'owner(s)'
+
+                for ($offset = 0; $offset -lt $ownerPending.Count; $offset += 20) {
+                    $approved = @($ownerPending[$offset..([Math]::Min($offset + 20, $ownerPending.Count) - 1)])
+                    $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                            @{ Id = "m$i"; Method = 'POST'; Url = $ownersRefUrl; Body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $approved[$i].Id) } }
+                        })
+                    $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Copying owners to $($destinationGroup.DisplayName)")
+
+                    for ($i = 0; $i -lt $approved.Count; $i++) {
+                        $ownerLabel = $approved[$i].Label
+                        $response = $responses[$i]
+
+                        if ($response.Success) {
+                            $ownerCopied++
+                            Write-NCMessage "Copied owner '$ownerLabel' to '$($destinationGroup.DisplayName)'." -Level SUCCESS
+                        }
+                        elseif ($response.ErrorMessage -match 'already exist' -or $response.ErrorMessage -match 'exists') {
+                            $ownerSkipped++
+                            Write-NCMessage "Owner '$ownerLabel' is already an owner of '$($destinationGroup.DisplayName)'." -Level WARNING
+                        }
+                        else {
+                            Write-NCMessage "Failed to copy owner '$ownerLabel' to '$($destinationGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
+                        }
                     }
                 }
             }
@@ -958,8 +1003,9 @@ function Copy-EntraGroup {
                 return 'DirectoryObject'
             }
 
+            $memberPending = [System.Collections.Generic.List[object]]::new()
             foreach ($member in $sourceMembers) {
-                $memberId = if ($member.PSObject.Properties['id']) { [string]$member.id } else { $null }
+                $memberId = [string](Get-NCGraphItemValue -InputObject $member -Name 'id')
                 if ([string]::IsNullOrWhiteSpace($memberId)) {
                     continue
                 }
@@ -973,19 +1019,36 @@ function Copy-EntraGroup {
                 $memberType = if ($memberProps.ContainsKey('@odata.type')) { & $resolveType $memberProps['@odata.type'] } else { 'DirectoryObject' }
                 $memberLabel = if ($memberProps.ContainsKey('displayName')) { $memberProps.displayName } elseif ($memberProps.ContainsKey('userPrincipalName')) { $memberProps.userPrincipalName } else { $memberId }
 
-                try {
-                    $body = @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$memberId" } | ConvertTo-Json -Depth 3
-                    Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($destinationGroup.Id)/members/`$ref" -Method POST -Body $body -ContentType 'application/json' | Out-Null
-                    $memberCopied++
-                    Write-NCMessage "Copied $memberType '$memberLabel' to '$($destinationGroup.DisplayName)'." -Level SUCCESS
-                }
-                catch {
-                    if ($_.Exception.Message -match 'already exist' -or $_.Exception.Message -match 'exists') {
-                        $memberSkipped++
-                        Write-NCMessage "$memberType '$memberLabel' is already a member of '$($destinationGroup.DisplayName)'." -Level WARNING
-                    }
-                    else {
-                        Write-NCMessage "Failed to copy $memberType '$memberLabel' to '$($destinationGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
+                $memberPending.Add([pscustomobject]@{ Id = $memberId; Type = $memberType; Label = $memberLabel })
+            }
+
+            if ($memberPending.Count -gt 0) {
+                $membersRefUrl = "/groups/$([uri]::EscapeDataString([string]$destinationGroup.Id))/members/`$ref"
+                Write-NCGraphBatchNotice -Count ($memberPending.Count) -Noun 'member(s)'
+
+                for ($offset = 0; $offset -lt $memberPending.Count; $offset += 20) {
+                    $approved = @($memberPending[$offset..([Math]::Min($offset + 20, $memberPending.Count) - 1)])
+                    $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                            @{ Id = "m$i"; Method = 'POST'; Url = $membersRefUrl; Body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $approved[$i].Id) } }
+                        })
+                    $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Copying members to $($destinationGroup.DisplayName)")
+
+                    for ($i = 0; $i -lt $approved.Count; $i++) {
+                        $memberType = $approved[$i].Type
+                        $memberLabel = $approved[$i].Label
+                        $response = $responses[$i]
+
+                        if ($response.Success) {
+                            $memberCopied++
+                            Write-NCMessage "Copied $memberType '$memberLabel' to '$($destinationGroup.DisplayName)'." -Level SUCCESS
+                        }
+                        elseif ($response.ErrorMessage -match 'already exist' -or $response.ErrorMessage -match 'exists') {
+                            $memberSkipped++
+                            Write-NCMessage "$memberType '$memberLabel' is already a member of '$($destinationGroup.DisplayName)'." -Level WARNING
+                        }
+                        else {
+                            Write-NCMessage "Failed to copy $memberType '$memberLabel' to '$($destinationGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
+                        }
                     }
                 }
             }
@@ -1032,15 +1095,15 @@ function Add-EntraGroupUser {
     #>
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
     param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0)]
         [Alias('Group', 'DisplayName')]
         [string]$GroupName,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0)]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('User', 'UPN', 'Mail', 'Id', 'UserId')]
         [string[]]$UserIdentifier,
 
@@ -1120,69 +1183,47 @@ function Add-EntraGroupUser {
         }
 
         $results = [System.Collections.Generic.List[object]]::new()
-        $uniqueUsers = $users | Select-Object -Unique
+        $uniqueUsers = @($users | Select-Object -Unique)
+        $membersRefUrl = "/groups/$($resolvedGroup.Id)/members/`$ref"
+        Write-NCGraphBatchNotice -Count ($uniqueUsers.Count) -Noun 'user(s)'
 
-        foreach ($user in $uniqueUsers) {
-            $userId = $null
-            $userLabel = $user
+        for ($offset = 0; $offset -lt $uniqueUsers.Count; $offset += 20) {
+            $chunk = @($uniqueUsers[$offset..([Math]::Min($offset + 20, $uniqueUsers.Count) - 1)])
+            $targets = @(Resolve-NCEntraGroupUserTarget -UserIdentifier $chunk -TreatInputAsId:$TreatInputAsId)
 
-            if ($TreatInputAsId.IsPresent -or $user -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-                $userId = $user
-            }
-            else {
-                $resolvedUser = $null
-                try {
-                    $resolvedUser = Get-MgUser -UserId $user -ErrorAction Stop
+            $approved = [System.Collections.Generic.List[object]]::new()
+            foreach ($target in $targets) {
+                if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add user '$($target.Label)'")) {
+                    $approved.Add($target)
                 }
-                catch {
-                    $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $user
-                    if ($resolvedIdentifier) {
-                        try {
-                            $resolvedUser = Get-MgUser -UserId $resolvedIdentifier -ErrorAction Stop
-                        }
-                        catch {
-                            Write-NCMessage "Unable to resolve user '$user': $($_.Exception.Message)" -Level ERROR
-                            continue
-                        }
-                    }
-                    else {
-                        continue
-                    }
-                }
-
-                if (-not $resolvedUser) {
-                    Write-NCMessage "User '$user' not found." -Level WARNING
-                    continue
-                }
-
-                $userId = $resolvedUser.Id
-                $userLabel = if ($resolvedUser.UserPrincipalName) { $resolvedUser.UserPrincipalName } else { $resolvedUser.DisplayName }
             }
+            if ($approved.Count -eq 0) { continue }
 
-            if (-not $userId) {
-                Write-NCMessage "Unable to determine object ID for user '$user'." -Level ERROR
-                continue
-            }
+            $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'POST'; Url = $membersRefUrl; Body = @{ '@odata.id' = (Get-NCGraphDirectoryObjectUri -Id $approved[$i].Id) } }
+                })
+            $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Adding users to $($resolvedGroup.DisplayName)")
 
-            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Add user '$userLabel'")) {
+            for ($i = 0; $i -lt $approved.Count; $i++) {
+                $userId = $approved[$i].Id
+                $userLabel = $approved[$i].Label
+                $response = $responses[$i]
                 $status = 'Added'
-                try {
-                    New-MgGroupMember -GroupId $resolvedGroup.Id -DirectoryObjectId $userId -ErrorAction Stop | Out-Null
+
+                if ($response.Success) {
                     Write-NCMessage "Added user '$userLabel' to group '$($resolvedGroup.DisplayName)'." -Level SUCCESS
                 }
-                catch {
-                    if ($_.Exception.Message -match 'added object references already exist') {
-                        $status = 'Exists'
-                        Write-NCMessage "User '$userLabel' is already a member of '$($resolvedGroup.DisplayName)'." -Level WARNING
-                    }
-                    elseif ($_.Exception.Message -match 'on-premises mastered Directory Sync objects|currently undergoing migration') {
-                        $status = 'Failed'
-                        Write-NCMessage "Group '$($resolvedGroup.DisplayName)' is synchronized from on-premises AD, so membership can't be changed directly in Entra. Update the group in AD and let sync propagate the change." -Level ERROR
-                    }
-                    else {
-                        $status = 'Failed'
-                        Write-NCMessage "Failed to add user '$userLabel' to '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
-                    }
+                elseif ($response.ErrorMessage -match 'added object references already exist') {
+                    $status = 'Exists'
+                    Write-NCMessage "User '$userLabel' is already a member of '$($resolvedGroup.DisplayName)'." -Level WARNING
+                }
+                elseif ($response.ErrorMessage -match 'on-premises mastered Directory Sync objects|currently undergoing migration') {
+                    $status = 'Failed'
+                    Write-NCMessage "Group '$($resolvedGroup.DisplayName)' is synchronized from on-premises AD, so membership can't be changed directly in Entra. Update the group in AD and let sync propagate the change." -Level ERROR
+                }
+                else {
+                    $status = 'Failed'
+                    Write-NCMessage "Failed to add user '$userLabel' to '$($resolvedGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
                 }
 
                 if ($PassThru.IsPresent) {
@@ -1559,7 +1600,7 @@ function Export-DistributionGroups {
             }
 
             if ($GridView.IsPresent) {
-                $results | Out-GridView -Title "M365 Distribution Groups"
+                $results | Out-NCGridView -Title "M365 Distribution Groups"
             }
             elseif ($emitCsv) {
                 & $writeBuffer $results
@@ -1922,7 +1963,7 @@ function Export-DynamicDistributionGroups {
             }
 
             if ($GridView.IsPresent) {
-                $results | Out-GridView -Title "M365 Dynamic Distribution Groups"
+                $results | Out-NCGridView -Title "M365 Dynamic Distribution Groups"
             }
             elseif ($emitCsv) {
                 & $writeBuffer $results
@@ -1990,19 +2031,27 @@ function Export-EmptyEntraGroups {
             $totalGroups = $groups.Count
             $processedCount = 0
 
+            Write-NCGraphBatchNotice -Count $totalGroups -Noun 'group(s)'
+            $memberRequests = @(for ($i = 0; $i -lt $totalGroups; $i++) {
+                    @{ Id = "g$i"; Method = 'GET'; Url = "/groups/$([uri]::EscapeDataString([string]$groups[$i].Id))/members?`$select=id&`$top=1" }
+                })
+            $memberLookup = @{}
+            foreach ($memberResult in @(Invoke-NCGraphBatch -Requests $memberRequests -Activity 'Checking group members')) {
+                $memberLookup[$memberResult.Id] = $memberResult
+            }
+
             foreach ($group in $groups) {
                 $processedCount++
                 $Percentage = Get-NCProgressPercent -Current $counter -Total $totalGroups
                 Write-Progress -Activity "Checking $($group.DisplayName)" -Status "$processedCount of $totalGroups - $Percentage%" -PercentComplete $Percentage
 
-                try {
-                    $members = @(Get-MgGroupMember -GroupId $group.Id -All -ErrorAction Stop)
-                }
-                catch {
-                    Write-NCMessage "Unable to read members for group '$($group.DisplayName)'. $($_.Exception.Message)" -Level WARNING
+                $memberResult = $memberLookup["g$($processedCount - 1)"]
+                if (-not $memberResult.Success) {
+                    Write-NCMessage "Unable to read members for group '$($group.DisplayName)'. $($memberResult.ErrorMessage)" -Level WARNING
                     continue
                 }
 
+                $members = if ($null -ne $memberResult.Body -and $null -ne $memberResult.Body.value) { @($memberResult.Body.value) } else { @() }
                 if ($members.Count -gt 0) {
                     continue
                 }
@@ -2389,7 +2438,7 @@ function Export-M365Group {
             }
 
             if ($GridView.IsPresent) {
-                $results | Out-GridView -Title "M365 Unified Groups"
+                $results | Out-NCGridView -Title "M365 Unified Groups"
             }
             elseif ($emitCsv) {
                 & $writeBuffer $results
@@ -2585,98 +2634,105 @@ function Get-EntraGroupDevice {
     )
 
     begin {
-        $graphConnected = $null
+        $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        if (-not $graphConnected) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+        }
+
+        $guidPattern = '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+        $queue = [System.Collections.Generic.List[string]]::new()
+        $state = @{ Started = $false }
+
+        $flush = {
+            $inputs = @($queue)
+            $queue.Clear()
+            if ($inputs.Count -eq 0) { return }
+
+            if (-not $state.Started) {
+                $state.Started = $true
+                Write-NCGraphBatchNotice -Count ($inputs.Count) -Noun 'devices' -Streaming
+            }
+
+            $targets = @(Resolve-NCEntraDeviceTargetBatch -DeviceIdentifier $inputs -TreatInputAsId:$TreatInputAsId.IsPresent)
+            if ($targets.Count -eq 0) { return }
+
+            $requests = @(for ($i = 0; $i -lt $targets.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'GET'; Url = "/devices/$([uri]::EscapeDataString([string]$targets[$i].Id))/memberOf" }
+                })
+            $lookup = @{}
+            foreach ($result in @(Invoke-NCGraphBatchCollection -Requests $requests -Activity 'Reading device group memberships')) {
+                $lookup[$result.Id] = $result
+            }
+
+            for ($i = 0; $i -lt $targets.Count; $i++) {
+                $deviceLabel = $targets[$i].Label
+                $result = $lookup["m$i"]
+
+                if (-not $result.Success) {
+                    $inputWasId = $TreatInputAsId.IsPresent -or $targets[$i].Input -match $guidPattern
+                    if ($inputWasId) {
+                        Write-NCMessage "Entra device with ID '$($targets[$i].Input)' not found: $($result.ErrorMessage)" -Level ERROR
+                    }
+                    else {
+                        Write-NCMessage "Unable to read group memberships for device ${deviceLabel}: $($result.ErrorMessage)" -Level ERROR
+                    }
+                    continue
+                }
+
+                $memberships = @($result.Items | ForEach-Object { ConvertTo-NCGraphDirectoryObject -Item $_ })
+
+                Add-EmptyLine
+                Write-Verbose "Device ($deviceLabel) - Groups found: $($memberships.Count)"
+
+                if (-not $memberships -or $memberships.Count -eq 0) {
+                    Write-NCMessage "No groups found for $deviceLabel." -Level WARNING
+                    continue
+                }
+
+                $results = [System.Collections.Generic.List[object]]::new()
+                foreach ($membership in $memberships) {
+                    $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
+                    $row = [ordered]@{
+                        'Group Name' = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
+                        'Group Mail' = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
+                    }
+
+                    if ($GridView.IsPresent) {
+                        $row['Group Description'] = if ($props.ContainsKey('description')) { $props.description } else { $null }
+                        $row['Group Mail Nickname'] = if ($props.ContainsKey('mailNickname')) { $props.mailNickname } else { $null }
+                        $row['Group Mail Enabled'] = if ($props.ContainsKey('mailEnabled')) { $props.mailEnabled } else { $null }
+                        $row['Group Type'] = if ($props.ContainsKey('groupTypes')) { ($props.groupTypes -join ', ') } else { $null }
+                        $row['Group ID'] = $membership.Id
+                    }
+
+                    $results.Add([pscustomobject]$row) | Out-Null
+                }
+
+                if ($GridView.IsPresent) {
+                    $results | Out-NCGridView -Title "Entra Device Groups - $deviceLabel"
+                }
+                else {
+                    $results | Sort-Object 'Group Name'
+                }
+            }
+        }
     }
 
     process {
-        if ($null -eq $graphConnected) {
-            $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
-            if (-not $graphConnected) {
-                Add-EmptyLine
-                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
-                return
-            }
-        }
-
-        $device = $null
-        $deviceLabel = $DeviceIdentifier
-
-        if ($TreatInputAsId.IsPresent -or $DeviceIdentifier -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-            try {
-                $device = Get-MgDevice -DeviceId $DeviceIdentifier -ErrorAction Stop
-            }
-            catch {
-                Write-NCMessage "Entra device with ID '$DeviceIdentifier' not found: $($_.Exception.Message)" -Level ERROR
-                return
-            }
-        }
-        else {
-            $escapedDevice = $DeviceIdentifier.Replace("'", "''")
-            try {
-                $deviceMatches = Get-MgDevice -Filter "displayName eq '$escapedDevice'" -All -ErrorAction Stop
-            }
-            catch {
-                Write-NCMessage "Unable to resolve device '$DeviceIdentifier': $($_.Exception.Message)" -Level ERROR
-                return
-            }
-
-            if (-not $deviceMatches -or $deviceMatches.Count -eq 0) {
-                Write-NCMessage "Device '$DeviceIdentifier' not found" -Level WARNING
-                return
-            }
-
-            if ($deviceMatches.Count -gt 1) {
-                Write-NCMessage "Multiple devices matched '$DeviceIdentifier'. Using the first result ($($deviceMatches[0].DisplayName))" -Level WARNING
-            }
-
-            $device = $deviceMatches | Select-Object -First 1
-            $deviceLabel = $device.DisplayName
-        }
-
-        if (-not $device) {
+        if (-not $graphConnected) {
             return
         }
 
-        try {
-            $memberships = @(Get-MgDeviceMemberOf -DeviceId $device.Id -All -ErrorAction Stop)
+        $queue.Add($DeviceIdentifier)
+        if ($queue.Count -ge 20) {
+            & $flush
         }
-        catch {
-            Write-NCMessage "Unable to read group memberships for device ${deviceLabel}: $($_.Exception.Message)" -Level ERROR
-            return
-        }
+    }
 
-        Add-EmptyLine
-        Write-Verbose "Device ($deviceLabel) - Groups found: $($memberships.Count)"
-
-        if (-not $memberships -or $memberships.Count -eq 0) {
-            Write-NCMessage "No groups found for $deviceLabel." -Level WARNING
-            return
-        }
-
-        $results = [System.Collections.Generic.List[object]]::new()
-        foreach ($membership in $memberships) {
-            $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
-            $row = [ordered]@{
-                'Group Name' = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
-                'Group Mail' = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
-            }
-
-            if ($GridView.IsPresent) {
-                $row['Group Description'] = if ($props.ContainsKey('description')) { $props.description } else { $null }
-                $row['Group Mail Nickname'] = if ($props.ContainsKey('mailNickname')) { $props.mailNickname } else { $null }
-                $row['Group Mail Enabled'] = if ($props.ContainsKey('mailEnabled')) { $props.mailEnabled } else { $null }
-                $row['Group Type'] = if ($props.ContainsKey('groupTypes')) { ($props.groupTypes -join ', ') } else { $null }
-                $row['Group ID'] = $membership.Id
-            }
-
-            $results.Add([pscustomobject]$row) | Out-Null
-        }
-
-        if ($GridView.IsPresent) {
-            $results | Out-GridView -Title "Entra Device Groups - $deviceLabel"
-        }
-        else {
-            $results | Sort-Object 'Group Name'
+    end {
+        if ($graphConnected -and $queue.Count -gt 0) {
+            & $flush
         }
     }
 }
@@ -2785,8 +2841,33 @@ function Get-EntraGroupMembers {
         return 'DirectoryObject'
     }
 
+    $resolveOdataType = {
+        param($member)
+        $memberProps = if ($member.AdditionalProperties) { $member.AdditionalProperties } else { @{} }
+        if ($memberProps.ContainsKey('@odata.type')) { $memberProps['@odata.type'] } else { $null }
+    }
+
+    $deviceLookup = @{}
+    if ($IncludeDeviceUsers.IsPresent) {
+        $deviceRequests = [System.Collections.Generic.List[object]]::new()
+        for ($i = 0; $i -lt $members.Count; $i++) {
+            if ((& $resolveType (& $resolveOdataType $members[$i])) -ne 'Device') { continue }
+            $deviceSegment = [uri]::EscapeDataString([string]$members[$i].Id)
+            $deviceRequests.Add(@{ Id = "o$i"; Method = 'GET'; Url = "/devices/$deviceSegment/registeredOwners" })
+            $deviceRequests.Add(@{ Id = "u$i"; Method = 'GET'; Url = "/devices/$deviceSegment/registeredUsers" })
+        }
+
+        if ($deviceRequests.Count -gt 0) {
+            Write-NCGraphBatchNotice -Count ([int]($deviceRequests.Count / 2)) -Noun 'device(s)'
+            foreach ($result in @(Invoke-NCGraphBatchCollection -Requests @($deviceRequests) -Activity 'Reading device registered owners and users')) {
+                $deviceLookup[$result.Id] = $result
+            }
+        }
+    }
+
     $results = [System.Collections.Generic.List[object]]::new()
-    foreach ($member in $members) {
+    for ($memberIndex = 0; $memberIndex -lt $members.Count; $memberIndex++) {
+        $member = $members[$memberIndex]
         $props = if ($member.AdditionalProperties) { $member.AdditionalProperties } else { @{} }
         $odataType = if ($props.ContainsKey('@odata.type')) { $props['@odata.type'] } else { $null }
         $memberType = & $resolveType $odataType
@@ -2803,18 +2884,20 @@ function Get-EntraGroupMembers {
         if ($IncludeDeviceUsers.IsPresent -and $memberType -eq 'Device') {
             $owners = @()
             $users = @()
-            try {
-                $owners = @(Get-MgDeviceRegisteredOwner -DeviceId $member.Id -All -ErrorAction Stop)
+            $ownerResult = $deviceLookup["o$memberIndex"]
+            if ($ownerResult.Success) {
+                $owners = @($ownerResult.Items | ForEach-Object { ConvertTo-NCGraphDirectoryObject -Item $_ })
             }
-            catch {
-                Write-NCMessage "Unable to read registered owners for device $($displayName): $($_.Exception.Message)" -Level WARNING
+            else {
+                Write-NCMessage "Unable to read registered owners for device $($displayName): $($ownerResult.ErrorMessage)" -Level WARNING
             }
 
-            try {
-                $users = @(Get-MgDeviceRegisteredUser -DeviceId $member.Id -All -ErrorAction Stop)
+            $userResult = $deviceLookup["u$memberIndex"]
+            if ($userResult.Success) {
+                $users = @($userResult.Items | ForEach-Object { ConvertTo-NCGraphDirectoryObject -Item $_ })
             }
-            catch {
-                Write-NCMessage "Unable to read registered users for device $($displayName): $($_.Exception.Message)" -Level WARNING
+            else {
+                Write-NCMessage "Unable to read registered users for device $($displayName): $($userResult.ErrorMessage)" -Level WARNING
             }
 
             $ownerLabels = $owners | ForEach-Object {
@@ -2857,7 +2940,7 @@ function Get-EntraGroupMembers {
 
     $sorted = $results | Sort-Object 'Member Type', 'Member Name'
     if ($GridView.IsPresent) {
-        $sorted | Out-GridView -Title "Entra Group Members - $($resolvedGroup.DisplayName)"
+        $sorted | Out-NCGridView -Title "Entra Group Members - $($resolvedGroup.DisplayName)"
     }
     else {
         $sorted
@@ -2892,120 +2975,176 @@ function Get-EntraGroupUser {
     )
 
     begin {
-        $graphConnected = $null
+        $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        if (-not $graphConnected) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+        }
+
+        $guidPattern = '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+        $queue = [System.Collections.Generic.List[string]]::new()
+        $state = @{ Started = $false }
+
+        $flush = {
+            $inputs = @($queue)
+            $queue.Clear()
+            if ($inputs.Count -eq 0) { return }
+
+            if (-not $state.Started) {
+                $state.Started = $true
+                Write-NCGraphBatchNotice -Count ($inputs.Count) -Noun 'users' -Streaming
+            }
+
+            # (a) Resolve identities: object IDs with one batched GET, everything else through the user resolver.
+            $idLookup = @{}
+            $idRequests = @(for ($i = 0; $i -lt $inputs.Count; $i++) {
+                    if ($TreatInputAsId.IsPresent -or $inputs[$i] -match $guidPattern) {
+                        @{ Id = "u$i"; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString($inputs[$i]))?`$select=id,userPrincipalName,displayName" }
+                    }
+                })
+            if ($idRequests.Count -gt 0) {
+                foreach ($result in @(Invoke-NCGraphBatch -Requests $idRequests -Activity 'Resolving users')) {
+                    $idLookup[$result.Id] = $result
+                }
+            }
+
+            $nameInputs = @(for ($i = 0; $i -lt $inputs.Count; $i++) {
+                    if (-not ($TreatInputAsId.IsPresent -or $inputs[$i] -match $guidPattern)) { $inputs[$i] }
+                })
+            $failedNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $resolved = if ($nameInputs.Count -gt 0) {
+                Resolve-NCGraphUserBatch -Identifier $nameInputs -Property @('id', 'userPrincipalName', 'displayName') -FailedIdentifier $failedNames
+            }
+            else {
+                @{}
+            }
+
+            # (b) Build the list of users to read, keeping input order.
+            $targets = [System.Collections.Generic.List[object]]::new()
+            for ($i = 0; $i -lt $inputs.Count; $i++) {
+                $identifier = $inputs[$i]
+                $user = $null
+
+                if ($TreatInputAsId.IsPresent -or $identifier -match $guidPattern) {
+                    $result = $idLookup["u$i"]
+                    if (-not $result.Success -or -not $result.Body) {
+                        Write-NCMessage "Entra user with ID '$identifier' not found: $($result.ErrorMessage)" -Level ERROR
+                        continue
+                    }
+                    $user = [pscustomobject]$result.Body
+                }
+                else {
+                    $user = $resolved[$identifier.Trim()]
+                    if (-not $user -and $failedNames.Contains($identifier.Trim())) {
+                        # The resolver already reported this lookup failure.
+                        continue
+                    }
+                    if (-not $user) {
+                        $escapedUser = $identifier.Replace("'", "''")
+                        try {
+                            $userMatches = Get-MgUser -Filter "displayName eq '$escapedUser'" -All -ErrorAction Stop
+                        }
+                        catch {
+                            Write-NCMessage "Unable to resolve user '$identifier': $($_.Exception.Message)" -Level ERROR
+                            continue
+                        }
+
+                        if (-not $userMatches -or $userMatches.Count -eq 0) {
+                            Write-NCMessage "User '$identifier' not found" -Level WARNING
+                            continue
+                        }
+
+                        if ($userMatches.Count -gt 1) {
+                            Write-NCMessage "Multiple users matched '$identifier'. Using the first result ($($userMatches[0].UserPrincipalName))." -Level WARNING
+                        }
+
+                        $matched = $userMatches | Select-Object -First 1
+                        $user = [pscustomobject]@{ id = $matched.Id; userPrincipalName = $matched.UserPrincipalName; displayName = $matched.DisplayName }
+                    }
+                }
+
+                if (-not $user -or -not $user.id) {
+                    continue
+                }
+
+                $userLabel = if ($user.userPrincipalName) { $user.userPrincipalName } else { $user.displayName }
+                $targets.Add([pscustomobject]@{ Id = [string]$user.id; Label = $userLabel })
+            }
+
+            if ($targets.Count -eq 0) { return }
+
+            # (c) Read memberships for every resolved user in batches.
+            $requests = @(for ($i = 0; $i -lt $targets.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString($targets[$i].Id))/memberOf?`$select=id,displayName,mail,groupTypes,securityEnabled,mailEnabled,description,mailNickname" }
+                })
+            $lookup = @{}
+            foreach ($result in @(Invoke-NCGraphBatchCollection -Requests $requests -Activity 'Reading user group memberships')) {
+                $lookup[$result.Id] = $result
+            }
+
+            # (d) Emit per user, in input order.
+            for ($i = 0; $i -lt $targets.Count; $i++) {
+                $userLabel = $targets[$i].Label
+                $result = $lookup["m$i"]
+
+                if (-not $result.Success) {
+                    Write-NCMessage "Unable to read group memberships for user ${userLabel}: $($result.ErrorMessage)" -Level ERROR
+                    continue
+                }
+
+                $memberships = @($result.Items | ForEach-Object { ConvertTo-NCGraphDirectoryObject -Item $_ })
+
+                Add-EmptyLine
+                Write-Verbose "User ($userLabel) - Groups found: $($memberships.Count)"
+
+                if (-not $memberships -or $memberships.Count -eq 0) {
+                    Write-NCMessage "No groups found for $userLabel." -Level WARNING
+                    continue
+                }
+
+                $results = [System.Collections.Generic.List[object]]::new()
+                foreach ($membership in $memberships) {
+                    $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
+                    $row = [ordered]@{
+                        'Group Name' = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
+                        'Group Mail' = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
+                    }
+
+                    if ($GridView.IsPresent) {
+                        $row['Group Description'] = if ($props.ContainsKey('description')) { $props.description } else { $null }
+                        $row['Group Mail Nickname'] = if ($props.ContainsKey('mailNickname')) { $props.mailNickname } else { $null }
+                        $row['Group Mail Enabled'] = if ($props.ContainsKey('mailEnabled')) { $props.mailEnabled } else { $null }
+                        $row['Group Type'] = if ($props.ContainsKey('groupTypes')) { ($props.groupTypes -join ', ') } else { $null }
+                        $row['Group ID'] = $membership.Id
+                    }
+
+                    $results.Add([pscustomobject]$row) | Out-Null
+                }
+
+                if ($GridView.IsPresent) {
+                    $results | Out-NCGridView -Title "Entra User Groups - $userLabel"
+                }
+                else {
+                    $results | Sort-Object 'Group Name'
+                }
+            }
+        }
     }
 
     process {
-        if ($null -eq $graphConnected) {
-            $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
-            if (-not $graphConnected) {
-                Add-EmptyLine
-                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
-                return
-            }
-        }
-
-        $user = $null
-        $userLabel = $UserIdentifier
-
-        if ($TreatInputAsId.IsPresent -or $UserIdentifier -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-            try {
-                $user = Get-MgUser -UserId $UserIdentifier -ErrorAction Stop
-            }
-            catch {
-                Write-NCMessage "Entra user with ID '$UserIdentifier' not found: $($_.Exception.Message)" -Level ERROR
-                return
-            }
-        }
-        else {
-            try {
-                $user = Get-MgUser -UserId $UserIdentifier -ErrorAction Stop
-            }
-            catch {
-                $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $UserIdentifier
-                if ($resolvedIdentifier) {
-                    try {
-                        $user = Get-MgUser -UserId $resolvedIdentifier -ErrorAction Stop
-                    }
-                    catch {
-                        Write-NCMessage "Unable to resolve user '$UserIdentifier': $($_.Exception.Message)" -Level ERROR
-                        return
-                    }
-                }
-
-                if ($user) {
-                    $userLabel = if ($user.UserPrincipalName) { $user.UserPrincipalName } else { $user.DisplayName }
-                }
-                else {
-                    $escapedUser = $UserIdentifier.Replace("'", "''")
-                    try {
-                        $userMatches = Get-MgUser -Filter "displayName eq '$escapedUser'" -All -ErrorAction Stop
-                    }
-                    catch {
-                        Write-NCMessage "Unable to resolve user '$UserIdentifier': $($_.Exception.Message)" -Level ERROR
-                        return
-                    }
-
-                    if (-not $userMatches -or $userMatches.Count -eq 0) {
-                        Write-NCMessage "User '$UserIdentifier' not found" -Level WARNING
-                        return
-                    }
-
-                    if ($userMatches.Count -gt 1) {
-                        Write-NCMessage "Multiple users matched '$UserIdentifier'. Using the first result ($($userMatches[0].UserPrincipalName))." -Level WARNING
-                    }
-
-                    $user = $userMatches | Select-Object -First 1
-                }
-            }
-        }
-
-        if (-not $user) {
+        if (-not $graphConnected) {
             return
         }
 
-        $userLabel = if ($user.UserPrincipalName) { $user.UserPrincipalName } else { $user.DisplayName }
-
-        try {
-            $memberships = @(Get-MgUserMemberOf -UserId $user.Id -All -ErrorAction Stop)
+        $queue.Add($UserIdentifier)
+        if ($queue.Count -ge 20) {
+            & $flush
         }
-        catch {
-            Write-NCMessage "Unable to read group memberships for user ${userLabel}: $($_.Exception.Message)" -Level ERROR
-            return
-        }
+    }
 
-        Add-EmptyLine
-        Write-Verbose "User ($userLabel) - Groups found: $($memberships.Count)"
-
-        if (-not $memberships -or $memberships.Count -eq 0) {
-            Write-NCMessage "No groups found for $userLabel." -Level WARNING
-            return
-        }
-
-        $results = [System.Collections.Generic.List[object]]::new()
-        foreach ($membership in $memberships) {
-            $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
-            $row = [ordered]@{
-                'Group Name' = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
-                'Group Mail' = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
-            }
-
-            if ($GridView.IsPresent) {
-                $row['Group Description'] = if ($props.ContainsKey('description')) { $props.description } else { $null }
-                $row['Group Mail Nickname'] = if ($props.ContainsKey('mailNickname')) { $props.mailNickname } else { $null }
-                $row['Group Mail Enabled'] = if ($props.ContainsKey('mailEnabled')) { $props.mailEnabled } else { $null }
-                $row['Group Type'] = if ($props.ContainsKey('groupTypes')) { ($props.groupTypes -join ', ') } else { $null }
-                $row['Group ID'] = $membership.Id
-            }
-
-            $results.Add([pscustomobject]$row) | Out-Null
-        }
-
-        if ($GridView.IsPresent) {
-            $results | Out-GridView -Title "Entra User Groups - $userLabel"
-        }
-        else {
-            $results | Sort-Object 'Group Name'
+    end {
+        if ($graphConnected -and $queue.Count -gt 0) {
+            & $flush
         }
     }
 }
@@ -3080,7 +3219,7 @@ function Get-RoleGroupsMembers {
         $sorted = $results | Sort-Object Count -Descending
 
         if ($GridView.IsPresent) {
-            $sorted | Out-GridView -Title "Exchange Role Groups"
+            $sorted | Out-NCGridView -Title "Exchange Role Groups"
         }
         elseif ($AsTable.IsPresent) {
             Show-Table -Rows $sorted -AsTable
@@ -3122,30 +3261,127 @@ function Get-UserGroups {
     )
 
     begin {
-        $graphConnected = $null
+        $graphConnected = Test-MgGraphConnection
+        if (-not $graphConnected) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+        }
+
+        $queue = [System.Collections.Generic.List[object]]::new()
+        $state = @{ Started = $false }
+
+        # Builds and emits the output rows for one input.
+        $emit = {
+            param([string]$ResolvedPrincipal, [string]$RecipientType, [object[]]$Memberships)
+
+            Add-EmptyLine
+            Write-Verbose "$RecipientType ($ResolvedPrincipal) - Groups found: $($Memberships.Count)"
+
+            if (-not $Memberships -or $Memberships.Count -eq 0) {
+                Write-NCMessage "No groups found for $ResolvedPrincipal." -Level WARNING
+                return
+            }
+
+            $results = [System.Collections.Generic.List[object]]::new()
+            foreach ($membership in $Memberships) {
+                $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
+                $row = [ordered]@{
+                    GroupName = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
+                    GroupMail = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
+                }
+
+                if ($GridView.IsPresent) {
+                    $row['Group Description'] = if ($props.ContainsKey('description')) { $props.description } else { $null }
+                    $row['Group Mail Nickname'] = if ($props.ContainsKey('mailNickname')) { $props.mailNickname } else { $null }
+                    $row['Group Mail Enabled'] = if ($props.ContainsKey('mailEnabled')) { $props.mailEnabled } else { $null }
+                    $row['Group Type'] = if ($props.ContainsKey('groupTypes')) { ($props.groupTypes -join ', ') } else { $null }
+                    $row['Group ID'] = $membership.Id
+                }
+
+                $results.Add([pscustomobject]$row) | Out-Null
+            }
+
+            if ($GridView.IsPresent) {
+                $results | Out-NCGridView -Title "M365 User Groups - $ResolvedPrincipal"
+            }
+            else {
+                $results | Sort-Object GroupName
+            }
+        }
+
+        # Resolves the queued user-path inputs and reads their memberships in Graph batches.
+        $flush = {
+            $entries = @($queue)
+            $queue.Clear()
+            if ($entries.Count -eq 0) { return }
+
+            if (-not $state.Started) {
+                $state.Started = $true
+                Write-NCGraphBatchNotice -Count ($entries.Count) -Noun 'users' -Streaming
+            }
+
+            # (a) Resolve every queued identity.
+            $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $resolved = Resolve-NCGraphUserBatch -Identifier @($entries | ForEach-Object { $_.UserId }) -Property @('id', 'userPrincipalName', 'displayName') -FailedIdentifier $failedUsers
+
+            # (b) Keep the users that resolved, in input order.
+            $targets = [System.Collections.Generic.List[object]]::new()
+            foreach ($entry in $entries) {
+                $user = $resolved[$entry.UserId.Trim()]
+                if (-not $user -or -not $user.id) {
+                    if (-not $failedUsers.Contains($entry.UserId.Trim())) {
+                        Write-NCMessage "Unable to resolve user $($entry.UserId) in Microsoft Graph: user not found." -Level ERROR
+                    }
+                    continue
+                }
+                $targets.Add([pscustomobject]@{ Entry = $entry; GraphId = [string]$user.id })
+            }
+
+            if ($targets.Count -eq 0) { return }
+
+            # (c) Read memberships for every resolved user.
+            $requests = @(for ($i = 0; $i -lt $targets.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString($targets[$i].GraphId))/memberOf?`$select=id,displayName,mail,groupTypes,securityEnabled,mailEnabled,description,mailNickname" }
+                })
+            $lookup = @{}
+            foreach ($result in @(Invoke-NCGraphBatchCollection -Requests $requests -Activity 'Reading user group memberships')) {
+                $lookup[$result.Id] = $result
+            }
+
+            # (d) Emit per input, in input order.
+            for ($i = 0; $i -lt $targets.Count; $i++) {
+                $entry = $targets[$i].Entry
+                $result = $lookup["m$i"]
+
+                if (-not $result.Success) {
+                    Write-NCMessage "Unable to read group memberships for $($entry.Principal): $($result.ErrorMessage)" -Level ERROR
+                    continue
+                }
+
+                $memberships = @($result.Items | ForEach-Object { ConvertTo-NCGraphDirectoryObject -Item $_ })
+                & $emit $entry.Principal $entry.RecipientType $memberships
+            }
+        }
     }
 
     process {
-        if ($null -eq $graphConnected) {
-            $graphConnected = Test-MgGraphConnection
-            if (-not $graphConnected) {
-                Add-EmptyLine
-                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
-                return
-            }
+        if (-not $graphConnected) {
+            return
         }
 
         $resolvedPrincipal = Find-UserRecipient -UserPrincipalName $UserPrincipalName
         if (-not $resolvedPrincipal) {
+            & $flush
             Write-NCMessage "Unable to resolve user recipient for $UserPrincipalName" -Level ERROR
             return
         }
-        
+
         $recipientType = (Get-Recipient -Identity $resolvedPrincipal).RecipientTypeDetails
         $memberships = @()
 
         switch ($recipientType) {
             'MailContact' {
+                & $flush # Keep output in input order: earlier queued users are emitted first.
                 try {
                     $contact = Get-MgContact -Filter "Mail eq '$resolvedPrincipal'" -All -ErrorAction Stop | Select-Object -First 1
                 }
@@ -3166,8 +3402,11 @@ function Get-UserGroups {
                     Write-NCMessage "Unable to read group memberships for contact ${resolvedPrincipal}: $($_.Exception.Message)" -Level ERROR
                     return
                 }
+
+                & $emit $resolvedPrincipal $recipientType $memberships
             }
             'MailUniversalDistributionGroup' {
+                & $flush # Keep output in input order: earlier queued users are emitted first.
                 try {
                     $group = Get-MgGroup -Filter "Mail eq '$resolvedPrincipal'" -All -ErrorAction Stop | Select-Object -First 1
                 }
@@ -3188,61 +3427,30 @@ function Get-UserGroups {
                     Write-NCMessage "Unable to read memberships for group ${resolvedPrincipal}: $($_.Exception.Message)" -Level ERROR
                     return
                 }
+
+                & $emit $resolvedPrincipal $recipientType $memberships
             }
             default {
-                $recipient = Get-Mailbox -Identity $resolvedPrincipal -ErrorAction Stop # To get WindowsLiveID when UPN differs / when Get-Recipient can't provide it
-                $userId = if ($recipient.WindowsLiveID) { $recipient.WindowsLiveID } else { $resolvedPrincipal }
-
                 try {
-                    $user = Get-MgUser -UserId $userId -ErrorAction Stop
+                    $recipient = Get-Mailbox -Identity $resolvedPrincipal -ErrorAction Stop # Preserve the Exchange-first path for regular mailboxes.
+                    $userId = if ($recipient.WindowsLiveID) { $recipient.WindowsLiveID } elseif ($recipient.PrimarySmtpAddress) { $recipient.PrimarySmtpAddress } else { $resolvedPrincipal }
                 }
                 catch {
-                    Write-NCMessage "Unable to resolve user $userId in Microsoft Graph: $($_.Exception.Message)" -Level ERROR
-                    return
+                    # Not a regular mailbox: the batch resolver tries the identity directly and falls back to Find-UserRecipient -PreferGraphIdentity on 404.
+                    $userId = $resolvedPrincipal
                 }
 
-                try {
-                    $memberships = @(Get-MgUserMemberOf -UserId $user.Id -All -ErrorAction Stop)
-                }
-                catch {
-                    Write-NCMessage "Unable to read group memberships for ${resolvedPrincipal}: $($_.Exception.Message)" -Level ERROR
-                    return
+                $queue.Add([pscustomobject]@{ Principal = [string]$resolvedPrincipal; RecipientType = $recipientType; UserId = [string]$userId })
+                if ($queue.Count -ge 20) {
+                    & $flush
                 }
             }
         }
+    }
 
-        Add-EmptyLine
-        Write-Verbose "$recipientType ($resolvedPrincipal) - Groups found: $($memberships.Count)"
-
-        if (-not $memberships -or $memberships.Count -eq 0) {
-            Write-NCMessage "No groups found for $resolvedPrincipal." -Level WARNING
-            return
-        }
-
-        $results = [System.Collections.Generic.List[object]]::new()
-        foreach ($membership in $memberships) {
-            $props = if ($membership.AdditionalProperties) { $membership.AdditionalProperties } else { @{} }
-            $row = [ordered]@{
-                GroupName = if ($props.ContainsKey('displayName')) { $props.displayName } else { $null }
-                GroupMail = if ($props.ContainsKey('mail')) { $props.mail } else { $null }
-            }
-
-            if ($GridView.IsPresent) {
-                $row['Group Description'] = if ($props.ContainsKey('description')) { $props.description } else { $null }
-                $row['Group Mail Nickname'] = if ($props.ContainsKey('mailNickname')) { $props.mailNickname } else { $null }
-                $row['Group Mail Enabled'] = if ($props.ContainsKey('mailEnabled')) { $props.mailEnabled } else { $null }
-                $row['Group Type'] = if ($props.ContainsKey('groupTypes')) { ($props.groupTypes -join ', ') } else { $null }
-                $row['Group ID'] = $membership.Id
-            }
-
-            $results.Add([pscustomobject]$row) | Out-Null
-        }
-
-        if ($GridView.IsPresent) {
-            $results | Out-GridView -Title "M365 User Groups - $resolvedPrincipal"
-        }
-        else {
-            $results | Sort-Object GroupName
+    end {
+        if ($graphConnected -and $queue.Count -gt 0) {
+            & $flush
         }
     }
 }
@@ -3321,7 +3529,7 @@ function New-EntraSecurityGroup {
     }
 
     try {
-        $createdGroup = Invoke-MgGraphRequest -Uri 'https://graph.microsoft.com/v1.0/groups' -Method POST -Body ($groupBody | ConvertTo-Json -Depth 10) -ContentType 'application/json'
+        $createdGroup = Invoke-MgGraphRequest -Uri 'v1.0/groups' -Method POST -Body ($groupBody | ConvertTo-Json -Depth 10) -ContentType 'application/json'
         Write-NCMessage "Created security group '$GroupName'." -Level SUCCESS
 
         if ($PassThru.IsPresent) {
@@ -3370,17 +3578,17 @@ function Remove-EntraGroupDevice {
     #>
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
     param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0)]
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllByName')]
         [Alias('Group', 'DisplayName')]
         [string]$GroupName,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0)]
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('Device', 'DeviceName', 'Id', 'DeviceId', 'Name')]
         [string[]]$DeviceIdentifier,
 
@@ -3511,70 +3719,52 @@ function Remove-EntraGroupDevice {
             }
         }
         else {
-            $uniqueDevices = $devices | Select-Object -Unique
-
-            foreach ($device in $uniqueDevices) {
-                $deviceId = $null
-                $deviceLabel = $device
-
-                if ($TreatInputAsId.IsPresent -or $device -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-                    $deviceId = $device
-                }
-                else {
-                    $escapedDevice = $device.Replace("'", "''")
-                    try {
-                        $deviceMatches = Get-MgDevice -Filter "displayName eq '$escapedDevice'" -All -ErrorAction Stop
-                    }
-                    catch {
-                        Write-NCMessage "Unable to resolve device '$device': $($_.Exception.Message)" -Level ERROR
-                        continue
-                    }
-
-                    if (-not $deviceMatches -or $deviceMatches.Count -eq 0) {
-                        Write-NCMessage "Device '$device' not found" -Level WARNING
-                        continue
-                    }
-
-                    if ($deviceMatches.Count -gt 1) {
-                        Write-NCMessage "Multiple devices matched '$device'. Using the first result ($($deviceMatches[0].DisplayName))" -Level WARNING
-                    }
-
-                    $selected = $deviceMatches | Select-Object -First 1
-                    $deviceId = $selected.Id
-                    $deviceLabel = $selected.DisplayName
-                }
-
-                if (-not $deviceId) {
-                    Write-NCMessage "Unable to determine object ID for device '$device'." -Level ERROR
-                    continue
-                }
-
+            $uniqueDevices = @($devices | Select-Object -Unique)
+            foreach ($target in @(Resolve-NCEntraDeviceTargetBatch -DeviceIdentifier $uniqueDevices -TreatInputAsId:$TreatInputAsId)) {
                 $devicesToRemove.Add([pscustomobject]@{
-                        Id    = $deviceId
-                        Label = $deviceLabel
+                        Id    = $target.Id
+                        Label = $target.Label
                     }) | Out-Null
             }
         }
 
-        foreach ($entry in $devicesToRemove) {
-            $deviceId = $entry.Id
-            $deviceLabel = $entry.Label
+        if ($devicesToRemove.Count -gt 0) {
+            Write-NCGraphBatchNotice -Count ($devicesToRemove.Count) -Noun 'device(s)'
+        }
+        $groupPath = "/groups/$([uri]::EscapeDataString([string]$resolvedGroup.Id))"
 
-            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Remove device '$deviceLabel'")) {
+        for ($offset = 0; $offset -lt $devicesToRemove.Count; $offset += 20) {
+            $chunk = @($devicesToRemove[$offset..([Math]::Min($offset + 20, $devicesToRemove.Count) - 1)])
+
+            $approved = [System.Collections.Generic.List[object]]::new()
+            foreach ($entry in $chunk) {
+                if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Remove device '$($entry.Label)'")) {
+                    $approved.Add($entry)
+                }
+            }
+            if ($approved.Count -eq 0) { continue }
+
+            $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'DELETE'; Url = "$groupPath/members/$([uri]::EscapeDataString([string]$approved[$i].Id))/`$ref" }
+                })
+            $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Removing devices from $($resolvedGroup.DisplayName)")
+
+            for ($i = 0; $i -lt $approved.Count; $i++) {
+                $deviceId = $approved[$i].Id
+                $deviceLabel = $approved[$i].Label
+                $response = $responses[$i]
                 $status = 'Removed'
-                try {
-                    Remove-MgGroupMemberByRef -GroupId $resolvedGroup.Id -DirectoryObjectId $deviceId -ErrorAction Stop
+
+                if ($response.Success) {
                     Write-NCMessage "Removed device '$deviceLabel' from group '$($resolvedGroup.DisplayName)'" -Level SUCCESS
                 }
-                catch {
-                    if ($_.Exception.Message -match 'could not find member' -or $_.Exception.Message -match 'does not exist') {
-                        $status = 'NotFound'
-                        Write-NCMessage "Device '$deviceLabel' is not a member of '$($resolvedGroup.DisplayName)'." -Level WARNING
-                    }
-                    else {
-                        $status = 'Failed'
-                        Write-NCMessage "Failed to remove device '$deviceLabel' from '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
-                    }
+                elseif ($response.Status -eq 404 -or $response.ErrorMessage -match 'could not find member' -or $response.ErrorMessage -match 'does not exist') {
+                    $status = 'NotFound'
+                    Write-NCMessage "Device '$deviceLabel' is not a member of '$($resolvedGroup.DisplayName)'" -Level WARNING
+                }
+                else {
+                    $status = 'Failed'
+                    Write-NCMessage "Failed to remove device '$deviceLabel' from '$($resolvedGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
                 }
 
                 if ($PassThru.IsPresent) {
@@ -3626,17 +3816,17 @@ function Remove-EntraGroupUser {
     #>
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true)]
     param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0)]
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllByName')]
         [Alias('Group', 'DisplayName')]
         [string]$GroupName,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById')]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0)]
         [Parameter(Mandatory = $true, ParameterSetName = 'ClearAllById')]
         [string]$GroupId,
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ByName', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(Mandatory = $true, ParameterSetName = 'ById', Position = 1, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
         [Alias('User', 'UPN', 'Mail', 'Id', 'UserId')]
         [string[]]$UserIdentifier,
 
@@ -3770,76 +3960,49 @@ function Remove-EntraGroupUser {
             }
         }
         else {
-            $uniqueUsers = $users | Select-Object -Unique
-
-            foreach ($user in $uniqueUsers) {
-                $userId = $null
-                $userLabel = $user
-
-                if ($TreatInputAsId.IsPresent -or $user -match '^[0-9a-fA-F-]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-                    $userId = $user
-                }
-                else {
-                    $resolvedUser = $null
-                    try {
-                        $resolvedUser = Get-MgUser -UserId $user -ErrorAction Stop
-                    }
-                    catch {
-                        $resolvedIdentifier = Find-UserRecipient -UserPrincipalName $user
-                        if ($resolvedIdentifier) {
-                            try {
-                                $resolvedUser = Get-MgUser -UserId $resolvedIdentifier -ErrorAction Stop
-                            }
-                            catch {
-                                Write-NCMessage "Unable to resolve user '$user': $($_.Exception.Message)" -Level ERROR
-                                continue
-                            }
-                        }
-                        else {
-                            continue
-                        }
-                    }
-
-                    if (-not $resolvedUser) {
-                        Write-NCMessage "User '$user' not found." -Level WARNING
-                        continue
-                    }
-
-                    $userId = $resolvedUser.Id
-                    $userLabel = if ($resolvedUser.UserPrincipalName) { $resolvedUser.UserPrincipalName } else { $resolvedUser.DisplayName }
-                }
-
-                if (-not $userId) {
-                    Write-NCMessage "Unable to determine object ID for user '$user'." -Level ERROR
-                    continue
-                }
-
+            $uniqueUsers = @($users | Select-Object -Unique)
+            foreach ($target in @(Resolve-NCEntraGroupUserTarget -UserIdentifier $uniqueUsers -TreatInputAsId:$TreatInputAsId)) {
                 $usersToRemove.Add([pscustomobject]@{
-                        Id    = $userId
-                        Label = $userLabel
+                        Id    = $target.Id
+                        Label = $target.Label
                     }) | Out-Null
             }
         }
 
-        foreach ($entry in $usersToRemove) {
-            $userId = $entry.Id
-            $userLabel = $entry.Label
+        Write-NCGraphBatchNotice -Count ($usersToRemove.Count) -Noun 'user(s)'
 
-            if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Remove user '$userLabel'")) {
+        for ($offset = 0; $offset -lt $usersToRemove.Count; $offset += 20) {
+            $chunk = @($usersToRemove[$offset..([Math]::Min($offset + 20, $usersToRemove.Count) - 1)])
+
+            $approved = [System.Collections.Generic.List[object]]::new()
+            foreach ($entry in $chunk) {
+                if ($PSCmdlet.ShouldProcess($resolvedGroup.DisplayName, "Remove user '$($entry.Label)'")) {
+                    $approved.Add($entry)
+                }
+            }
+            if ($approved.Count -eq 0) { continue }
+
+            $requests = @(for ($i = 0; $i -lt $approved.Count; $i++) {
+                    @{ Id = "m$i"; Method = 'DELETE'; Url = "/groups/$($resolvedGroup.Id)/members/$([uri]::EscapeDataString($approved[$i].Id))/`$ref" }
+                })
+            $responses = @(Invoke-NCGraphBatch -Requests $requests -Activity "Removing users from $($resolvedGroup.DisplayName)")
+
+            for ($i = 0; $i -lt $approved.Count; $i++) {
+                $userId = $approved[$i].Id
+                $userLabel = $approved[$i].Label
+                $response = $responses[$i]
                 $status = 'Removed'
-                try {
-                    Remove-MgGroupMemberByRef -GroupId $resolvedGroup.Id -DirectoryObjectId $userId -ErrorAction Stop
+
+                if ($response.Success) {
                     Write-NCMessage "Removed user '$userLabel' from group '$($resolvedGroup.DisplayName)'." -Level SUCCESS
                 }
-                catch {
-                    if ($_.Exception.Message -match 'could not find member' -or $_.Exception.Message -match 'does not exist') {
-                        $status = 'NotFound'
-                        Write-NCMessage "User '$userLabel' is not a member of '$($resolvedGroup.DisplayName)'." -Level WARNING
-                    }
-                    else {
-                        $status = 'Failed'
-                        Write-NCMessage "Failed to remove user '$userLabel' from '$($resolvedGroup.DisplayName)': $($_.Exception.Message)" -Level ERROR
-                    }
+                elseif ($response.Status -eq 404 -or $response.ErrorMessage -match 'could not find member' -or $response.ErrorMessage -match 'does not exist') {
+                    $status = 'NotFound'
+                    Write-NCMessage "User '$userLabel' is not a member of '$($resolvedGroup.DisplayName)'" -Level WARNING
+                }
+                else {
+                    $status = 'Failed'
+                    Write-NCMessage "Failed to remove user '$userLabel' from '$($resolvedGroup.DisplayName)': $($response.ErrorMessage)" -Level ERROR
                 }
 
                 if ($PassThru.IsPresent) {
@@ -3894,17 +4057,16 @@ function Search-EntraGroup {
     )
 
     begin {
-        $graphConnected = $null
+        $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
+        if (-not $graphConnected) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+        }
     }
 
     process {
-        if ($null -eq $graphConnected) {
-            $graphConnected = Test-MgGraphConnection -Scopes @('Group.Read.All', 'Directory.Read.All') -EnsureExchangeOnline:$false
-            if (-not $graphConnected) {
-                Add-EmptyLine
-                Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
-                return
-            }
+        if (-not $graphConnected) {
+            return
         }
 
         if ([string]::IsNullOrWhiteSpace($SearchText)) {
@@ -3971,7 +4133,7 @@ function Search-EntraGroup {
         }
 
         if ($GridView.IsPresent) {
-            $results | Out-GridView -Title "Entra Groups - Search: $SearchText"
+            $results | Out-NCGridView -Title "Entra Groups - Search: $SearchText"
         }
         else {
             $results | Sort-Object 'Group Name'
@@ -4043,7 +4205,7 @@ function Set-EntraGroupDescription {
     }
 
     try {
-        Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($resolvedGroup.Id)" -Method PATCH -Body (@{ description = $Description } | ConvertTo-Json -Depth 10) -ContentType 'application/json' | Out-Null
+        Invoke-MgGraphRequest -Uri "v1.0/groups/$($resolvedGroup.Id)" -Method PATCH -Body (@{ description = $Description } | ConvertTo-Json -Depth 10) -ContentType 'application/json' | Out-Null
         Write-NCMessage "Updated description for group '$($resolvedGroup.DisplayName)'." -Level SUCCESS
 
         if ($PassThru.IsPresent) {
@@ -4158,7 +4320,7 @@ function Set-EntraGroupDisplayName {
     }
 
     try {
-        Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/groups/$($resolvedGroup.Id)" -Method PATCH -Body (@{ displayName = $DisplayName } | ConvertTo-Json -Depth 10) -ContentType 'application/json' | Out-Null
+        Invoke-MgGraphRequest -Uri "v1.0/groups/$($resolvedGroup.Id)" -Method PATCH -Body (@{ displayName = $DisplayName } | ConvertTo-Json -Depth 10) -ContentType 'application/json' | Out-Null
         Write-NCMessage "Updated display name for group '$($resolvedGroup.DisplayName)' to '$DisplayName'." -Level SUCCESS
 
         if ($PassThru.IsPresent) {

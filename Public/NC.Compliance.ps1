@@ -854,7 +854,8 @@ function Set-MboxMrmCleanup {
         }
 
         Write-NCMessage "Mailbox: $Mailbox" -Level INFO
-        Write-NCMessage ("Fixed cutoff date: {0:yyyy-MM-dd}" -f $FixedCutoffDate) -Level INFO
+        # A date-only value: converting it between time zones could show the previous or next day
+        Write-NCMessage ("Fixed cutoff date: {0}" -f $FixedCutoffDate.ToString('dd/MM/yyyy', [System.Globalization.CultureInfo]::InvariantCulture)) -Level INFO
         Write-NCMessage ("Safety buffer (days): {0}" -f $SafetyBufferDays) -Level INFO
         Write-NCMessage ("Computed AgeLimitForRetention (days): {0}" -f $ageDays) -Level SUCCESS
         Write-NCMessage ("Retention action: {0}" -f $RetentionAction) -Level INFO

@@ -52,5 +52,63 @@
         </TableRowEntries>
       </TableControl>
     </View>
+    <View>
+      <Name>NebulaCoreUserDeviceTable</Name>
+      <ViewSelectedBy>
+        <TypeName>Nebula.Core.UserDevice</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader>
+            <Label>User</Label>
+            <Width>36</Width>
+          </TableColumnHeader>
+          <TableColumnHeader>
+            <Label>Device Name</Label>
+            <Width>22</Width>
+          </TableColumnHeader>
+          <TableColumnHeader>
+            <Label>Model</Label>
+            <Width>22</Width>
+          </TableColumnHeader>
+          <TableColumnHeader>
+            <Label>OS</Label>
+            <Width>10</Width>
+          </TableColumnHeader>
+          <TableColumnHeader>
+            <Label>Serial Number</Label>
+            <Width>16</Width>
+          </TableColumnHeader>
+          <TableColumnHeader>
+            <Label>Source</Label>
+            <Width>12</Width>
+          </TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem>
+                <PropertyName>User</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>DeviceName</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>Model</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>OperatingSystem</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>SerialNumber</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>Source</PropertyName>
+              </TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
   </ViewDefinitions>
 </Configuration>

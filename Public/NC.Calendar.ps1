@@ -544,7 +544,7 @@ function Get-RoomDetails {
 
             if ($GridView.IsPresent) {
                 try {
-                    $results | Out-GridView -Title "M365 Rooms Details"
+                    $null = $results | Out-NCGridView -Title "M365 Rooms Details"
                 }
                 catch {
                     Write-NCMessage "Unable to show grid view. $($_.Exception.Message)" -Level WARNING
