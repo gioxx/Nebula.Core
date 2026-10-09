@@ -473,7 +473,20 @@ function Set-NCEnterpriseApplicationFromSnapshot {
             Invoke-MgGraphRequest -Uri "v1.0/servicePrincipals/$($targetSp.id)" -Method PATCH -Body ($spWriteBody | ConvertTo-Json -Depth 5) -ContentType 'application/json' -ErrorAction Stop | Out-Null
         }
         catch {
-            Write-NCMessage "Unable to update Service Principal tags/homepage for '$TargetDisplayName': $($_.Exception.Message)" -Level WARNING
+            # Stop here: reporting success would hide stale sign-in settings (enabled state, assignment requirement)
+            Write-NCMessage "Failed to update the Service Principal for '$TargetDisplayName': $($_.Exception.Message)" -Level ERROR
+            [pscustomobject][ordered]@{
+                TargetDisplayName   = $TargetDisplayName
+                TargetApplicationId = $targetApp.id
+                Created             = $false
+                OwnersAdded         = 0
+                OwnersSkipped       = 0
+                AssignmentsAdded    = 0
+                AssignmentsSkipped  = 0
+                AssignmentsFailed   = 0
+                Error               = "Failed to update the Service Principal for '$TargetDisplayName': $($_.Exception.Message)"
+            }
+            return
         }
     }
 

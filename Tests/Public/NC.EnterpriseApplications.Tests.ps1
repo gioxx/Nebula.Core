@@ -514,6 +514,24 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
 
         $script:appPatches.Count | Should -Be 1
     }
+    It 'stops and reports an error when the Service Principal update fails' {
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^v1\.0/applications\?') {
+                return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-app-id'; appId = 'existing-client-id'; displayName = 'Target App'; appRoles = @(); api = [pscustomobject]@{ oauth2PermissionScopes = @() } }) }
+            }
+            if ($Method -eq 'PATCH' -and $Uri -eq 'v1.0/applications/existing-app-id') { return $null }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'existing-sp-id'; appId = 'existing-client-id' }) } }
+            if ($Method -eq 'PATCH' -and $Uri -eq 'v1.0/servicePrincipals/existing-sp-id') { throw 'ServiceUnavailable' }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $result = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        $result.Error | Should -BeLike '*Service Principal*ServiceUnavailable*'
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*Service Principal*' }
+        Assert-MockCalled Invoke-NCGraphAllPagesCore -Times 0 -Scope It
+    }
     It 'does not send an empty homepage when creating a Service Principal' {
         Mock Invoke-MgGraphRequest {
             if ($Uri -match '^v1\.0/applications\?') { return [pscustomobject]@{ value = @() } }
@@ -972,6 +990,15 @@ Describe 'Import-EnterpriseApplication' {
 
         Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
         Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*Application.Notes*' -and $Message -like '*ServicePrincipal.Tags*' }
+    }
+    It 'refuses a snapshot whose redirect URI containers miss redirectUris' {
+        $script:validSnapshot.Application.Web = @{ homePageUrl = 'https://contoso.com' }
+        $script:validSnapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $inputPath
+
+        Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -Confirm:$false
+
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*Application.Web.redirectUris*' }
     }
     It 'refuses a JSON file that is not an Enterprise Application snapshot' {
         '{"name":"something else"}' | Set-Content -LiteralPath $inputPath

@@ -154,6 +154,12 @@ function Import-EnterpriseApplication {
         $requiredApplicationProperties = @('DisplayName', 'SignInAudience', 'Notes', 'Tags', 'Web', 'Spa', 'PublicClient', 'RequiredResourceAccess', 'AppRoles', 'Oauth2PermissionScopes', 'Owners')
         $applicationProperties = if ($snapshot.Application) { @($snapshot.Application.PSObject.Properties.Name) } else { @() }
         $missingProperties = @($requiredApplicationProperties | Where-Object { $applicationProperties -notcontains $_ } | ForEach-Object { "Application.$_" })
+        foreach ($redirectContainer in @('Web', 'Spa', 'PublicClient')) {
+            $container = $snapshot.Application.$redirectContainer
+            if ($applicationProperties -contains $redirectContainer -and -not ($container -and @($container.PSObject.Properties.Name) -contains 'redirectUris')) {
+                $missingProperties += "Application.$redirectContainer.redirectUris"
+            }
+        }
         if (-not $snapshot.ServicePrincipal) {
             $missingProperties += 'ServicePrincipal'
         }
