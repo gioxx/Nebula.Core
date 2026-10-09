@@ -709,6 +709,19 @@ function Compare-NCEnterpriseApplicationSnapshot {
                 [pscustomobject]$role
             })
     }
+    $canonicalOptionalClaims = {
+        param($OptionalClaims)
+        if ($null -eq $OptionalClaims) { return $null }
+        $table = & $toOrdered $OptionalClaims
+        foreach ($tokenType in @($table.Keys)) {
+            $table[$tokenType] = @(& $sortedByKey $table[$tokenType] 'name', 'source' | ForEach-Object {
+                    $claim = & $toOrdered $_
+                    if ($claim.Contains('additionalProperties')) { $claim['additionalProperties'] = & $sortedValues $claim['additionalProperties'] }
+                    [pscustomobject]$claim
+                })
+        }
+        [pscustomobject]$table
+    }
     $canonicalApi = {
         param($Api)
         if ($null -eq $Api) { return $null }
@@ -736,7 +749,7 @@ function Compare-NCEnterpriseApplicationSnapshot {
     & $addIfDifferent 'Application.Oauth2PermissionScopes' (& $sortedByKey $ReferenceSnapshot.Application.Oauth2PermissionScopes 'id') (& $sortedByKey $DifferenceSnapshot.Application.Oauth2PermissionScopes 'id')
     & $addIfDifferent 'Application.Api' (& $canonicalApi $ReferenceSnapshot.Application.Api) (& $canonicalApi $DifferenceSnapshot.Application.Api)
     & $addIfDifferent 'Application.GroupMembershipClaims' $ReferenceSnapshot.Application.GroupMembershipClaims $DifferenceSnapshot.Application.GroupMembershipClaims
-    & $addIfDifferent 'Application.OptionalClaims' $ReferenceSnapshot.Application.OptionalClaims $DifferenceSnapshot.Application.OptionalClaims
+    & $addIfDifferent 'Application.OptionalClaims' (& $canonicalOptionalClaims $ReferenceSnapshot.Application.OptionalClaims) (& $canonicalOptionalClaims $DifferenceSnapshot.Application.OptionalClaims)
     & $addIfDifferent 'Application.IsFallbackPublicClient' $ReferenceSnapshot.Application.IsFallbackPublicClient $DifferenceSnapshot.Application.IsFallbackPublicClient
     & $addIfDifferent 'ServicePrincipal.Tags' (& $sortedValues $ReferenceSnapshot.ServicePrincipal.Tags) (& $sortedValues $DifferenceSnapshot.ServicePrincipal.Tags)
     & $addIfDifferent 'ServicePrincipal.Homepage' $ReferenceSnapshot.ServicePrincipal.Homepage $DifferenceSnapshot.ServicePrincipal.Homepage

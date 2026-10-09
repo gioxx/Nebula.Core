@@ -929,6 +929,20 @@ Describe 'Compare-NCEnterpriseApplicationSnapshot' {
 
         $rows.Count | Should -Be 0
     }
+    It 'ignores the order of optional claims within each token type' {
+        $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
+        $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
+        $email = [pscustomobject]@{ name = 'email'; source = $null; essential = $false; additionalProperties = @() }
+        $upn = [pscustomobject]@{ name = 'upn'; source = $null; essential = $false; additionalProperties = @() }
+        $groups = [pscustomobject]@{ name = 'groups'; source = $null; essential = $false; additionalProperties = @('sam_account_name', 'emit_as_roles') }
+        $groupsReordered = [pscustomobject]@{ name = 'groups'; source = $null; essential = $false; additionalProperties = @('emit_as_roles', 'sam_account_name') }
+        $a.Application | Add-Member -NotePropertyName OptionalClaims -NotePropertyValue ([pscustomobject]@{ idToken = @($email, $upn); accessToken = @($groups); saml2Token = @() })
+        $b.Application | Add-Member -NotePropertyName OptionalClaims -NotePropertyValue ([pscustomobject]@{ idToken = @($upn, $email); accessToken = @($groupsReordered); saml2Token = @() })
+
+        $rows = @(Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $a -DifferenceSnapshot $b)
+
+        $rows.Count | Should -Be 0
+    }
     It 'still reports a real permission difference' {
         $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
         $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
