@@ -267,6 +267,9 @@ Describe 'New-IntuneAppBasedGroup batching' {
                         }
                         if ($method -eq 'POST' -and ($url -eq '/groups/G1/members/$ref' -or $url -eq '/groups/NEW1/members/$ref')) {
                             $odataId = [string]$request.body.'@odata.id'
+                            if ($global:AddFailsFor -and $odataId -like "*/$($global:AddFailsFor)") {
+                                return @{ status = 403; body = @{ error = @{ code = 'Authorization_RequestDenied'; message = 'Insufficient privileges' } } }
+                            }
                             if ($odataId -like "*/$($global:ExistsEntraId)") {
                                 return @{ status = 400; body = @{ error = @{ code = 'Request_BadRequest'; message = 'One or more added object references already exist for the following modified properties: members.' } } }
                             }
@@ -300,6 +303,7 @@ Describe 'New-IntuneAppBasedGroup batching' {
         $global:CurrentMembers = @()
         $global:EntraLookupFailFor = ''
         $global:EntraNotFoundFor = ''
+        $global:AddFailsFor = ''
         $global:GroupLookupFails = $false
     }
 
@@ -374,6 +378,20 @@ Describe 'New-IntuneAppBasedGroup batching' {
         }
     }
 
+    It 'skips every removal when a member addition fails' {
+        Set-AppGroupDevices -Count 3
+        Set-AppGroupGraphMock
+        $global:ExistingGroup = $true
+        $global:AddFailsFor = 'ent2'
+        $global:CurrentMembers = @(@{ id = 'old1'; displayName = 'Old 1' }, @{ id = 'ent1'; displayName = 'PC1' })
+        New-IntuneAppBasedGroup -ApplicationName 'Java*' -GroupName 'Devices - Java' -UpdateExisting -Confirm:$false
+
+        @($global:SeenRequests | Where-Object { $_.method -eq 'DELETE' }).Count | Should -Be 0
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Level -eq 'WARNING' -and $Message -like "*could not be added to 'Devices - Java'*No members will be removed*"
+        }
+    }
+
     It 'skips every removal when the Entra device resolver throws' {
         Set-AppGroupDevices -Count 3
         Set-AppGroupGraphMock
@@ -435,5 +453,32 @@ Describe 'New-IntuneAppBasedGroup batching' {
 
         Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly -Scope It
         Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter { $Message -like 'Processing*' }
+    }
+}
+
+Describe 'Get-IntuneAppPresence' {
+    BeforeEach {
+        Mock Test-MgGraphConnection { $true }
+        Mock Write-NCMessage {}
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -like 'v1.0/deviceManagement/managedDevices?*') {
+                return @{ value = @(
+                        @{ id = 'dev-old'; deviceName = 'PC01'; lastSyncDateTime = '2026-01-10T08:00:00Z' }
+                        @{ id = 'dev-new'; deviceName = 'PC01'; lastSyncDateTime = '2026-09-30T08:00:00Z' }
+                    ) }
+            }
+            if ($Uri -like 'beta/deviceManagement/managedDevices/*') {
+                return @{ detectedApps = @(@{ displayName = 'Java 8'; version = '8.0.1'; publisher = 'Oracle' }) }
+            }
+            throw "unexpected $Uri"
+        }
+    }
+
+    It 'uses the most recently synced record when several devices share the name, and says so' {
+        $result = Get-IntuneAppPresence -DeviceName 'PC01' -ApplicationName 'Java*'
+
+        $result.DeviceId | Should -Be 'dev-new'
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly -Scope It -ParameterFilter { $Uri -like 'beta/deviceManagement/managedDevices/dev-new*' }
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'WARNING' -and $Message -like "*2 Intune devices*PC01*dev-new*dev-old*" }
     }
 }

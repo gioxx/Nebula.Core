@@ -49,6 +49,8 @@ function Add-UserMsolAccountSku {
 
         $queue = [System.Collections.Generic.List[object]]::new()
         $state = @{ Started = $false }
+        # The same user can arrive under different identifiers, in any batch: count it, and its seats, once
+        $seenUserIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $maxAttempts = 3
 
         $defaultUsageLocation = if (($NCVars -is [System.Collections.IDictionary]) -and $NCVars.Contains('UsageLocation') -and $NCVars.UsageLocation) {
@@ -188,8 +190,6 @@ function Add-UserMsolAccountSku {
 
             # (b) Check availability and ask for confirmation per user, in input order.
             $approved = [System.Collections.Generic.List[object]]::new()
-            # The same user can arrive under different identifiers: count it, and its seats, once
-            $seenUserIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             foreach ($entry in $entries) {
                 $user = $resolvedUsers[$entry.Trim()]
                 if (-not $user -or -not $user.id) {

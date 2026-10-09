@@ -189,6 +189,18 @@ Describe 'License assignment batching' {
         @($assigns.url) | Should -Be @('/users/id1/assignLicense', '/users/id2/assignLicense')
         Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter { $Message -like 'No available units*' }
     }
+    It 'processes a user repeated in a later batch once' {
+        Mock Get-MgSubscribedSku {
+            @([pscustomobject]@{ SkuId = [guid]$global:skuId; SkuPartNumber = 'ENTERPRISEPACK'; PrepaidUnits = [pscustomobject]@{ Enabled = 21 }; ConsumedUnits = 0 })
+        }
+        Set-LicenseGraphMock
+        @((New-Upns 20) + 'user1@contoso.com' + 'user21@contoso.com') | Add-UserMsolAccountSku -License 'ENTERPRISEPACK' -Confirm:$false
+
+        $assigns = @($global:SeenRequests | Where-Object { $_.url -like '*/assignLicense' })
+        $assigns.Count | Should -Be 21
+        @($assigns.url) | Should -Contain '/users/id21/assignLicense'
+        @($assigns | Where-Object { $_.url -eq '/users/id1/assignLicense' }).Count | Should -Be 1
+    }
     It 'writes the unresolved-user message once for a user Graph cannot find' {
         Mock Invoke-MgGraphRequest {
             New-TestBatchResponse -Body $Body -Responder {

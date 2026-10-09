@@ -789,8 +789,14 @@ function Get-IntuneAppPresence {
 
         $escapedDeviceName = $DeviceName.Replace("'", "''")
         $devicesUri = "v1.0/deviceManagement/managedDevices?`$filter=$([uri]::EscapeDataString("deviceName eq '$escapedDeviceName'"))&`$select=id,deviceName,operatingSystem,userPrincipalName,lastSyncDateTime"
-        $devices = @(Invoke-MgGraphRequest -Uri $devicesUri -Method GET -ErrorAction Stop).value
+        $devices = @(@(Invoke-MgGraphRequest -Uri $devicesUri -Method GET -ErrorAction Stop).value | Where-Object { $_ })
+        # Re-enrolled devices leave stale records with the same name: use the most recently synced one
+        $devices = @($devices | Sort-Object -Property { if ($_.lastSyncDateTime) { [datetimeoffset]$_.lastSyncDateTime } else { [datetimeoffset]::MinValue } } -Descending)
         $device = $devices | Select-Object -First 1
+        if ($devices.Count -gt 1) {
+            $otherIds = ($devices | Select-Object -Skip 1 | ForEach-Object { $_.id }) -join ', '
+            Write-NCMessage "$($devices.Count) Intune devices are named '$DeviceName'. Using the most recently synced one ($($device.id)); others: $otherIds." -Level WARNING
+        }
 
         if (-not $device) {
             return [pscustomobject]@{
@@ -1224,7 +1230,7 @@ function New-IntuneAppBasedGroup {
             }
 
             # Membership writes (one POST/DELETE per device inside the batch, per-device outcome)
-            $memberStats = @{ Added = 0; Removed = 0 }
+            $memberStats = @{ Added = 0; Removed = 0; Failed = 0 }
             $addGroupMembers = {
                 param([string]$GroupId, [string]$GroupLabel, [object[]]$Members, [string]$FailureFormat)
 
@@ -1244,6 +1250,7 @@ function New-IntuneAppBasedGroup {
                     }
                     else {
                         Write-NCMessage ($FailureFormat -f $memberLabel, $addResponses[$i].ErrorMessage) -Level ERROR
+                        $memberStats.Failed++
                     }
                 }
             }
@@ -1368,8 +1375,15 @@ function New-IntuneAppBasedGroup {
 
                             $memberStats.Added = 0
                             $memberStats.Removed = 0
+                            $memberStats.Failed = 0
                             if ($devicesToAdd.Count -gt 0) {
                                 & $addGroupMembers -GroupId ([string]$existingGroup.id) -GroupLabel $groupName -Members $devicesToAdd -FailureFormat "Failed to add device '{0}' to '$($groupName.Replace('{', '{{').Replace('}', '}}'))': {1}"
+                            }
+
+                            # Removing the old members after a failed addition could leave the group empty or incomplete
+                            if ($memberStats.Failed -gt 0 -and $deviceIdsToRemove.Count -gt 0) {
+                                Write-NCMessage "$($memberStats.Failed) device(s) could not be added to '$groupName'. No members will be removed from it in this run." -Level WARNING
+                                $deviceIdsToRemove = @()
                             }
 
                             if ($deviceIdsToRemove.Count -gt 0) {
