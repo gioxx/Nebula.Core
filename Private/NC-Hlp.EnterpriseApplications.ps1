@@ -25,7 +25,7 @@ function Get-NCEnterpriseApplicationSnapshot {
         [switch]$IncludeAppRoleAssignments
     )
 
-    $selectProps = 'id,appId,displayName,signInAudience,identifierUris,notes,tags,web,spa,publicClient,requiredResourceAccess,appRoles,api,passwordCredentials,keyCredentials'
+    $selectProps = 'id,appId,displayName,signInAudience,identifierUris,notes,tags,web,spa,publicClient,requiredResourceAccess,appRoles,api,groupMembershipClaims,optionalClaims,passwordCredentials,keyCredentials'
 
     if ($PSCmdlet.ParameterSetName -eq 'ById') {
         try {
@@ -60,7 +60,7 @@ function Get-NCEnterpriseApplicationSnapshot {
     }
 
     try {
-        $spResponse = Invoke-MgGraphRequest -Uri "v1.0/servicePrincipals?`$filter=appId eq '$($app.appId)'&`$select=id,appId,displayName,tags,homepage,logoUrl" -Method GET -ErrorAction Stop
+        $spResponse = Invoke-MgGraphRequest -Uri "v1.0/servicePrincipals?`$filter=appId eq '$($app.appId)'&`$select=id,appId,displayName,tags,homepage,logoUrl,appRoleAssignmentRequired" -Method GET -ErrorAction Stop
     }
     catch {
         Write-NCMessage "Unable to read Service Principal for '$($app.displayName)': $($_.Exception.Message)" -Level ERROR
@@ -115,6 +115,9 @@ function Get-NCEnterpriseApplicationSnapshot {
                 PreAuthorizedApplications   = @($app.api.preAuthorizedApplications)
                 RequestedAccessTokenVersion = $app.api.requestedAccessTokenVersion
             }
+            # Token claim settings: without them a clone issues different ID/access/SAML tokens
+            GroupMembershipClaims  = $app.groupMembershipClaims
+            OptionalClaims         = $app.optionalClaims
             Owners                 = @($owners | ForEach-Object {
                     [pscustomobject][ordered]@{
                         Id                = $_.id
@@ -129,6 +132,8 @@ function Get-NCEnterpriseApplicationSnapshot {
             Tags        = @($sp.tags)
             Homepage    = $sp.homepage
             LogoUrl     = $sp.logoUrl
+            # When true, only users and groups with an App Role Assignment can sign in
+            AppRoleAssignmentRequired = [bool]$sp.appRoleAssignmentRequired
         }
         AppRoleAssignments  = @($appRoleAssignments | ForEach-Object {
                 [pscustomobject][ordered]@{
@@ -254,6 +259,10 @@ function Set-NCEnterpriseApplicationFromSnapshot {
         appRoles               = @($Snapshot.Application.AppRoles)
         api                    = $cleanApi
     }
+    # Snapshots saved before these properties existed leave the destination's values untouched
+    $snapshotApplicationProperties = @($Snapshot.Application.PSObject.Properties.Name)
+    if ($snapshotApplicationProperties -contains 'GroupMembershipClaims') { $appBody.groupMembershipClaims = $Snapshot.Application.GroupMembershipClaims }
+    if ($snapshotApplicationProperties -contains 'OptionalClaims') { $appBody.optionalClaims = $Snapshot.Application.OptionalClaims }
 
     if ($Snapshot.Application.IdentifierUris -and @($Snapshot.Application.IdentifierUris).Count -gt 0) {
         Write-NCMessage "Source Enterprise Application '$($Snapshot.Application.DisplayName)' has identifierUris ($($Snapshot.Application.IdentifierUris -join ', ')). Identifier URIs are unique per tenant and are never copied to the destination app; set them manually if the destination needs to expose an API." -Level WARNING
@@ -404,6 +413,9 @@ function Set-NCEnterpriseApplicationFromSnapshot {
     $spWriteBody = [ordered]@{
         tags     = @($Snapshot.ServicePrincipal.Tags)
         homepage = if ($Snapshot.ServicePrincipal.Homepage) { $Snapshot.ServicePrincipal.Homepage } else { $null }
+    }
+    if (@($Snapshot.ServicePrincipal.PSObject.Properties.Name) -contains 'AppRoleAssignmentRequired') {
+        $spWriteBody.appRoleAssignmentRequired = [bool]$Snapshot.ServicePrincipal.AppRoleAssignmentRequired
     }
 
     $targetSp = @($spResponse.value) | Select-Object -First 1
@@ -590,9 +602,12 @@ function Compare-NCEnterpriseApplicationSnapshot {
     & $addIfDifferent 'Application.AppRoles' $ReferenceSnapshot.Application.AppRoles $DifferenceSnapshot.Application.AppRoles
     & $addIfDifferent 'Application.Oauth2PermissionScopes' $ReferenceSnapshot.Application.Oauth2PermissionScopes $DifferenceSnapshot.Application.Oauth2PermissionScopes
     & $addIfDifferent 'Application.Api' $ReferenceSnapshot.Application.Api $DifferenceSnapshot.Application.Api
+    & $addIfDifferent 'Application.GroupMembershipClaims' $ReferenceSnapshot.Application.GroupMembershipClaims $DifferenceSnapshot.Application.GroupMembershipClaims
+    & $addIfDifferent 'Application.OptionalClaims' $ReferenceSnapshot.Application.OptionalClaims $DifferenceSnapshot.Application.OptionalClaims
     & $addIfDifferent 'ServicePrincipal.Tags' $ReferenceSnapshot.ServicePrincipal.Tags $DifferenceSnapshot.ServicePrincipal.Tags
     & $addIfDifferent 'ServicePrincipal.Homepage' $ReferenceSnapshot.ServicePrincipal.Homepage $DifferenceSnapshot.ServicePrincipal.Homepage
     & $addIfDifferent 'ServicePrincipal.LogoUrl' $ReferenceSnapshot.ServicePrincipal.LogoUrl $DifferenceSnapshot.ServicePrincipal.LogoUrl
+    & $addIfDifferent 'ServicePrincipal.AppRoleAssignmentRequired' $ReferenceSnapshot.ServicePrincipal.AppRoleAssignmentRequired $DifferenceSnapshot.ServicePrincipal.AppRoleAssignmentRequired
 
     if ($IncludeAppRoleAssignments.IsPresent) {
         & $addIfDifferent 'AppRoleAssignments' (& $sortedBy $ReferenceSnapshot.AppRoleAssignments 'PrincipalId', 'AppRoleId') (& $sortedBy $DifferenceSnapshot.AppRoleAssignments 'PrincipalId', 'AppRoleId')

@@ -150,10 +150,17 @@ function Import-EnterpriseApplication {
             Write-NCMessage "Snapshot '$InputPath' has schema version '$($snapshot.SchemaVersion)'; only version 1 (from Export-EnterpriseApplication) is supported." -Level ERROR
             return
         }
-        $requiredApplicationProperties = @('DisplayName', 'SignInAudience', 'Tags', 'Web', 'Spa', 'PublicClient', 'RequiredResourceAccess', 'AppRoles', 'Oauth2PermissionScopes', 'Owners')
+        # Every property the setter always writes must be present, or the import would clear it on the destination
+        $requiredApplicationProperties = @('DisplayName', 'SignInAudience', 'Notes', 'Tags', 'Web', 'Spa', 'PublicClient', 'RequiredResourceAccess', 'AppRoles', 'Oauth2PermissionScopes', 'Owners')
         $applicationProperties = if ($snapshot.Application) { @($snapshot.Application.PSObject.Properties.Name) } else { @() }
         $missingProperties = @($requiredApplicationProperties | Where-Object { $applicationProperties -notcontains $_ } | ForEach-Object { "Application.$_" })
-        if (-not $snapshot.ServicePrincipal) { $missingProperties += 'ServicePrincipal' }
+        if (-not $snapshot.ServicePrincipal) {
+            $missingProperties += 'ServicePrincipal'
+        }
+        else {
+            $servicePrincipalProperties = @($snapshot.ServicePrincipal.PSObject.Properties.Name)
+            $missingProperties += @(@('Tags', 'Homepage') | Where-Object { $servicePrincipalProperties -notcontains $_ } | ForEach-Object { "ServicePrincipal.$_" })
+        }
         if ($missingProperties.Count -gt 0) {
             Write-NCMessage "Snapshot '$InputPath' is incomplete, nothing was imported. Missing: $($missingProperties -join ', ')." -Level ERROR
             return

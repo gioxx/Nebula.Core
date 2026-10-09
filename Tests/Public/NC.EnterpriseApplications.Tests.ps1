@@ -167,6 +167,21 @@ Describe 'Get-NCEnterpriseApplicationSnapshot' {
         Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*App Role Assignments*Forbidden*' }
     }
 
+    It 'captures token claim settings and the assignment requirement' {
+        $app | Add-Member -NotePropertyName groupMembershipClaims -NotePropertyValue 'SecurityGroup' -Force
+        $app | Add-Member -NotePropertyName optionalClaims -NotePropertyValue ([pscustomobject]@{ idToken = @([pscustomobject]@{ name = 'email' }) }) -Force
+        $sp | Add-Member -NotePropertyName appRoleAssignmentRequired -NotePropertyValue $true -Force
+        try {
+            $snapshot = Get-NCEnterpriseApplicationSnapshot -ApplicationName 'Contoso Test App'
+        }
+        finally {
+            $app.PSObject.Properties.Remove('groupMembershipClaims'); $app.PSObject.Properties.Remove('optionalClaims'); $sp.PSObject.Properties.Remove('appRoleAssignmentRequired')
+        }
+
+        $snapshot.Application.GroupMembershipClaims | Should -Be 'SecurityGroup'
+        $snapshot.Application.OptionalClaims.idToken[0].name | Should -Be 'email'
+        $snapshot.ServicePrincipal.AppRoleAssignmentRequired | Should -BeTrue
+    }
     It 'includes App Role Assignments only when requested' {
         $snapshot = Get-NCEnterpriseApplicationSnapshot -ApplicationName 'Contoso Test App' -IncludeAppRoleAssignments
 
@@ -309,6 +324,47 @@ Describe 'Set-NCEnterpriseApplicationFromSnapshot' {
         $apiNames | Should -Contain 'requestedAccessTokenVersion'
         $script:appPatch.api.acceptMappedClaims | Should -BeNullOrEmpty
         $script:appPatch.api.requestedAccessTokenVersion | Should -BeNullOrEmpty
+    }
+    It 'restores token claim settings and the assignment requirement' {
+        $claimSnapshot = $snapshot.PSObject.Copy()
+        $claimSnapshot.Application = $snapshot.Application.PSObject.Copy()
+        $claimSnapshot.ServicePrincipal = $snapshot.ServicePrincipal.PSObject.Copy()
+        $claimSnapshot.Application | Add-Member -NotePropertyName GroupMembershipClaims -NotePropertyValue 'SecurityGroup' -Force
+        $claimSnapshot.Application | Add-Member -NotePropertyName OptionalClaims -NotePropertyValue ([pscustomobject]@{ idToken = @([pscustomobject]@{ name = 'email' }) }) -Force
+        $claimSnapshot.ServicePrincipal | Add-Member -NotePropertyName AppRoleAssignmentRequired -NotePropertyValue $true -Force
+        $script:appPost = $null; $script:spPost = $null
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^v1\.0/applications\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/applications') { $script:appPost = $Body | ConvertFrom-Json; return [pscustomobject]@{ id = 'new-app-id'; appId = 'new-client-id'; displayName = 'Target App' } }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/servicePrincipals') { $script:spPost = $Body | ConvertFrom-Json; return [pscustomobject]@{ id = 'new-sp-id'; appId = 'new-client-id' } }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $null = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $claimSnapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        $script:appPost.groupMembershipClaims | Should -Be 'SecurityGroup'
+        $script:appPost.optionalClaims.idToken[0].name | Should -Be 'email'
+        $script:spPost.appRoleAssignmentRequired | Should -BeTrue
+    }
+
+    It 'leaves token claims and the assignment requirement alone for older snapshots' {
+        $script:appPost = $null; $script:spPost = $null
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -match '^v1\.0/applications\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/applications') { $script:appPost = $Body | ConvertFrom-Json; return [pscustomobject]@{ id = 'new-app-id'; appId = 'new-client-id'; displayName = 'Target App' } }
+            if ($Uri -match '/servicePrincipals\?') { return [pscustomobject]@{ value = @() } }
+            if ($Method -eq 'POST' -and $Uri -eq 'v1.0/servicePrincipals') { $script:spPost = $Body | ConvertFrom-Json; return [pscustomobject]@{ id = 'new-sp-id'; appId = 'new-client-id' } }
+            return $null
+        }
+        Mock Invoke-NCGraphAllPagesCore { return @() }
+
+        $null = Set-NCEnterpriseApplicationFromSnapshot -Snapshot $snapshot -TargetDisplayName 'Target App' -Confirm:$false
+
+        @($script:appPost.PSObject.Properties.Name) | Should -Not -Contain 'groupMembershipClaims'
+        @($script:appPost.PSObject.Properties.Name) | Should -Not -Contain 'optionalClaims'
+        @($script:spPost.PSObject.Properties.Name) | Should -Not -Contain 'appRoleAssignmentRequired'
     }
     It 'still accepts snapshots saved without api settings' {
         $script:appPost = $null
@@ -676,6 +732,21 @@ Describe 'Compare-NCEnterpriseApplicationSnapshot' {
         ($rows | Where-Object { $_.Property -eq 'Application.Owners' }).Count | Should -Be 1
     }
 
+    It 'reports changed token claims and assignment requirement' {
+        $a = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
+        $b = New-TestSnapshot -DisplayName 'App' -RedirectUris @()
+        $a.Application | Add-Member -NotePropertyName GroupMembershipClaims -NotePropertyValue 'SecurityGroup'
+        $b.Application | Add-Member -NotePropertyName GroupMembershipClaims -NotePropertyValue 'None'
+        $a.Application | Add-Member -NotePropertyName OptionalClaims -NotePropertyValue ([pscustomobject]@{ idToken = @([pscustomobject]@{ name = 'email' }) })
+        $a.ServicePrincipal | Add-Member -NotePropertyName AppRoleAssignmentRequired -NotePropertyValue $true
+        $b.ServicePrincipal | Add-Member -NotePropertyName AppRoleAssignmentRequired -NotePropertyValue $false
+
+        $rows = @(Compare-NCEnterpriseApplicationSnapshot -ReferenceSnapshot $a -DifferenceSnapshot $b)
+
+        @($rows.Property) | Should -Contain 'Application.GroupMembershipClaims'
+        @($rows.Property) | Should -Contain 'Application.OptionalClaims'
+        @($rows.Property) | Should -Contain 'ServicePrincipal.AppRoleAssignmentRequired'
+    }
     It 'ignores the order of owners, App Role Assignments and credentials' {
         $jane = [pscustomobject]@{ Id = 'owner-1'; DisplayName = 'Jane Doe'; UserPrincipalName = 'jane@contoso.com' }
         $john = [pscustomobject]@{ Id = 'owner-2'; DisplayName = 'John Smith'; UserPrincipalName = 'john@contoso.com' }
@@ -760,7 +831,7 @@ Describe 'Import-EnterpriseApplication' {
         Mock Set-NCEnterpriseApplicationFromSnapshot { $applyResult }
         $script:validSnapshot = @{
             SchemaVersion    = 1
-            Application      = @{ DisplayName = 'Source App'; SignInAudience = 'AzureADMyOrg'; Tags = @(); Web = @{ redirectUris = @() }; Spa = @{ redirectUris = @() }; PublicClient = @{ redirectUris = @() }; RequiredResourceAccess = @(); AppRoles = @(); Oauth2PermissionScopes = @(); Owners = @() }
+            Application      = @{ DisplayName = 'Source App'; SignInAudience = 'AzureADMyOrg'; Notes = $null; Tags = @(); Web = @{ redirectUris = @() }; Spa = @{ redirectUris = @() }; PublicClient = @{ redirectUris = @() }; RequiredResourceAccess = @(); AppRoles = @(); Oauth2PermissionScopes = @(); Owners = @() }
             ServicePrincipal = @{ Tags = @(); Homepage = $null }
         }
         $script:validSnapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $inputPath
@@ -833,6 +904,16 @@ Describe 'Import-EnterpriseApplication' {
         Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*RequiredResourceAccess*' }
     }
 
+    It 'refuses a snapshot without Notes or Service Principal Tags/Homepage' {
+        $script:validSnapshot.Application.Remove('Notes')
+        $script:validSnapshot.ServicePrincipal.Remove('Tags')
+        $script:validSnapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $inputPath
+
+        Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -Confirm:$false
+
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*Application.Notes*' -and $Message -like '*ServicePrincipal.Tags*' }
+    }
     It 'refuses a JSON file that is not an Enterprise Application snapshot' {
         '{"name":"something else"}' | Set-Content -LiteralPath $inputPath
 
