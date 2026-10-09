@@ -69,6 +69,9 @@ Describe 'Security batching' {
                     if ($request.method -eq 'GET' -and $url -match '^/users/ghost%40contoso\.com') {
                         return @{ status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'not found' } } }
                     }
+                    if ($request.method -eq 'GET' -and $url -match '^/users/id1$') {
+                        return @{ status = 200; body = @{ id = 'id1'; userPrincipalName = 'user1@contoso.com'; displayName = 'User 1' } }
+                    }
                     if ($request.method -eq 'GET' -and $url -match '^/users/user(\d+)%40contoso\.com') {
                         $n = $Matches[1]
                         return @{ status = 200; body = @{ id = "id$n"; userPrincipalName = "user$n@contoso.com"; displayName = "User $n" } }
@@ -343,6 +346,15 @@ public class NCScriptedHost : PSHost {
             $result[5].DeviceId | Should -Be 'dev3b'
         }
 
+        It 'disables a user once when given by UPN and by object id' {
+            Set-SecurityGraphMock
+            $result = 'user1@contoso.com', 'id1' | Disable-UserDevices -Confirm:$false -PassThru
+
+            $patches = @($global:SeenRequests | Where-Object { $_.method -eq 'PATCH' })
+            $patches.Count | Should -Be 2
+            @($patches | ForEach-Object { [string]$_.url } | Sort-Object) | Should -Be @('/devices/dev1a', '/devices/dev1b')
+            @($result).Count | Should -Be 2
+        }
         It 'prints the summary without -PassThru' {
             Set-SecurityGraphMock
             New-Upns 3 | Disable-UserDevices -Confirm:$false
@@ -452,8 +464,8 @@ Describe 'Get-UserDevices' {
                                 }
                                 'managedDevices' {
                                     return @{ status = 200; body = @{ value = @(
-                                                @{ id = 'mA-old'; deviceName = 'LAPTOP-A'; serialNumber = 'SN-A-OLD'; lastSyncDateTime = '2025-01-01T00:00:00Z'; azureADDeviceId = 'aad-A' }
                                                 @{ id = 'mA'; deviceName = 'LAPTOP-A'; manufacturer = 'Dell Inc.'; model = 'Latitude 7440'; serialNumber = 'SN-A'; operatingSystem = 'Windows'; osVersion = '10.0.26200.1'; complianceState = 'compliant'; managedDeviceOwnerType = 'company'; lastSyncDateTime = '2026-10-08T09:00:00Z'; azureADDeviceId = 'AAD-A' }
+                                                @{ id = 'mA-old'; deviceName = 'LAPTOP-A'; serialNumber = 'SN-A-OLD'; lastSyncDateTime = '2025-01-01T00:00:00Z'; azureADDeviceId = 'aad-A' }
                                                 @{ id = 'mX'; deviceName = 'KIOSK-X'; manufacturer = 'HP'; model = 'Elite Mini'; serialNumber = 'SN-X'; operatingSystem = 'Windows'; complianceState = 'noncompliant'; managedDeviceOwnerType = 'company'; azureADDeviceId = '00000000-0000-0000-0000-000000000000' }
                                             ) } }
                                 }
@@ -622,6 +634,7 @@ Describe 'Get-UserDevices' {
         $hybrid.SerialNumber | Should -Be 'SN-H'
         ($rows | Where-Object { $_.DeviceName -eq 'STALE-Z' }).Source | Should -Be 'Intune'
         @($global:SeenRequests | Where-Object { [string]$_.url -like '/devices(deviceId=*' }).Count | Should -Be 2
+        Should -Invoke Invoke-MgGraphRequest -Times 3 -Exactly -Scope It
     }
 
     It 'reports an error and no rows when the Entra device lookup fails' {
