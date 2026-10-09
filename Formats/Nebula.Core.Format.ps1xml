@@ -61,7 +61,7 @@
         <TableHeaders>
           <TableColumnHeader>
             <Label>User</Label>
-            <Width>30</Width>
+            <Width>36</Width>
           </TableColumnHeader>
           <TableColumnHeader>
             <Label>Device Name</Label>

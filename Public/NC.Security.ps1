@@ -56,6 +56,8 @@ function Disable-UserDevices {
             $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             $queue = @(foreach ($entry in $targets) { if ($dedup.Add($entry)) { $entry } })
 
+            $queuedUserIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
             Write-NCGraphBatchNotice -Count ($queue.Count) -Noun 'user(s)'
 
             for ($offset = 0; $offset -lt $queue.Count; $offset += 20) {
@@ -74,6 +76,10 @@ function Disable-UserDevices {
                         if (-not $failedUsers.Contains($upn.Trim())) {
                             Write-NCMessage "Can't find Azure AD account for user $upn." -Level ERROR
                         }
+                        continue
+                    }
+                    if (-not $queuedUserIds.Add([string]$user.id)) {
+                        Write-Verbose "Skipping ${upn}: user $($user.userPrincipalName) was already given."
                         continue
                     }
                     $users.Add($user) | Out-Null
@@ -223,6 +229,14 @@ function Get-UserDevices {
                 param($Preferred, $Fallback)
                 if (-not [string]::IsNullOrWhiteSpace([string]$Preferred)) { $Preferred } else { $Fallback }
             }
+            $syncTime = {
+                param($Record)
+                $value = $Record.lastSyncDateTime
+                if ($value -is [datetime]) { return [datetimeoffset]$value }
+                $parsed = [datetimeoffset]::MinValue
+                if ($value -and [datetimeoffset]::TryParse([string]$value, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsed)) { return $parsed }
+                [datetimeoffset]::MinValue
+            }
             $newRow = {
                 param($User, $Entra, $Intune, [string]$Relationship)
                 $compliance = if ($Intune -and $Intune.complianceState) {
@@ -265,6 +279,8 @@ function Get-UserDevices {
             $dedup = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             $queue = @(foreach ($entry in $targets) { if ($dedup.Add($entry)) { $entry } })
 
+            $queuedUserIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
             Write-NCGraphBatchNotice -Count ($queue.Count) -Noun 'user(s)'
 
             for ($offset = 0; $offset -lt $queue.Count; $offset += 20) {
@@ -285,6 +301,10 @@ function Get-UserDevices {
                         }
                         continue
                     }
+                    if (-not $queuedUserIds.Add([string]$user.id)) {
+                        Write-Verbose "Skipping ${upn}: user $($user.userPrincipalName) was already given."
+                        continue
+                    }
                     $users.Add($user) | Out-Null
                 }
                 if ($users.Count -eq 0) { continue }
@@ -302,7 +322,9 @@ function Get-UserDevices {
                     $responsesById[[string]$response.Id] = $response
                 }
 
-                # (c) Merge per user, in input order.
+                # (c) Work out each user's Entra and Intune devices and which managed devices need an Entra lookup.
+                $states = [System.Collections.Generic.List[object]]::new()
+                $lookupIds = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
                 for ($i = 0; $i -lt $users.Count; $i++) {
                     $user = $users[$i]
                     $sources = [ordered]@{ Registered = $responsesById["r$i"]; Owner = $responsesById["o$i"]; Intune = $responsesById["m$i"] }
@@ -318,6 +340,7 @@ function Get-UserDevices {
                     }
 
                     $entraDevices = [ordered]@{}
+                    $entraDeviceIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
                     foreach ($relationship in @('Registered', 'Owner')) {
                         foreach ($device in @($sources[$relationship].Items)) {
                             if (-not $device -or -not $device.id) { continue }
@@ -326,16 +349,72 @@ function Get-UserDevices {
                                 $entraDevices[$key] = [pscustomobject]@{ Device = $device; Relationships = [System.Collections.Generic.List[string]]::new() }
                             }
                             $entraDevices[$key].Relationships.Add($relationship) | Out-Null
+                            if ($device.deviceId) { $entraDeviceIds.Add([string]$device.deviceId) | Out-Null }
                         }
                     }
 
+                    # Several Intune records can share one Entra device: the most recently synced one is merged, the others stay Intune-only.
                     $intuneDevices = @($sources['Intune'].Items | Where-Object { $_ -and $_.id })
                     $intuneByEntraDeviceId = @{}
                     foreach ($managed in $intuneDevices) {
                         $aadId = [string]$managed.azureADDeviceId
                         if (-not [string]::IsNullOrWhiteSpace($aadId) -and $aadId -ne $emptyDeviceId) {
-                            $intuneByEntraDeviceId[$aadId.ToLowerInvariant()] = $managed
+                            $aadKey = $aadId.ToLowerInvariant()
+                            $current = $intuneByEntraDeviceId[$aadKey]
+                            if (-not $current -or (& $syncTime $managed) -gt (& $syncTime $current)) {
+                                $intuneByEntraDeviceId[$aadKey] = $managed
+                            }
                         }
+                    }
+
+                    $needsLookup = @(foreach ($aadKey in $intuneByEntraDeviceId.Keys) {
+                            if (-not $entraDeviceIds.Contains($aadKey)) {
+                                if (-not $lookupIds.ContainsKey($aadKey)) { $lookupIds[$aadKey] = [string]$intuneByEntraDeviceId[$aadKey].azureADDeviceId }
+                                $aadKey
+                            }
+                        })
+
+                    $states.Add([pscustomobject]@{
+                            User                  = $user
+                            EntraDevices          = $entraDevices
+                            IntuneDevices         = $intuneDevices
+                            IntuneByEntraDeviceId = $intuneByEntraDeviceId
+                            NeedsLookup           = $needsLookup
+                        }) | Out-Null
+                }
+
+                # (d) Look up, in one batch, the Entra device of managed devices the user neither registers nor owns (e.g. hybrid-joined PCs).
+                $lookupById = @{}
+                if ($lookupIds.Count -gt 0) {
+                    $lookupKeys = @($lookupIds.Keys)
+                    $lookupRequests = @(for ($k = 0; $k -lt $lookupKeys.Count; $k++) {
+                            $aadValue = $lookupIds[$lookupKeys[$k]] -replace "'", "''"
+                            @{ Id = "d$k"; Method = 'GET'; Url = "/devices(deviceId='$([uri]::EscapeDataString($aadValue))')?`$select=$entraSelect" }
+                        })
+                    $lookupResults = @(Invoke-NCGraphBatch -Requests $lookupRequests -Activity 'Reading Entra devices')
+                    for ($k = 0; $k -lt $lookupKeys.Count; $k++) {
+                        $lookupById[$lookupKeys[$k]] = $lookupResults[$k]
+                    }
+                }
+
+                # (e) Merge per user, in input order.
+                foreach ($state in $states) {
+                    $user = $state.User
+                    $entraDevices = $state.EntraDevices
+                    $intuneDevices = $state.IntuneDevices
+                    $intuneByEntraDeviceId = $state.IntuneByEntraDeviceId
+
+                    $lookupFailures = @(foreach ($aadKey in $state.NeedsLookup) {
+                            $lookup = $lookupById[$aadKey]
+                            if (-not $lookup) { "Entra device lookup: no response" }
+                            elseif ($lookup.Success) {
+                                $entraDevices["lookup:$aadKey"] = [pscustomobject]@{ Device = [pscustomobject]$lookup.Body; Relationships = [System.Collections.Generic.List[string]]::new() }
+                            }
+                            elseif ($lookup.Status -ne 404) { "Entra device lookup: $($lookup.ErrorMessage)" }
+                        })
+                    if ($lookupFailures.Count -gt 0) {
+                        Write-NCMessage "Unable to read the devices of $($user.userPrincipalName). $($lookupFailures -join '; ')" -Level ERROR
+                        continue
                     }
 
                     $userRows = [System.Collections.Generic.List[object]]::new()
@@ -361,7 +440,6 @@ function Get-UserDevices {
                     foreach ($row in @($userRows | Sort-Object DeviceName)) { $results.Add($row) | Out-Null }
                 }
             }
-
             if ($GridView.IsPresent) {
                 $results | Out-NCGridView -Title 'User Devices'
             }

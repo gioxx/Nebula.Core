@@ -408,11 +408,33 @@ Describe 'Get-UserDevices' {
                         $n = $Matches[1]
                         return @{ status = 200; body = @{ id = "id$n"; userPrincipalName = "user$n@contoso.com"; displayName = "User $n" } }
                     }
+                    if ($url -match '^/users/id1\?') {
+                        return @{ status = 200; body = @{ id = 'id1'; userPrincipalName = 'user1@contoso.com'; displayName = 'User 1' } }
+                    }
+                    if ($url -match "^/devices\(deviceId='([^']+)'\)") {
+                        $aadId = $Matches[1]
+                        if ($aadId -eq $global:DeviceLookupFailFor) {
+                            return @{ status = 403; body = @{ error = @{ code = 'Forbidden'; message = 'no device access' } } }
+                        }
+                        if ($aadId -eq 'aad-H') {
+                            return @{ status = 200; body = @{ id = 'devH'; deviceId = 'aad-H'; displayName = 'HYBRID-H'; trustType = 'ServerAd'; accountEnabled = $true } }
+                        }
+                        return @{ status = 404; body = @{ error = @{ code = 'Request_ResourceNotFound'; message = 'not found' } } }
+                    }
                     if ($url -match '^/users/(id\d+)/(registeredDevices|ownedDevices|managedDevices)') {
                         $userId = $Matches[1]; $kind = $Matches[2]
                         if ($userId -eq $global:NoDevicesFor) { return @{ status = 200; body = @{ value = @() } } }
                         if ($kind -eq 'managedDevices' -and $userId -eq $global:IntuneFailFor) {
                             return @{ status = 403; body = @{ error = @{ code = 'Forbidden'; message = 'no Intune access' } } }
+                        }
+                        if ($userId -eq 'id4') {
+                            if ($kind -eq 'managedDevices') {
+                                return @{ status = 200; body = @{ value = @(
+                                            @{ id = 'mH'; deviceName = 'HYBRID-H'; serialNumber = 'SN-H'; azureADDeviceId = 'aad-H' }
+                                            @{ id = 'mZ'; deviceName = 'STALE-Z'; azureADDeviceId = 'aad-Z' }
+                                        ) } }
+                            }
+                            return @{ status = 200; body = @{ value = @() } }
                         }
                         if ($userId -eq 'id1') {
                             switch ($kind) {
@@ -430,6 +452,7 @@ Describe 'Get-UserDevices' {
                                 }
                                 'managedDevices' {
                                     return @{ status = 200; body = @{ value = @(
+                                                @{ id = 'mA-old'; deviceName = 'LAPTOP-A'; serialNumber = 'SN-A-OLD'; lastSyncDateTime = '2025-01-01T00:00:00Z'; azureADDeviceId = 'aad-A' }
                                                 @{ id = 'mA'; deviceName = 'LAPTOP-A'; manufacturer = 'Dell Inc.'; model = 'Latitude 7440'; serialNumber = 'SN-A'; operatingSystem = 'Windows'; osVersion = '10.0.26200.1'; complianceState = 'compliant'; managedDeviceOwnerType = 'company'; lastSyncDateTime = '2026-10-08T09:00:00Z'; azureADDeviceId = 'AAD-A' }
                                                 @{ id = 'mX'; deviceName = 'KIOSK-X'; manufacturer = 'HP'; model = 'Elite Mini'; serialNumber = 'SN-X'; operatingSystem = 'Windows'; complianceState = 'noncompliant'; managedDeviceOwnerType = 'company'; azureADDeviceId = '00000000-0000-0000-0000-000000000000' }
                                             ) } }
@@ -459,13 +482,14 @@ Describe 'Get-UserDevices' {
         $global:SeenRequests = [System.Collections.Generic.List[object]]::new()
         $global:NoDevicesFor = ''
         $global:IntuneFailFor = ''
+        $global:DeviceLookupFailFor = ''
     }
 
     It 'merges an Entra device with its Intune record into one row' {
         Set-UserDeviceGraphMock
         $rows = @(Get-UserDevices -UserPrincipalName 'user1@contoso.com')
 
-        $laptop = $rows | Where-Object { $_.DeviceName -eq 'LAPTOP-A' }
+        $laptop = $rows | Where-Object { $_.EntraObjectId -eq 'devA' }
         @($laptop).Count | Should -Be 1
         $laptop.Source | Should -Be 'Entra+Intune'
         $laptop.SerialNumber | Should -Be 'SN-A'
@@ -487,14 +511,14 @@ Describe 'Get-UserDevices' {
         Set-UserDeviceGraphMock
         $rows = @(Get-UserDevices -UserPrincipalName 'user1@contoso.com')
 
-        $rows.Count | Should -Be 4
+        $rows.Count | Should -Be 5
         ($rows | Where-Object { $_.DeviceName -eq 'PHONE-B' }).Source | Should -Be 'Entra'
         ($rows | Where-Object { $_.DeviceName -eq 'PHONE-B' }).Model | Should -Be 'iPhone 15'
         $kiosk = $rows | Where-Object { $_.DeviceName -eq 'KIOSK-X' }
         $kiosk.Source | Should -Be 'Intune'
         $kiosk.SerialNumber | Should -Be 'SN-X'
         $kiosk.EntraObjectId | Should -BeNullOrEmpty
-        @($rows.DeviceName) | Should -Be @('DESKTOP-C', 'KIOSK-X', 'LAPTOP-A', 'PHONE-B')
+        @($rows.DeviceName) | Should -Be @('DESKTOP-C', 'KIOSK-X', 'LAPTOP-A', 'LAPTOP-A', 'PHONE-B')
     }
 
     It 'shows a device that is both registered and owned once' {
@@ -528,10 +552,11 @@ Describe 'Get-UserDevices' {
 
     It 'reads 8 piped users with one resolve batch and two device batches, keeping input order' {
         Set-UserDeviceGraphMock
-        $rows = @(2..9 | ForEach-Object { "user$_@contoso.com" } | Get-UserDevices)
+        $ids = @(2, 3, 5, 6, 7, 8, 9, 10)
+        $rows = @($ids | ForEach-Object { "user$_@contoso.com" } | Get-UserDevices)
 
         Should -Invoke Invoke-MgGraphRequest -Times 3 -Exactly -Scope It
-        @($rows.User) | Should -Be @(2..9 | ForEach-Object { "user$_@contoso.com" })
+        @($rows.User) | Should -Be @($ids | ForEach-Object { "user$_@contoso.com" })
     }
 
     It 'reports an unresolved user once and still returns the others' {
@@ -569,9 +594,52 @@ Describe 'Get-UserDevices' {
 
         $rows.Count | Should -Be 0
         Should -Invoke Out-NCGridView -Scope It -ParameterFilter { $Title -eq 'User Devices' }
-        $script:gridRows.Count | Should -Be 4
+        $script:gridRows.Count | Should -Be 5
     }
 
+    It 'keeps the newest Intune record when several share an Entra device ID' {
+        Set-UserDeviceGraphMock
+        $rows = @(Get-UserDevices -UserPrincipalName 'user1@contoso.com')
+
+        $merged = $rows | Where-Object { $_.EntraObjectId -eq 'devA' }
+        $merged.SerialNumber | Should -Be 'SN-A'
+        $merged.IntuneDeviceId | Should -Be 'mA'
+        $old = @($rows | Where-Object { $_.IntuneDeviceId -eq 'mA-old' })
+        $old.Count | Should -Be 1
+        $old[0].Source | Should -Be 'Intune'
+    }
+
+    It 'looks up managed devices the user does not register or own in Entra' {
+        Set-UserDeviceGraphMock
+        $rows = @(Get-UserDevices -UserPrincipalName 'user4@contoso.com')
+
+        $rows.Count | Should -Be 2
+        $hybrid = $rows | Where-Object { $_.DeviceName -eq 'HYBRID-H' }
+        $hybrid.Source | Should -Be 'Entra+Intune'
+        $hybrid.JoinType | Should -Be 'Hybrid joined'
+        $hybrid.EntraObjectId | Should -Be 'devH'
+        $hybrid.Relationship | Should -BeNullOrEmpty
+        $hybrid.SerialNumber | Should -Be 'SN-H'
+        ($rows | Where-Object { $_.DeviceName -eq 'STALE-Z' }).Source | Should -Be 'Intune'
+        @($global:SeenRequests | Where-Object { [string]$_.url -like '/devices(deviceId=*' }).Count | Should -Be 2
+    }
+
+    It 'reports an error and no rows when the Entra device lookup fails' {
+        Set-UserDeviceGraphMock
+        $global:DeviceLookupFailFor = 'aad-H'
+        $rows = @(Get-UserDevices -UserPrincipalName 'user4@contoso.com')
+
+        $rows.Count | Should -Be 0
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*user4@contoso.com*Entra device lookup*' }
+    }
+
+    It 'lists a user given through different identifiers once' {
+        Set-UserDeviceGraphMock
+        $rows = @('user1@contoso.com', 'id1' | Get-UserDevices)
+
+        $rows.Count | Should -Be 5
+        @($rows | Where-Object { $_.User -ne 'user1@contoso.com' }).Count | Should -Be 0
+    }
     It 'has a table view for Nebula.Core.UserDevice in the module format file' {
         [xml]$formats = Get-Content -LiteralPath "$PSScriptRoot/../../Formats/Nebula.Core.Format.ps1xml" -Raw
         $view = $formats.Configuration.ViewDefinitions.View | Where-Object { $_.ViewSelectedBy.TypeName -eq 'Nebula.Core.UserDevice' }
