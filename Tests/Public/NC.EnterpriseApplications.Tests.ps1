@@ -1077,7 +1077,7 @@ Describe 'Import-EnterpriseApplication' {
         Mock Set-NCEnterpriseApplicationFromSnapshot { $applyResult }
         $script:validSnapshot = @{
             SchemaVersion    = 1
-            Application      = @{ DisplayName = 'Source App'; SignInAudience = 'AzureADMyOrg'; Notes = $null; Tags = @(); Web = @{ redirectUris = @() }; Spa = @{ redirectUris = @() }; PublicClient = @{ redirectUris = @() }; RequiredResourceAccess = @(); AppRoles = @(); Oauth2PermissionScopes = @(); Owners = @() }
+            Application      = @{ DisplayName = 'Source App'; SignInAudience = 'AzureADMyOrg'; Notes = $null; Tags = @(); Web = @{ redirectUris = @(); homePageUrl = $null; logoutUrl = $null; implicitGrantSettings = @{ enableAccessTokenIssuance = $false; enableIdTokenIssuance = $false } }; Spa = @{ redirectUris = @() }; PublicClient = @{ redirectUris = @() }; RequiredResourceAccess = @(); AppRoles = @(); Oauth2PermissionScopes = @(); Owners = @() }
             ServicePrincipal = @{ Tags = @(); Homepage = $null }
         }
         $script:validSnapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $inputPath
@@ -1188,6 +1188,17 @@ Describe 'Import-EnterpriseApplication' {
         Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -Confirm:$false
 
         Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 1 -Scope It
+    }
+    It 'refuses a snapshot whose Web misses the URLs or implicit grant settings' {
+        $script:validSnapshot.Application.Web = @{ redirectUris = @('https://app.contoso.com/cb') }
+        $script:validSnapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $inputPath
+
+        Import-EnterpriseApplication -InputPath $inputPath -TargetDisplayName 'Target App' -Confirm:$false
+
+        Assert-MockCalled Set-NCEnterpriseApplicationFromSnapshot -Times 0 -Scope It
+        Assert-MockCalled Write-NCMessage -Times 1 -Scope It -ParameterFilter {
+            $Level -eq 'ERROR' -and $Message -like '*Application.Web.homePageUrl*' -and $Message -like '*Application.Web.logoutUrl*' -and $Message -like '*Application.Web.implicitGrantSettings*'
+        }
     }
     It 'refuses a JSON file that is not an Enterprise Application snapshot' {
         '{"name":"something else"}' | Set-Content -LiteralPath $inputPath

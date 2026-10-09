@@ -160,6 +160,12 @@ function Import-EnterpriseApplication {
                 $missingProperties += "Application.$redirectContainer.redirectUris"
             }
         }
+        # The Web URLs and implicit grant settings are always written too (empty values clear them)
+        $webContainer = $snapshot.Application.Web
+        if ($applicationProperties -contains 'Web' -and $null -ne $webContainer) {
+            $webProperties = @($webContainer.PSObject.Properties.Name)
+            $missingProperties += @(@('homePageUrl', 'logoutUrl', 'implicitGrantSettings') | Where-Object { $webProperties -notcontains $_ } | ForEach-Object { "Application.Web.$_" })
+        }
         # Api is optional (older snapshots), but when present every setting in it is written
         if ($applicationProperties -contains 'Api' -and $null -ne $snapshot.Application.Api) {
             $apiProperties = @($snapshot.Application.Api.PSObject.Properties.Name)
