@@ -184,6 +184,7 @@ function Get-LicenseSourceData {
             $needDownload = $true
         }
     }
+    $checkDue = $needDownload
 
     $remoteCommitUtc = $null
     if ($ApiUrl -and ($needDownload -or $ForceRefresh.IsPresent)) {
@@ -248,9 +249,7 @@ function Get-LicenseSourceData {
             $source = 'Remote'
             Write-Verbose "License file downloaded and cached at $cacheFile."
 
-            if (-not $remoteCommitUtc) {
-                $remoteCommitUtc = $nowUtc
-            }
+            # Unknown commit date stays unknown: the download time would hide later commits and show a wrong "last updated".
             $currentCommitUtc = $remoteCommitUtc
         }
         catch {
@@ -275,7 +274,8 @@ function Get-LicenseSourceData {
     }
 
     $metaObject = [ordered]@{
-        LastCheckedUtc = $nowUtc.ToString('o')
+        # Only a real check restarts the TTL; using the cache must not postpone the next one.
+        LastCheckedUtc = if ($checkDue -or $needDownload -or -not $lastCheckedUtc) { $nowUtc.ToString('o') } else { $lastCheckedUtc.ToString('o') }
         LastCommitUtc  = if ($currentCommitUtc) { $currentCommitUtc.ToString('o') } else { $null }
     }
     try {
