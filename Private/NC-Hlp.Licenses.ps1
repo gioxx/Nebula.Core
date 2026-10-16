@@ -218,6 +218,8 @@ function Get-LicenseSourceData {
     if ($needDownload -and -not $ForceRefresh.IsPresent -and $remoteCommitUtc -and $currentCommitUtc) {
         if ($remoteCommitUtc -le $currentCommitUtc) {
             $needDownload = $false
+            # A stored date newer than the latest commit is a download time written by older versions; the cache is current either way.
+            $currentCommitUtc = $remoteCommitUtc
         }
     }
 
