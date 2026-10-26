@@ -72,4 +72,16 @@ Describe 'Test-MgGraphConnection sign-in canceled' {
         $output | Should -Be @($false)
         Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -match 'sign-in was canceled' }
     }
+
+    It 'keeps the real error when something else was canceled' {
+        function Connect-MgGraph {
+            [CmdletBinding()]
+            param([string[]]$Scopes, [switch]$NoWelcome, [string]$TenantId, [switch]$UseDeviceCode, [string]$LoginHint)
+            Write-Error 'The operation was canceled.'
+        }
+
+        Test-MgGraphConnection -EnsureExchangeOnline:$false | Should -BeFalse
+
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -match 'The operation was canceled' }
+    }
 }

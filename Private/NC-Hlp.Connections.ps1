@@ -279,7 +279,8 @@ function Test-MgGraphConnection {
     }
     catch {
         Add-EmptyLine
-        if ($_.Exception.Message -match 'cancel') {
+        # Only the user closing the sign-in (browser or WAM), not any other "operation was canceled"
+        if ($_.Exception.Message -match 'User cancell?ed authentication|authentication_canceled') {
             Write-NCMessage "Microsoft Graph sign-in was canceled. Run the command again when you are ready to sign in." -Level ERROR
         }
         else {

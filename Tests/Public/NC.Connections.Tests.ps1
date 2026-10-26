@@ -66,7 +66,7 @@ Describe 'Connect-Nebula' {
     It 'stops with a one-line error when Microsoft Graph does not connect' {
         Mock Test-MgGraphConnection { $false }
 
-        # A cmdlet-style error shows as "Connect-Nebula: <message>", without the throw's source position block
+        # With ConciseView (PowerShell 7) a cmdlet-style error shows as "Connect-Nebula: <message>", without the throw's source position block
         $err = { Connect-Nebula } | Should -Throw 'Failed to establish Microsoft Graph session.' -PassThru
         $err.FullyQualifiedErrorId | Should -BeLike 'NebulaConnectionFailed*'
         $err.InvocationInfo.MyCommand.Name | Should -Be 'Connect-Nebula'

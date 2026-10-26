@@ -229,7 +229,7 @@ function Connect-Nebula {
             -LoginHint $graphLoginHint
 
         if (-not $graphConnected) {
-            # The helper already reported why; a cmdlet error prints one line instead of the throw's source block
+            # The helper already reported why; with ConciseView (PowerShell 7) a cmdlet error prints one line instead of the throw's source block
             $PSCmdlet.ThrowTerminatingError([System.Management.Automation.ErrorRecord]::new(
                 [System.Exception]::new('Failed to establish Microsoft Graph session.'), 'NebulaConnectionFailed', 'ConnectionError', $null))
         }
