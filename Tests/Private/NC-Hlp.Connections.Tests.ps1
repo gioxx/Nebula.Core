@@ -47,3 +47,29 @@ Describe 'Test-MgGraphConnection -LoginHint' {
         }
     }
 }
+
+Describe 'Test-MgGraphConnection sign-in canceled' {
+    BeforeAll {
+        # Connect-MgGraph reports a canceled sign-in as a non-terminating error
+        function Connect-MgGraph {
+            [CmdletBinding()]
+            param([string[]]$Scopes, [switch]$NoWelcome, [string]$TenantId, [switch]$UseDeviceCode, [string]$LoginHint)
+            Write-Error 'InteractiveBrowserCredential authentication failed: User canceled authentication.'
+        }
+    }
+
+    BeforeEach {
+        Mock Write-NCMessage {}
+        Mock Get-Module { [pscustomobject]@{ Name = 'Microsoft.Graph' } } -ParameterFilter { $ListAvailable }
+        Mock Import-Module {}
+        Mock Get-MgContext { $null }
+    }
+
+    It 'reports a short canceled message without the raw Connect-MgGraph error' {
+        $output = @(Test-MgGraphConnection -EnsureExchangeOnline:$false 2>&1)
+
+        $output | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | Should -BeNullOrEmpty
+        $output | Should -Be @($false)
+        Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -match 'sign-in was canceled' }
+    }
+}

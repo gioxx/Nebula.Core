@@ -262,7 +262,8 @@ function Test-MgGraphConnection {
     }
 
     try {
-        Connect-MgGraph @connectParams | Out-Null
+        # Stop turns its non-terminating error into one we report below, instead of a raw error record
+        Connect-MgGraph @connectParams -ErrorAction Stop | Out-Null
 
         $ctx = Get-MgContext -ErrorAction Stop
         if (-not $ctx -or -not $ctx.Account) {
@@ -278,7 +279,12 @@ function Test-MgGraphConnection {
     }
     catch {
         Add-EmptyLine
-        Write-NCMessage "Unable to establish Microsoft Graph session. $($_.Exception.Message)" -Level ERROR
+        if ($_.Exception.Message -match 'cancel') {
+            Write-NCMessage "Microsoft Graph sign-in was canceled. Run the command again when you are ready to sign in." -Level ERROR
+        }
+        else {
+            Write-NCMessage "Unable to establish Microsoft Graph session. $($_.Exception.Message)" -Level ERROR
+        }
         return $false
     }
 }
