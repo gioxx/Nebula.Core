@@ -157,6 +157,7 @@ Full release notes: https://github.com/gioxx/Nebula.Core/releases/tag/v1.3.1
 
 Fixes
 - License catalog cache: the 7-day check against GitHub now counts from the last real check, not the last use, so new catalog versions are downloaded again. When the commit date cannot be read, the download time is no longer recorded as the catalog's "last updated" date (it blocked later updates). Run any license cmdlet once with `-ForceLicenseCatalogRefresh` to repair an existing cache.
+- Connect-Nebula: a canceled Microsoft Graph sign-in now shows a short message instead of the raw Connect-MgGraph error, and on PowerShell 7 connection failures print one line instead of the source position block.
 '@
         }
     }
