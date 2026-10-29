@@ -60,9 +60,27 @@ function Test-NebulaModuleUpdates {
 
     $script:NC_ModuleUpdateChecked = $true
 
+    $checkPowerShell = $NCVars.CheckPowerShellUpdates
+    if ($checkPowerShell -is [string]) {
+        $checkPowerShell = $checkPowerShell -match '^(1|true|yes|y)$'
+    }
+    else {
+        $checkPowerShell = [bool]$checkPowerShell
+    }
+
+    # Reported right away so the early returns below (no PowerShellGet, Gallery unreachable) keep it.
+    $hasPowerShellUpdate = $false
+    if ($checkPowerShell) {
+        $powerShellUpdate = Get-NCPowerShellUpdate
+        if ($powerShellUpdate) {
+            Write-NCMessage ("Update available for {0}: {1} -> {2}" -f $powerShellUpdate.Name, $powerShellUpdate.InstalledVersion, $powerShellUpdate.LatestVersion) -Level WARNING
+            $hasPowerShellUpdate = $true
+        }
+    }
+
     if (-not (Get-Command -Name Get-InstalledModule -ErrorAction SilentlyContinue)) {
         Write-NCMessage "PowerShellGet is required to check for Nebula updates. Install it with Install-Module PowerShellGet." -Level WARNING
-        return $false
+        return $hasPowerShellUpdate
     }
 
     $installedModules = @()
@@ -71,7 +89,7 @@ function Test-NebulaModuleUpdates {
     }
     catch {
         Write-NCMessage "Unable to read installed Nebula modules. $($_.Exception.Message)" -Level WARNING
-        return $false
+        return $hasPowerShellUpdate
     }
 
     $extraModules = @()
@@ -88,7 +106,7 @@ function Test-NebulaModuleUpdates {
     }
 
     if (-not $installedModules -or $installedModules.Count -eq 0) {
-        return $false
+        return $hasPowerShellUpdate
     }
 
 
@@ -100,7 +118,7 @@ function Test-NebulaModuleUpdates {
         }
         catch {
             Write-NCMessage "Unable to reach PowerShell Gallery to check updates. $($_.Exception.Message)" -Level WARNING
-            return $false
+            return $hasPowerShellUpdate
         }
 
         if (-not $galleryModule) {
@@ -121,7 +139,7 @@ function Test-NebulaModuleUpdates {
 
     if (-not $updates -or $updates.Count -eq 0) {
         Save-NCModuleUpdateLastCheck
-        return $false
+        return $hasPowerShellUpdate
     }
 
     foreach ($update in $updates) {
@@ -195,4 +213,52 @@ function Get-NCModuleUpdateCheckPath {
     param()
 
     return (Join-Path -Path $NCVars.UserConfigRoot -ChildPath 'update-check.json')
+}
+
+function Get-NCPowerShellUpdate {
+    <#
+    .SYNOPSIS
+        Returns the PowerShell update available for this session, if any.
+    .DESCRIPTION
+        Compares the running PowerShell 7+ version with the latest stable release published by gioxx/SWUpdates-Alert.
+        Returns $null on Windows PowerShell, when PowerShell is up to date, or when the check fails (with a warning).
+    .PARAMETER CurrentVersion
+        Version to compare (Major.Minor.Patch). Defaults to the running PowerShell version.
+    .PARAMETER Edition
+        PowerShell edition. Defaults to the running edition; only 'Core' is checked.
+    #>
+    [CmdletBinding()]
+    param(
+        [version]$CurrentVersion,
+        [string]$Edition = $PSVersionTable.PSEdition
+    )
+
+    if ($Edition -ne 'Core') {
+        return $null
+    }
+
+    if (-not $CurrentVersion) {
+        # Drop the preview label: a preview ahead of the latest stable is not outdated.
+        $running = $PSVersionTable.PSVersion
+        $CurrentVersion = [version]::new($running.Major, $running.Minor, $running.Patch)
+    }
+
+    try {
+        $raw = Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/gioxx/SWUpdates-Alert/main/updates/LATEST_PWSH' -TimeoutSec 10 -ErrorAction Stop
+        $latestVersion = [version](([string]$raw).Trim().TrimStart('v'))
+    }
+    catch {
+        Write-NCMessage "Unable to check the latest PowerShell version. $($_.Exception.Message)" -Level WARNING
+        return $null
+    }
+
+    if ($latestVersion -le $CurrentVersion) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        Name             = 'PowerShell'
+        InstalledVersion = $CurrentVersion
+        LatestVersion    = $latestVersion
+    }
 }
