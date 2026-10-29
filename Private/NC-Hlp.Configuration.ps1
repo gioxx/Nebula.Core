@@ -78,6 +78,7 @@ if (-not $script:NC_Defaults) {
         CSV_Encoding            = 'UTF-8'
         CheckUpdatesOnConnect   = $true
         CheckUpdatesIntervalHours = 72
+        CheckPowerShellUpdates  = $true
         DateTimeString_CSV      = 'yyyyMMdd'
         DateTimeString_Full     = 'yyyy-MM-dd HH:mm:ss'
         DateTimeTimeZone        = 'Eastern Standard Time'
