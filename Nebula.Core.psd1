@@ -100,6 +100,7 @@
         'Set-SharedMboxCopyForSent',
         'Set-UserMsolAccountSku',
         'Set-UserUsageLocation',
+        'Swap-UserMsolAccountSku',
         'Sync-NebulaConfig',
         'Test-SharedMailboxCompliance',
         'Get-IntuneAppPresence',

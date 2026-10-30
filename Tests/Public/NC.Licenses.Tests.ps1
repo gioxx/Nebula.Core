@@ -609,6 +609,87 @@ Describe 'License assignment batching' {
         }
     }
 
+    Context 'Swap user licenses without spare tenant seats' {
+        BeforeEach {
+            $global:swapFirstSkuId = [guid]'11111111-1111-1111-1111-111111111111'
+            $global:swapSecondSkuId = [guid]'22222222-2222-2222-2222-222222222222'
+            $global:SwapFailOn = @()
+            $global:SeenRequests = [System.Collections.Generic.List[object]]::new()
+            Mock Get-LicenseCatalog { $null }
+            Mock Invoke-MgGraphRequest {
+                New-TestBatchResponse -Body $Body -Responder {
+                    param($request)
+                    $global:SeenRequests.Add($request)
+                    $url = [string]$request.url
+                    if ($request.method -eq 'GET' -and $url -match '^/users/(user[12]%40contoso\.com)\?') {
+                        $user = $Matches[1]
+                        if ($user -like 'user1*') {
+                            return @{ status = 200; body = @{ id = 'id1'; userPrincipalName = 'user1@contoso.com'; usageLocation = 'IT'; licenseAssignmentStates = @(@{ skuId = $global:swapFirstSkuId; assignedByGroup = $null; disabledPlans = @('first-disabled') }) } }
+                        }
+                        return @{ status = 200; body = @{ id = 'id2'; userPrincipalName = 'user2@contoso.com'; usageLocation = 'IT'; licenseAssignmentStates = @(@{ skuId = $global:swapSecondSkuId; assignedByGroup = $null; disabledPlans = @('second-disabled') }) } }
+                    }
+                    if ($request.method -eq 'GET' -and $url -match '^/users/(id[12])/licenseDetails$') {
+                        if ($Matches[1] -eq 'id1') { return @{ status = 200; body = @{ value = @(@{ skuId = $global:swapFirstSkuId; skuPartNumber = 'FIRSTPACK' }) } } }
+                        return @{ status = 200; body = @{ value = @(@{ skuId = $global:swapSecondSkuId; skuPartNumber = 'SECONDPACK' }) } }
+                    }
+                    if ($request.method -eq 'POST' -and $url -match '^/users/(id[12])/assignLicense$') {
+                        $kind = if (@($request.body.addLicenses).Count -gt 0) { 'add' } else { 'remove' }
+                        $failureKey = "${kind}:$($Matches[1])"
+                        if ($kind -eq 'add') { $failureKey += ":$([string]$request.body.addLicenses[0].skuId)" }
+                        if ($global:SwapFailOn -contains $failureKey) { return @{ status = 400; body = @{ error = @{ code = 'RequestFailed'; message = 'simulated failure' } } } }
+                        return @{ status = 200; body = @{ id = $Matches[1] } }
+                    }
+                    return @{ status = 500; body = @{ error = @{ message = "Unexpected request: $($request.method) $url" } } }
+                }
+            }
+        }
+
+        It 'removes both selected licenses before assigning them reciprocally' {
+            Swap-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -FirstUserLicense FIRSTPACK -SecondUserPrincipalName user2@contoso.com -SecondUserLicense SECONDPACK -Confirm:$false
+
+            $writes = @($global:SeenRequests | Where-Object method -eq POST)
+            $writes.Count | Should -Be 4
+            @($writes[0].body.removeLicenses) | Should -Be @($global:swapFirstSkuId)
+            @($writes[1].body.removeLicenses) | Should -Be @($global:swapSecondSkuId)
+            @($writes[0].body.addLicenses).Count | Should -Be 0
+            @($writes[1].body.addLicenses).Count | Should -Be 0
+            $writes[2].url | Should -Be '/users/id1/assignLicense'
+            $writes[2].body.addLicenses.skuId | Should -Be $global:swapSecondSkuId
+            $writes[2].body.addLicenses.disabledPlans | Should -Be @('second-disabled')
+            $writes[3].url | Should -Be '/users/id2/assignLicense'
+            $writes[3].body.addLicenses.skuId | Should -Be $global:swapFirstSkuId
+            $writes[3].body.addLicenses.disabledPlans | Should -Be @('first-disabled')
+        }
+
+        It 'restores a successful removal and does not start additions if the other removal fails' {
+            $global:SwapFailOn = @('remove:id2')
+
+            Swap-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -FirstUserLicense FIRSTPACK -SecondUserPrincipalName user2@contoso.com -SecondUserLicense SECONDPACK -Confirm:$false
+
+            $writes = @($global:SeenRequests | Where-Object method -eq POST)
+            $writes.Count | Should -Be 3
+            @($writes[2].body.addLicenses.skuId) | Should -Be @($global:swapFirstSkuId)
+            $writes[2].url | Should -Be '/users/id1/assignLicense'
+            Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*simulated failure*' }
+        }
+
+        It 'removes partial reciprocal additions and restores both original licenses after an add failure' {
+            $global:SwapFailOn = @("add:id2:$($global:swapFirstSkuId)")
+
+            Swap-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -FirstUserLicense FIRSTPACK -SecondUserPrincipalName user2@contoso.com -SecondUserLicense SECONDPACK -Confirm:$false
+
+            $writes = @($global:SeenRequests | Where-Object method -eq POST)
+            $writes.Count | Should -Be 7
+            @($writes[4].body.removeLicenses) | Should -Be @($global:swapSecondSkuId)
+            $writes[4].url | Should -Be '/users/id1/assignLicense'
+            $writes[5].url | Should -Be '/users/id1/assignLicense'
+            @($writes[5].body.addLicenses.skuId) | Should -Be @($global:swapFirstSkuId)
+            $writes[6].url | Should -Be '/users/id2/assignLicense'
+            @($writes[6].body.addLicenses.skuId) | Should -Be @($global:swapSecondSkuId)
+            Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*simulated failure*' }
+        }
+    }
+
     Context 'Copy and Move user licenses' {
         BeforeEach {
             Mock Update-MgUser {}
