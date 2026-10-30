@@ -2749,6 +2749,8 @@ function Swap-UserMsolAccountSku {
         Validates both users and their selected direct license assignments, removes the selected licenses
         from both users, and only then assigns each user's licenses to the other. If a phase fails, it
         attempts to restore the original assignments and reports any incomplete recovery.
+        Use -AllLicenses to select all direct licenses automatically; -ExcludeLicense leaves the named
+        license assigned to its current user. Explicit license selections remain available otherwise.
     .PARAMETER FirstUserPrincipalName
         UPN or object ID of the first user.
     .PARAMETER FirstUserLicense
@@ -2757,19 +2759,27 @@ function Swap-UserMsolAccountSku {
         UPN or object ID of the second user.
     .PARAMETER SecondUserLicense
         One or more licenses currently assigned directly to the second user.
+    .PARAMETER AllLicenses
+        Automatically swap all direct licenses currently assigned to both users.
+    .PARAMETER ExcludeLicense
+        In -AllLicenses mode, leave these license(s) assigned to their current user.
     .EXAMPLE
-        Swap-UserMsolAccountSku user1@contoso.com ENTERPRISEPACK user2@contoso.com SPE_E3
+        Swap-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -FirstUserLicense ENTERPRISEPACK -SecondUserPrincipalName user2@contoso.com -SecondUserLicense SPE_E3
+    .EXAMPLE
+        Swap-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -SecondUserPrincipalName user2@contoso.com -AllLicenses -ExcludeLicense 'FABRIC_FREE'
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
         [Parameter(Mandatory = $true, Position = 0)]
         [string]$FirstUserPrincipalName,
-        [Parameter(Mandatory = $true, Position = 1)]
+        [Parameter(Position = 1)]
         [string[]]$FirstUserLicense,
         [Parameter(Mandatory = $true, Position = 2)]
         [string]$SecondUserPrincipalName,
-        [Parameter(Mandatory = $true, Position = 3)]
+        [Parameter(Position = 3)]
         [string[]]$SecondUserLicense,
+        [switch]$AllLicenses,
+        [string[]]$ExcludeLicense,
         [switch]$ForceLicenseCatalogRefresh
     )
 
@@ -2784,7 +2794,16 @@ function Swap-UserMsolAccountSku {
 
         $firstSelections = @($FirstUserLicense | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() } | Select-Object -Unique)
         $secondSelections = @($SecondUserLicense | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() } | Select-Object -Unique)
-        if ($firstSelections.Count -eq 0 -or $secondSelections.Count -eq 0) {
+        $excludeSelections = @($ExcludeLicense | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() } | Select-Object -Unique)
+        if ($AllLicenses -and ($firstSelections.Count -gt 0 -or $secondSelections.Count -gt 0)) {
+            Write-NCMessage 'Use either -AllLicenses or explicit license selections, not both.' -Level ERROR
+            return
+        }
+        if (-not $AllLicenses -and $excludeSelections.Count -gt 0) {
+            Write-NCMessage '-ExcludeLicense is available only with -AllLicenses.' -Level ERROR
+            return
+        }
+        if (-not $AllLicenses -and ($firstSelections.Count -eq 0 -or $secondSelections.Count -eq 0)) {
             Write-NCMessage 'Specify at least one license for each user to swap.' -Level ERROR
             return
         }
@@ -2821,6 +2840,34 @@ function Swap-UserMsolAccountSku {
             $failedDetail = @($detailResults | Where-Object { -not $_.Success } | ForEach-Object { $_.ErrorMessage }) -join '; '
             Write-NCMessage "Unable to read both users' license details: $failedDetail" -Level ERROR
             return
+        }
+
+        if ($AllLicenses) {
+            $excludedSkuIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $allUserLicenses = @($detailResults[0].Items) + @($detailResults[1].Items)
+            foreach ($entry in $excludeSelections) {
+                $match = $null
+                foreach ($license in $allUserLicenses) {
+                    $display = $null
+                    $source = $null
+                    if ($licenseLookup) { $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $license.skuPartNumber -FallbackLookup $customLookup -MatchSource ([ref]$source) }
+                    if ($entry -ieq [string]$license.skuId -or $entry -ieq [string]$license.skuPartNumber -or ($display -and $entry -ieq $display)) {
+                        $match = $license
+                        break
+                    }
+                }
+                if (-not $match) {
+                    Write-NCMessage "Excluded license '$entry' is not assigned to either user." -Level ERROR
+                    return
+                }
+                $null = $excludedSkuIds.Add([string]$match.skuId)
+            }
+            $firstSelections = @($detailResults[0].Items | Where-Object { -not $excludedSkuIds.Contains([string]$_.skuId) } | ForEach-Object { [string]$_.skuId })
+            $secondSelections = @($detailResults[1].Items | Where-Object { -not $excludedSkuIds.Contains([string]$_.skuId) } | ForEach-Object { [string]$_.skuId })
+            if ($firstSelections.Count -eq 0 -or $secondSelections.Count -eq 0) {
+                Write-NCMessage 'After exclusions, each user must have at least one license to swap.' -Level ERROR
+                return
+            }
         }
 
         $resolveSelections = {
@@ -2900,9 +2947,21 @@ function Swap-UserMsolAccountSku {
         $firstAlreadyOnSecond = @($firstLicenses | Where-Object { $secondSkuIds.Contains([string]$_.SkuId) })
         $secondAlreadyOnFirst = @($secondLicenses | Where-Object { $firstSkuIds.Contains([string]$_.SkuId) })
         if ($firstAlreadyOnSecond.Count -gt 0 -or $secondAlreadyOnFirst.Count -gt 0) {
-            $overlapNames = @($firstAlreadyOnSecond + $secondAlreadyOnFirst | ForEach-Object { $_.Name } | Select-Object -Unique)
-            Write-NCMessage ("The selected licenses overlap between users ({0}); no swap was performed." -f ($overlapNames -join ', ')) -Level ERROR
-            return
+            if (-not $AllLicenses) {
+                $overlapNames = @($firstAlreadyOnSecond + $secondAlreadyOnFirst | ForEach-Object { $_.Name } | Select-Object -Unique)
+                Write-NCMessage ("The selected licenses overlap between users ({0}); no swap was performed." -f ($overlapNames -join ', ')) -Level ERROR
+                return
+            }
+            $firstLicenses = @($firstLicenses | Where-Object { -not $secondSkuIds.Contains([string]$_.SkuId) })
+            $secondLicenses = @($secondLicenses | Where-Object { -not $firstSkuIds.Contains([string]$_.SkuId) })
+            if ($firstLicenses.Count -eq 0 -and $secondLicenses.Count -eq 0) {
+                Write-NCMessage 'Both users already have the same direct license set; no swap is needed.' -Level SUCCESS
+                return
+            }
+            if ($firstLicenses.Count -eq 0 -or $secondLicenses.Count -eq 0) {
+                Write-NCMessage 'After retaining licenses shared by both users, each user must have at least one license to swap.' -Level ERROR
+                return
+            }
         }
         $firstCurrentlyAssignedAtSecond = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $secondCurrentlyAssignedAtFirst = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
