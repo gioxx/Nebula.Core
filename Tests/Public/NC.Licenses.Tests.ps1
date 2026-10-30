@@ -425,6 +425,18 @@ Describe 'License assignment batching' {
             @($writes[0].body.$Populated).Count | Should -Be 1
         }
 
+        It 'does not fetch tenant SKUs for remove-only input with <Case> additions' -ForEach @(
+            @{ Case = 'omitted'; Arguments = @{} }
+            @{ Case = 'blank'; Arguments = @{ AddLicense = @($null, '', ' ') } }
+        ) {
+            Set-UserMsolAccountSku user1@contoso.com -RemoveLicense ENTERPRISEPACK @Arguments -Confirm:$false
+            Should -Invoke Get-MgSubscribedSku -Times 0 -Exactly -Scope It
+            $writes = @($global:SeenRequests | Where-Object method -eq POST)
+            $writes.Count | Should -Be 1
+            $writes[0].body.removeLicenses | Should -Be @($global:skuId)
+            @($writes[0].body.addLicenses).Count | Should -Be 0
+        }
+
         It 'rejects an empty change' {
             Set-UserMsolAccountSku user1@contoso.com -Confirm:$false
             @($global:SeenRequests | Where-Object method -eq POST).Count | Should -Be 0

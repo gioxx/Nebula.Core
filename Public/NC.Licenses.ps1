@@ -2426,7 +2426,11 @@ function Set-UserMsolAccountSku {
     process {
         if ($graphConnected) {
             # Snapshot the per-record arrays; do not write until all aliases and rows have been merged.
-            $queue.Add([pscustomobject]@{ Identifier = $UserPrincipalName; Add = @($AddLicense); Remove = @($RemoveLicense) })
+            $queue.Add([pscustomobject]@{
+                    Identifier = $UserPrincipalName
+                    Add = @($AddLicense | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                    Remove = @($RemoveLicense)
+                })
         }
     }
 
