@@ -2435,8 +2435,19 @@ function Set-UserMsolAccountSku {
     }
 
     end {
+        $batchResults = @{}
+        $shouldSummarize = $false
+        $recordResult = {
+            param([string]$Key, [string]$UserPrincipalName, [string]$Status, [string]$Reason)
+            $batchResults[$Key] = [pscustomobject]@{
+                UserPrincipalName = $UserPrincipalName
+                Status = $Status
+                Reason = $Reason
+            }
+        }
         try {
             if (-not $graphConnected -or $queue.Count -eq 0) { return }
+            $shouldSummarize = $true
             Write-NCGraphBatchNotice -Count $queue.Count -Noun 'users'
             $licenseLookup = $null
             $customLookup = $null
@@ -2469,6 +2480,7 @@ function Set-UserMsolAccountSku {
                 $user = $resolvedUsers[$identifier]
                 if (-not $user -or -not $user.id) {
                     if (-not $failedUsers.Contains($identifier)) { Write-NCMessage "Unable to resolve user recipient for $identifier" -Level ERROR }
+                    & $recordResult "unresolved:$identifier" $identifier 'Failed' 'Unable to resolve user.'
                     continue
                 }
                 $id = [string]$user.id
@@ -2483,10 +2495,12 @@ function Set-UserMsolAccountSku {
                         EffectiveRemoves = @()
                         AlreadyAssignedAdds = @()
                         AlreadyAbsentRemovals = @()
+                        FailureReasons = [System.Collections.Generic.List[string]]::new()
                         Invalid = $false
                     }
                     $byId[$id] = $target
                     $targets.Add($target)
+                    & $recordResult "user:$id" $target.UserPrincipalName 'Pending' ''
                 }
                 $target = $byId[$id]
                 $adds = @($row.Add | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
@@ -2494,6 +2508,7 @@ function Set-UserMsolAccountSku {
                 if ($adds.Count + $removes.Count -eq 0) {
                     Write-NCMessage "No license changes requested for $identifier." -Level ERROR
                     $target.Invalid = $true
+                    $target.FailureReasons.Add('No license changes were specified.')
                 }
                 foreach ($entry in $adds) { $target.Add.Add($entry.Trim()) }
                 foreach ($entry in $removes) { $target.Remove.Add($entry.Trim()) }
@@ -2514,9 +2529,13 @@ function Set-UserMsolAccountSku {
                 $detail = $details["l$i"]
                 if (-not $detail.Success) {
                     Write-NCMessage "Unable to retrieve licenses for $($target.UserPrincipalName): $($detail.ErrorMessage)" -Level ERROR
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Failed' ([string]$detail.ErrorMessage)
                     continue
                 }
-                if ($target.Invalid) { continue }
+                if ($target.Invalid) {
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Failed' ($target.FailureReasons -join '; ')
+                    continue
+                }
                 # licenseDetails includes group-inherited licenses as well as direct assignments.
                 # Require the explicit assignment source before deciding whether an addition is redundant.
                 $assignmentStateComplete = $target.AssignmentStates -is [array]
@@ -2539,6 +2558,7 @@ function Set-UserMsolAccountSku {
                 }
                 if (-not $assignmentStateComplete) {
                     Write-NCMessage "Unable to read complete license assignment state for $($target.UserPrincipalName)." -Level ERROR
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Failed' 'Unable to read complete license assignment state.'
                     continue
                 }
                 $resolved = @{ Add = @{}; Remove = @{}; AlreadyAbsentRemove = @{} }
@@ -2585,6 +2605,7 @@ function Set-UserMsolAccountSku {
                         if (-not $match -or -not $match.SkuId) {
                             Write-NCMessage "Unable to resolve license '$entry' for $operation on $($target.UserPrincipalName)." -Level ERROR
                             $target.Invalid = $true
+                            $target.FailureReasons.Add("Unable to resolve license '$entry' for $operation.")
                         }
                         elseif ($operation -eq 'Remove' -and -not $presentSkuIds.Contains([string]$match.SkuId)) {
                             $resolved.AlreadyAbsentRemove[[string]$match.SkuId] = $entry
@@ -2596,8 +2617,12 @@ function Set-UserMsolAccountSku {
                 if ($overlap.Count -gt 0) {
                     Write-NCMessage "Contradictory license additions and removals for $($target.UserPrincipalName): $($overlap -join ', ')" -Level ERROR
                     $target.Invalid = $true
+                    $target.FailureReasons.Add("Contradictory license additions and removals: $($overlap -join ', ').")
                 }
-                if ($target.Invalid) { continue }
+                if ($target.Invalid) {
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Failed' ($target.FailureReasons -join '; ')
+                    continue
+                }
 
                 # Omit only existing direct assignments to preserve their disabled service plans.
                 # A group-inherited SKU still needs the direct addition the caller requested.
@@ -2611,6 +2636,7 @@ function Set-UserMsolAccountSku {
                 if ($inheritedRemovals.Count -gt 0) {
                     $inheritedNames = @($inheritedRemovals | ForEach-Object { $resolved.Remove[$_] })
                     Write-NCMessage ("Cannot remove inherited-only license(s) for {0}: {1}. Remove the license assignment from its group." -f $target.UserPrincipalName, ($inheritedNames -join ', ')) -Level ERROR
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Failed' ("Cannot remove inherited-only license(s): {0}." -f ($inheritedNames -join ', '))
                     continue
                 }
                 $targetUsage = $null
@@ -2622,13 +2648,18 @@ function Set-UserMsolAccountSku {
                     if ($target.AlreadyAssignedAdds.Count -gt 0) { $stateSummary += "already assigned: $($target.AlreadyAssignedAdds -join ', ')" }
                     if ($target.AlreadyAbsentRemovals.Count -gt 0) { $stateSummary += "already absent: $($target.AlreadyAbsentRemovals -join ', ')" }
                     Write-NCMessage ("No license changes needed for {0}; {1}." -f $target.UserPrincipalName, ($stateSummary -join '; ')) -Level SUCCESS
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Unchanged' ($stateSummary -join '; ')
                     continue
                 }
                 $summary = "Add license(s): {0}; remove license(s): {1}" -f ($target.EffectiveAdds -join ', '), ($target.EffectiveRemoves -join ', ')
                 if ($target.AlreadyAssignedAdds.Count -gt 0) { $summary += "; already assigned: $($target.AlreadyAssignedAdds -join ', ')" }
                 if ($target.AlreadyAbsentRemovals.Count -gt 0) { $summary += "; already absent: $($target.AlreadyAbsentRemovals -join ', ')" }
                 if ($targetUsage) { $summary = "Set usage location to {0}; {1}" -f $targetUsage, $summary }
-                if (-not $PSCmdlet.ShouldProcess($target.UserPrincipalName, $summary)) { continue }
+                if (-not $PSCmdlet.ShouldProcess($target.UserPrincipalName, $summary)) {
+                    $reason = if ($WhatIfPreference) { 'Preview only (-WhatIf).' } else { 'Not approved.' }
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Skipped' $reason
+                    continue
+                }
                 $requestId = "m$i"
                 $approved[$requestId] = $target
                 if ($targetUsage) {
@@ -2660,6 +2691,7 @@ function Set-UserMsolAccountSku {
                     if (-not $response.Success) {
                         $null = $readyUsers.Remove($key)
                         Write-NCMessage "Unable to set usage location for $($target.UserPrincipalName): $($response.ErrorMessage)" -Level ERROR
+                        & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Failed' ("Unable to set usage location: {0}" -f $response.ErrorMessage)
                     }
                 }
             }
@@ -2673,11 +2705,34 @@ function Set-UserMsolAccountSku {
                     if ($target.AlreadyAssignedAdds.Count -gt 0) { $changeSummary += "already assigned: $($target.AlreadyAssignedAdds -join ', ')" }
                     if ($target.AlreadyAbsentRemovals.Count -gt 0) { $changeSummary += "already absent: $($target.AlreadyAbsentRemovals -join ', ')" }
                     Write-NCMessage ("Changed licenses for {0} ({1})." -f $target.UserPrincipalName, ($changeSummary -join '; ')) -Level SUCCESS
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Succeeded' ($changeSummary -join '; ')
                 }
-                else { Write-NCMessage "License change failed for $($target.UserPrincipalName): $($response.ErrorMessage)" -Level ERROR }
+                else {
+                    Write-NCMessage "License change failed for $($target.UserPrincipalName): $($response.ErrorMessage)" -Level ERROR
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Failed' ([string]$response.ErrorMessage)
+                }
             }
         }
-        finally { Restore-ProgressAndInfoPreferences }
+        finally {
+            if ($shouldSummarize) {
+                foreach ($key in @($batchResults.Keys)) {
+                    if ($batchResults[$key].Status -eq 'Pending') {
+                        & $recordResult $key $batchResults[$key].UserPrincipalName 'Failed' 'Operation did not complete.'
+                    }
+                }
+                $results = @($batchResults.Values)
+                $succeededCount = @($results | Where-Object Status -eq 'Succeeded').Count
+                $failedCount = @($results | Where-Object Status -eq 'Failed').Count
+                $unchangedCount = @($results | Where-Object Status -eq 'Unchanged').Count
+                $skippedCount = @($results | Where-Object Status -eq 'Skipped').Count
+                Write-NCMessage ("License batch totals — changed successfully: {0}; failed: {1}; unchanged: {2}; skipped/not executed: {3}." -f $succeededCount, $failedCount, $unchangedCount, $skippedCount) -Level INFO
+                if ($failedCount -gt 0) {
+                    $failedDetails = @($results | Where-Object Status -eq 'Failed' | ForEach-Object { "{0} ({1})" -f $_.UserPrincipalName, $_.Reason }) -join '; '
+                    Write-NCMessage "Failed users: $failedDetails" -Level ERROR
+                }
+            }
+            Restore-ProgressAndInfoPreferences
+        }
     }
 }
 

@@ -70,6 +70,7 @@ Describe 'License assignment batching' {
         $global:SeenRequests = [System.Collections.Generic.List[object]]::new()
         $global:UsageLocationForUsers = 'IT'
         $global:PatchFailsFor = ''
+        $global:LicenseChangesFailFor = ''
         $global:UsageLocationOverride = @{}
         $global:AssignedFor = @()
         $global:LicenseAssignmentStatesForUsers = @(@{ skuId = $global:skuId; assignedByGroup = $null; disabledPlans = @('plan-old') })
@@ -102,6 +103,7 @@ Describe 'License assignment batching' {
                         return @{ status = 204 }
                     }
                     if ($request.method -eq 'POST' -and $url -match '^/users/(id\d+)/assignLicense$') {
+                        if ($Matches[1] -eq $global:LicenseChangesFailFor) { return @{ status = 400; body = @{ error = @{ code = 'LicenseConflict'; message = 'license conflict' } } } }
                         return @{ status = 200; body = @{ id = $Matches[1] } }
                     }
                     @{ status = 500 }
@@ -423,6 +425,9 @@ Describe 'License assignment batching' {
         It 'previews the combined operation without writing' {
             Set-UserMsolAccountSku user1@contoso.com -AddLicense NEWPACK -RemoveLicense ENTERPRISEPACK -WhatIf
             @($global:SeenRequests | Where-Object method -eq POST).Count | Should -Be 0
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+                $Level -eq 'INFO' -and $Message -like '*changed successfully: 0; failed: 0; unchanged: 0; skipped/not executed: 1*'
+            }
         }
 
         It 'supplies an empty opposite array for <Operation> only' -ForEach @(
@@ -567,6 +572,26 @@ Describe 'License assignment batching' {
             $writes.Count | Should -Be 1
             $writes[0].url | Should -Be '/users/id1/assignLicense'
             Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*ghost@contoso.com*' }
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+                $Level -eq 'INFO' -and $Message -like '*changed successfully: 1; failed: 1; unchanged: 0; skipped/not executed: 0*'
+            }
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+                $Level -eq 'ERROR' -and $Message -like '*Failed users:*ghost@contoso.com*'
+            }
+        }
+
+        It 'counts and identifies users rejected by the license assignment request' {
+            $global:LicenseChangesFailFor = 'id1'
+            Set-LicenseGraphMock
+
+            Set-UserMsolAccountSku user1@contoso.com -AddLicense NEWPACK -RemoveLicense ENTERPRISEPACK -Confirm:$false
+
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+                $Level -eq 'INFO' -and $Message -like '*changed successfully: 0; failed: 1; unchanged: 0; skipped/not executed: 0*'
+            }
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+                $Level -eq 'ERROR' -and $Message -like '*Failed users: user1@contoso.com (license conflict)*'
+            }
         }
     }
 
