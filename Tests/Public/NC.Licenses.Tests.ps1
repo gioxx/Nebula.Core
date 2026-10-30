@@ -501,6 +501,20 @@ Describe 'License assignment batching' {
             Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter { $Level -eq 'ERROR' }
         }
 
+        It 'suppresses per-user no-change messages when QuietNoChanges is set' {
+            $global:LicenseAssignmentStatesForUsers = @(@{ skuId = $global:newSkuId; assignedByGroup = $null; disabledPlans = @() })
+            $global:LicenseDetailsForUsers = @(@{ skuId = $global:newSkuId; skuPartNumber = 'NEWPACK' })
+
+            Set-UserMsolAccountSku user1@contoso.com -AddLicense NEWPACK -RemoveLicense ENTERPRISEPACK -QuietNoChanges -Confirm:$false
+
+            Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter {
+                $Message -like 'No license changes needed for*'
+            }
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+                $Level -eq 'INFO' -and $Message -like '*changed successfully: 0; failed: 0; unchanged: 1; skipped/not executed: 0*'
+            }
+        }
+
         It 'sets the configured usage location before assigning a new license' {
             $global:UsageLocationForUsers = ''
             Set-UserMsolAccountSku user1@contoso.com -AddLicense NEWPACK -Confirm:$false

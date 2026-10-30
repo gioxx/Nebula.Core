@@ -2397,6 +2397,8 @@ function Set-UserMsolAccountSku {
         Force a refresh of the cached license catalog before resolving friendly names.
     .PARAMETER ShowErrorDetails
         Kept for compatibility. Graph errors always include details.
+    .PARAMETER QuietNoChanges
+        Suppress per-user messages when the requested licenses are already in the desired state.
     .EXAMPLE
         Set-UserMsolAccountSku user@contoso.com -AddLicense 'NEWPACK' -RemoveLicense 'ENTERPRISEPACK' -WhatIf
     #>
@@ -2410,7 +2412,8 @@ function Set-UserMsolAccountSku {
         [Parameter(ValueFromPipelineByPropertyName = $true)]
         [string[]]$RemoveLicense,
         [switch]$ForceLicenseCatalogRefresh,
-        [switch]$ShowErrorDetails
+        [switch]$ShowErrorDetails,
+        [switch]$QuietNoChanges
     )
 
     begin {
@@ -2647,7 +2650,9 @@ function Set-UserMsolAccountSku {
                     $stateSummary = @()
                     if ($target.AlreadyAssignedAdds.Count -gt 0) { $stateSummary += "already assigned: $($target.AlreadyAssignedAdds -join ', ')" }
                     if ($target.AlreadyAbsentRemovals.Count -gt 0) { $stateSummary += "already absent: $($target.AlreadyAbsentRemovals -join ', ')" }
-                    Write-NCMessage ("No license changes needed for {0}; {1}." -f $target.UserPrincipalName, ($stateSummary -join '; ')) -Level SUCCESS
+                    if (-not $QuietNoChanges) {
+                        Write-NCMessage ("No license changes needed for {0}; {1}." -f $target.UserPrincipalName, ($stateSummary -join '; ')) -Level SUCCESS
+                    }
                     & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Unchanged' ($stateSummary -join '; ')
                     continue
                 }
