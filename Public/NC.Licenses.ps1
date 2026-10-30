@@ -2415,7 +2415,7 @@ function Set-UserMsolAccountSku {
 
     begin {
         Set-ProgressAndInfoPreferences
-        $graphConnected = Test-MgGraphConnection
+        $graphConnected = Test-MgGraphConnection -Scopes @('User.Read.All', 'User.ReadWrite.All', 'LicenseAssignment.Read.All', 'LicenseAssignment.ReadWrite.All')
         if (-not $graphConnected) {
             Add-EmptyLine
             Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
@@ -2461,7 +2461,7 @@ function Set-UserMsolAccountSku {
             }
 
             $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            $resolvedUsers = Resolve-NCGraphUserBatch -Identifier @($queue.Identifier) -Property @('id', 'userPrincipalName', 'displayName', 'licenseAssignmentStates') -FailedIdentifier $failedUsers
+            $resolvedUsers = Resolve-NCGraphUserBatch -Identifier @($queue.Identifier) -Property @('id', 'userPrincipalName', 'displayName', 'usageLocation', 'licenseAssignmentStates') -FailedIdentifier $failedUsers
             $byId = @{}
             $targets = [System.Collections.Generic.List[object]]::new()
             foreach ($row in $queue) {
@@ -2476,6 +2476,7 @@ function Set-UserMsolAccountSku {
                     $target = [pscustomobject]@{
                         Id = $id; UserPrincipalName = [string]$user.userPrincipalName
                         AssignmentStates = $user.licenseAssignmentStates
+                        UsageLocation = [string]$user.usageLocation
                         Add = [System.Collections.Generic.List[string]]::new()
                         Remove = [System.Collections.Generic.List[string]]::new()
                         Invalid = $false
@@ -2569,11 +2570,30 @@ function Set-UserMsolAccountSku {
                 # A group-inherited SKU still needs the direct addition the caller requested.
                 $addIds = @($resolved.Add.Keys | Where-Object { -not $directSkuIds.Contains($_) })
                 $removeIds = @($resolved.Remove.Keys)
+                $inheritedRemovals = @($removeIds | Where-Object { -not $directSkuIds.Contains($_) })
+                if ($inheritedRemovals.Count -gt 0) {
+                    $inheritedNames = @($inheritedRemovals | ForEach-Object { $resolved.Remove[$_] })
+                    Write-NCMessage ("Cannot remove inherited-only license(s) for {0}: {1}. Remove the license assignment from its group." -f $target.UserPrincipalName, ($inheritedNames -join ', ')) -Level ERROR
+                    continue
+                }
+                $targetUsage = $null
+                if ($addIds.Count -gt 0 -and [string]::IsNullOrWhiteSpace($target.UsageLocation)) {
+                    $targetUsage = if (($NCVars -is [System.Collections.IDictionary]) -and $NCVars.Contains('UsageLocation') -and $NCVars.UsageLocation) { [string]$NCVars.UsageLocation } else { 'US' }
+                }
                 if ($addIds.Count + $removeIds.Count -eq 0) { continue }
                 $summary = "Add license(s): {0}; remove license(s): {1}" -f ($resolved.Add.Values -join ', '), ($resolved.Remove.Values -join ', ')
+                if ($targetUsage) { $summary = "Set usage location to {0}; {1}" -f $targetUsage, $summary }
                 if (-not $PSCmdlet.ShouldProcess($target.UserPrincipalName, $summary)) { continue }
                 $requestId = "m$i"
                 $approved[$requestId] = $target
+                if ($targetUsage) {
+                    $patchId = "u$i"
+                    $approved[$patchId] = $target
+                    $requests.Add(@{
+                            Id = $patchId; Method = 'PATCH'; Url = "/users/$([uri]::EscapeDataString($target.Id))"
+                            Body = @{ usageLocation = $targetUsage }
+                        })
+                }
                 $requests.Add(@{
                         Id = $requestId; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString($target.Id))/assignLicense"
                         Body = @{
@@ -2583,7 +2603,23 @@ function Set-UserMsolAccountSku {
                     })
             }
             if ($requests.Count -eq 0) { return }
-            foreach ($response in @(Invoke-NCGraphBatch -Requests @($requests) -Activity 'Changing user licenses')) {
+            $patches = @($requests | Where-Object { $_.Method -eq 'PATCH' })
+            $readyUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($licenseRequest in @($requests | Where-Object { $_.Method -eq 'POST' })) {
+                $null = $readyUsers.Add([string]$licenseRequest.Id.Substring(1))
+            }
+            if ($patches.Count -gt 0) {
+                foreach ($response in @(Invoke-NCGraphBatch -Requests $patches -Activity 'Setting usage location')) {
+                    $target = $approved[$response.Id]
+                    $key = [string]$response.Id.Substring(1)
+                    if (-not $response.Success) {
+                        $null = $readyUsers.Remove($key)
+                        Write-NCMessage "Unable to set usage location for $($target.UserPrincipalName): $($response.ErrorMessage)" -Level ERROR
+                    }
+                }
+            }
+            $licenseRequests = @($requests | Where-Object { $_.Method -eq 'POST' -and $readyUsers.Contains($_.Id.Substring(1)) })
+            foreach ($response in @(Invoke-NCGraphBatch -Requests $licenseRequests -Activity 'Changing user licenses')) {
                 $target = $approved[$response.Id]
                 if ($response.Success) { Write-NCMessage "Changed licenses for $($target.UserPrincipalName)." -Level SUCCESS }
                 else { Write-NCMessage "License change failed for $($target.UserPrincipalName): $($response.ErrorMessage)" -Level ERROR }

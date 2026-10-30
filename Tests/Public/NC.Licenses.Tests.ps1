@@ -369,6 +369,15 @@ Describe 'License assignment batching' {
             $writes[0].body.removeLicenses | Should -Be @($global:skuId)
         }
 
+        It 'requests Graph scopes for license reads and writes and user updates' {
+            Set-UserMsolAccountSku user1@contoso.com -RemoveLicense ENTERPRISEPACK -Confirm:$false
+            Should -Invoke Test-MgGraphConnection -Times 1 -Exactly -Scope It -ParameterFilter {
+                $Scopes -contains 'LicenseAssignment.Read.All' -and
+                $Scopes -contains 'LicenseAssignment.ReadWrite.All' -and
+                $Scopes -contains 'User.ReadWrite.All'
+            }
+        }
+
         It 'merges repeated users across more than twenty pipeline rows' {
             $rows = @(1..21 | ForEach-Object { [pscustomobject]@{ UserPrincipalName = 'user1@contoso.com'; AddLicense = 'NEWPACK' } })
             $rows += [pscustomobject]@{ UserPrincipalName = 'user1@contoso.com'; RemoveLicense = 'ENTERPRISEPACK' }
@@ -461,6 +470,32 @@ Describe 'License assignment batching' {
             $writes.Count | Should -Be 1
             $writes[0].body.addLicenses.skuId | Should -Be $global:newSkuId
             $writes[0].body.removeLicenses | Should -Be @($global:skuId)
+        }
+
+        It 'rejects a removal when the SKU is inherited only from a group' {
+            $global:LicenseAssignmentStatesForUsers = @(@{ skuId = $global:skuId; assignedByGroup = 'group1'; disabledPlans = @() })
+            Set-UserMsolAccountSku user1@contoso.com -AddLicense NEWPACK -RemoveLicense ENTERPRISEPACK -Confirm:$false
+            @($global:SeenRequests | Where-Object method -eq POST).Count | Should -Be 0
+            Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*inherited-only*' }
+        }
+
+        It 'sets the configured usage location before assigning a new license' {
+            $global:UsageLocationForUsers = ''
+            Set-UserMsolAccountSku user1@contoso.com -AddLicense NEWPACK -Confirm:$false
+            $writes = @($global:SeenRequests | Where-Object { $_.method -in @('PATCH', 'POST') })
+            $writes.Count | Should -Be 2
+            $writes[0].method | Should -Be 'PATCH'
+            $writes[0].body.usageLocation | Should -Be 'IT'
+            $writes[1].method | Should -Be 'POST'
+            $writes[1].body.addLicenses.skuId | Should -Be $global:newSkuId
+        }
+
+        It 'does not assign a license if setting usage location fails' {
+            $global:UsageLocationForUsers = ''
+            $global:PatchFailsFor = 'id1'
+            Set-UserMsolAccountSku user1@contoso.com -AddLicense NEWPACK -Confirm:$false
+            @($global:SeenRequests | Where-Object method -eq POST).Count | Should -Be 0
+            Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*usage location*' }
         }
 
         It 'skips writes if direct assignment state is <Case>' -ForEach @(
