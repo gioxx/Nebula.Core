@@ -2479,6 +2479,10 @@ function Set-UserMsolAccountSku {
                         UsageLocation = [string]$user.usageLocation
                         Add = [System.Collections.Generic.List[string]]::new()
                         Remove = [System.Collections.Generic.List[string]]::new()
+                        EffectiveAdds = @()
+                        EffectiveRemoves = @()
+                        AlreadyAssignedAdds = @()
+                        AlreadyAbsentRemovals = @()
                         Invalid = $false
                     }
                     $byId[$id] = $target
@@ -2504,6 +2508,7 @@ function Set-UserMsolAccountSku {
 
             $requests = [System.Collections.Generic.List[object]]::new()
             $approved = @{}
+            $tenantSkuLookupAttempted = $tenantSkus.Count -gt 0
             for ($i = 0; $i -lt $targets.Count; $i++) {
                 $target = $targets[$i]
                 $detail = $details["l$i"]
@@ -2536,7 +2541,9 @@ function Set-UserMsolAccountSku {
                     Write-NCMessage "Unable to read complete license assignment state for $($target.UserPrincipalName)." -Level ERROR
                     continue
                 }
-                $resolved = @{ Add = @{}; Remove = @{} }
+                $resolved = @{ Add = @{}; Remove = @{}; AlreadyAbsentRemove = @{} }
+                $presentSkuIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($license in $detail.Items) { $null = $presentSkuIds.Add([string]$license.skuId) }
                 foreach ($operation in @('Add', 'Remove')) {
                     $candidates = if ($operation -eq 'Add') { $tenantSkus } else { @($detail.Items) }
                     foreach ($entry in $target.$operation) {
@@ -2552,9 +2559,35 @@ function Set-UserMsolAccountSku {
                                 break
                             }
                         }
+                        if (-not $match -and $operation -eq 'Remove') {
+                            if (-not $tenantSkuLookupAttempted) {
+                                $tenantSkuLookupAttempted = $true
+                                try {
+                                    $tenantSkus = @(Invoke-NCRetry -Action { Get-MgSubscribedSku -All -ErrorAction Stop } -MaxAttempts 3 -DelaySeconds 5 -OperationDescription 'retrieve tenant licenses' -OnError {
+                                            param($attempt, $max, $err)
+                                            Write-NCMessage "Failed to retrieve tenant licenses, attempt $attempt of $max." -Level ERROR
+                                        })
+                                }
+                                catch { Write-NCMessage 'Unable to retrieve tenant licenses after 3 attempts.' -Level ERROR }
+                            }
+                            foreach ($sku in $tenantSkus) {
+                                $display = $null
+                                $source = $null
+                                if ($licenseLookup) {
+                                    $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $sku.SkuPartNumber -FallbackLookup $customLookup -MatchSource ([ref]$source)
+                                }
+                                if ($entry -ieq [string]$sku.SkuId -or $entry -ieq [string]$sku.SkuPartNumber -or ($display -and $entry -ieq $display)) {
+                                    $match = $sku
+                                    break
+                                }
+                            }
+                        }
                         if (-not $match -or -not $match.SkuId) {
                             Write-NCMessage "Unable to resolve license '$entry' for $operation on $($target.UserPrincipalName)." -Level ERROR
                             $target.Invalid = $true
+                        }
+                        elseif ($operation -eq 'Remove' -and -not $presentSkuIds.Contains([string]$match.SkuId)) {
+                            $resolved.AlreadyAbsentRemove[[string]$match.SkuId] = $entry
                         }
                         else { $resolved[$operation][[string]$match.SkuId] = $entry }
                     }
@@ -2570,6 +2603,10 @@ function Set-UserMsolAccountSku {
                 # A group-inherited SKU still needs the direct addition the caller requested.
                 $addIds = @($resolved.Add.Keys | Where-Object { -not $directSkuIds.Contains($_) })
                 $removeIds = @($resolved.Remove.Keys)
+                $target.EffectiveAdds = @($addIds | ForEach-Object { $resolved.Add[$_] })
+                $target.EffectiveRemoves = @($removeIds | ForEach-Object { $resolved.Remove[$_] })
+                $target.AlreadyAssignedAdds = @($resolved.Add.Keys | Where-Object { $directSkuIds.Contains($_) } | ForEach-Object { $resolved.Add[$_] })
+                $target.AlreadyAbsentRemovals = @($resolved.AlreadyAbsentRemove.Values)
                 $inheritedRemovals = @($removeIds | Where-Object { -not $directSkuIds.Contains($_) })
                 if ($inheritedRemovals.Count -gt 0) {
                     $inheritedNames = @($inheritedRemovals | ForEach-Object { $resolved.Remove[$_] })
@@ -2580,8 +2617,16 @@ function Set-UserMsolAccountSku {
                 if ($addIds.Count -gt 0 -and [string]::IsNullOrWhiteSpace($target.UsageLocation)) {
                     $targetUsage = if (($NCVars -is [System.Collections.IDictionary]) -and $NCVars.Contains('UsageLocation') -and $NCVars.UsageLocation) { [string]$NCVars.UsageLocation } else { 'US' }
                 }
-                if ($addIds.Count + $removeIds.Count -eq 0) { continue }
-                $summary = "Add license(s): {0}; remove license(s): {1}" -f ($resolved.Add.Values -join ', '), ($resolved.Remove.Values -join ', ')
+                if ($addIds.Count + $removeIds.Count -eq 0) {
+                    $stateSummary = @()
+                    if ($target.AlreadyAssignedAdds.Count -gt 0) { $stateSummary += "already assigned: $($target.AlreadyAssignedAdds -join ', ')" }
+                    if ($target.AlreadyAbsentRemovals.Count -gt 0) { $stateSummary += "already absent: $($target.AlreadyAbsentRemovals -join ', ')" }
+                    Write-NCMessage ("No license changes needed for {0}; {1}." -f $target.UserPrincipalName, ($stateSummary -join '; ')) -Level SUCCESS
+                    continue
+                }
+                $summary = "Add license(s): {0}; remove license(s): {1}" -f ($target.EffectiveAdds -join ', '), ($target.EffectiveRemoves -join ', ')
+                if ($target.AlreadyAssignedAdds.Count -gt 0) { $summary += "; already assigned: $($target.AlreadyAssignedAdds -join ', ')" }
+                if ($target.AlreadyAbsentRemovals.Count -gt 0) { $summary += "; already absent: $($target.AlreadyAbsentRemovals -join ', ')" }
                 if ($targetUsage) { $summary = "Set usage location to {0}; {1}" -f $targetUsage, $summary }
                 if (-not $PSCmdlet.ShouldProcess($target.UserPrincipalName, $summary)) { continue }
                 $requestId = "m$i"
@@ -2621,7 +2666,14 @@ function Set-UserMsolAccountSku {
             $licenseRequests = @($requests | Where-Object { $_.Method -eq 'POST' -and $readyUsers.Contains($_.Id.Substring(1)) })
             foreach ($response in @(Invoke-NCGraphBatch -Requests $licenseRequests -Activity 'Changing user licenses')) {
                 $target = $approved[$response.Id]
-                if ($response.Success) { Write-NCMessage "Changed licenses for $($target.UserPrincipalName)." -Level SUCCESS }
+                if ($response.Success) {
+                    $changeSummary = @()
+                    if ($target.EffectiveAdds.Count -gt 0) { $changeSummary += "added: $($target.EffectiveAdds -join ', ')" }
+                    if ($target.EffectiveRemoves.Count -gt 0) { $changeSummary += "removed: $($target.EffectiveRemoves -join ', ')" }
+                    if ($target.AlreadyAssignedAdds.Count -gt 0) { $changeSummary += "already assigned: $($target.AlreadyAssignedAdds -join ', ')" }
+                    if ($target.AlreadyAbsentRemovals.Count -gt 0) { $changeSummary += "already absent: $($target.AlreadyAbsentRemovals -join ', ')" }
+                    Write-NCMessage ("Changed licenses for {0} ({1})." -f $target.UserPrincipalName, ($changeSummary -join '; ')) -Level SUCCESS
+                }
                 else { Write-NCMessage "License change failed for $($target.UserPrincipalName): $($response.ErrorMessage)" -Level ERROR }
             }
         }

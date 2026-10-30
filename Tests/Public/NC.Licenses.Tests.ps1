@@ -367,6 +367,9 @@ Describe 'License assignment batching' {
             $writes[0].url | Should -Be '/users/id1/assignLicense'
             $writes[0].body.addLicenses.skuId | Should -Be $global:newSkuId
             $writes[0].body.removeLicenses | Should -Be @($global:skuId)
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+                $Level -eq 'SUCCESS' -and $Message -like '*added: NEWPACK*' -and $Message -like '*removed: ENTERPRISEPACK*'
+            }
         }
 
         It 'requests Graph scopes for license reads and writes and user updates' {
@@ -477,6 +480,20 @@ Describe 'License assignment batching' {
             Set-UserMsolAccountSku user1@contoso.com -AddLicense NEWPACK -RemoveLicense ENTERPRISEPACK -Confirm:$false
             @($global:SeenRequests | Where-Object method -eq POST).Count | Should -Be 0
             Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*inherited-only*' }
+        }
+
+        It 'treats an already removed tenant SKU as a no-op on a repeated replacement' {
+            $global:LicenseAssignmentStatesForUsers = @(@{ skuId = $global:newSkuId; assignedByGroup = $null; disabledPlans = @() })
+            $global:LicenseDetailsForUsers = @(@{ skuId = $global:newSkuId; skuPartNumber = 'NEWPACK' })
+
+            Set-UserMsolAccountSku user1@contoso.com -AddLicense NEWPACK -RemoveLicense ENTERPRISEPACK -Confirm:$false
+
+            @($global:SeenRequests | Where-Object method -eq POST).Count | Should -Be 0
+            Should -Invoke Write-NCMessage -Times 1 -Exactly -Scope It -ParameterFilter {
+                $Level -eq 'SUCCESS' -and $Message -like '*No license changes needed*' -and
+                $Message -like '*already assigned: NEWPACK*' -and $Message -like '*already absent: ENTERPRISEPACK*'
+            }
+            Should -Invoke Write-NCMessage -Times 0 -Exactly -Scope It -ParameterFilter { $Level -eq 'ERROR' }
         }
 
         It 'sets the configured usage location before assigning a new license' {
