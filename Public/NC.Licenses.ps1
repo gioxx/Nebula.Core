@@ -3036,7 +3036,8 @@ function Switch-UserMsolAccountSku {
         foreach ($result in $addResults) { $addById[$result.Id] = $result }
         $addFailed = @($addRequests | Where-Object { -not $addById[$_.Id].Success })
         if ($addFailed.Count -eq 0) {
-            Write-NCMessage ("License swap completed: {0} received {1}; {2} received {3}." -f $firstUser.userPrincipalName, ($secondLicenses.Name -join ', '), $secondUser.userPrincipalName, ($firstLicenses.Name -join ', ')) -Level SUCCESS
+            Write-NCMessage ("{0} received {1}." -f $firstUser.userPrincipalName, ($secondLicenses.Name -join ', ')) -Level SUCCESS
+            Write-NCMessage ("{0} received {1}." -f $secondUser.userPrincipalName, ($firstLicenses.Name -join ', ')) -Level SUCCESS
             return
         }
 
