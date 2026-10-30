@@ -72,6 +72,9 @@ Describe 'License assignment batching' {
         $global:PatchFailsFor = ''
         $global:UsageLocationOverride = @{}
         $global:AssignedFor = @()
+        $global:LicenseAssignmentStatesForUsers = @(@{ skuId = $global:skuId; assignedByGroup = $null; disabledPlans = @('plan-old') })
+        $global:LicenseDetailsForUsers = @(@{ skuId = $global:skuId; skuPartNumber = 'ENTERPRISEPACK' })
+        $global:OmitAssignmentStates = $false
     }
 
     BeforeAll {
@@ -87,10 +90,12 @@ Describe 'License assignment batching' {
                         $n = $Matches[1]
                         $loc = if ($global:UsageLocationOverride.ContainsKey($n)) { $global:UsageLocationOverride[$n] } elseif ($global:UsageLocationForUsers) { $global:UsageLocationForUsers } else { $null }
                         $owned = if ($global:AssignedFor -contains $n) { @(@{ skuId = $global:skuId; disabledPlans = @() }) } else { @() }
-                        return @{ status = 200; body = @{ id = "id$n"; userPrincipalName = "user$n@contoso.com"; displayName = "User $n"; usageLocation = $loc; assignedLicenses = $owned } }
+                        $userBody = @{ id = "id$n"; userPrincipalName = "user$n@contoso.com"; displayName = "User $n"; usageLocation = $loc; assignedLicenses = $owned }
+                        if (-not $global:OmitAssignmentStates) { $userBody.licenseAssignmentStates = $global:LicenseAssignmentStatesForUsers }
+                        return @{ status = 200; body = $userBody }
                     }
                     if ($request.method -eq 'GET' -and $url -match '^/users/(id\d+)/licenseDetails') {
-                        return @{ status = 200; body = @{ value = @(@{ skuId = $global:skuId; skuPartNumber = 'ENTERPRISEPACK' }) } }
+                        return @{ status = 200; body = @{ value = $global:LicenseDetailsForUsers } }
                     }
                     if ($request.method -eq 'PATCH' -and $url -match '^/users/(id\d+)$') {
                         if ($Matches[1] -eq $global:PatchFailsFor) { return @{ status = 403; body = @{ error = @{ code = 'Forbidden'; message = 'denied' } } } }
@@ -426,7 +431,7 @@ Describe 'License assignment batching' {
             Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' }
         }
 
-        It 'preserves service plans by omitting additions already present in license details' {
+        It 'preserves service plans by omitting licenses already assigned directly' {
             Set-UserMsolAccountSku user1@contoso.com -AddLicense ENTERPRISEPACK,NEWPACK -Confirm:$false
             $writes = @($global:SeenRequests | Where-Object method -eq POST)
             $writes.Count | Should -Be 1
@@ -434,6 +439,31 @@ Describe 'License assignment batching' {
             $writes[0].body.addLicenses.skuId | Should -Be $global:newSkuId
             ($writes[0].body.addLicenses[0].disabledPlans -is [array]) | Should -BeTrue
             @($writes[0].body.addLicenses[0].disabledPlans).Count | Should -Be 0
+        }
+
+        It 'adds a direct target assignment even when that SKU is already inherited from a group' {
+            $global:LicenseAssignmentStatesForUsers += @{ skuId = $global:newSkuId; assignedByGroup = 'group1'; disabledPlans = @('plan-group') }
+            $global:LicenseDetailsForUsers += @{ skuId = $global:newSkuId; skuPartNumber = 'NEWPACK' }
+            Set-UserMsolAccountSku user1@contoso.com -AddLicense NEWPACK -RemoveLicense ENTERPRISEPACK -Confirm:$false
+            $writes = @($global:SeenRequests | Where-Object method -eq POST)
+            $writes.Count | Should -Be 1
+            $writes[0].body.addLicenses.skuId | Should -Be $global:newSkuId
+            $writes[0].body.removeLicenses | Should -Be @($global:skuId)
+        }
+
+        It 'skips writes if direct assignment state is <Case>' -ForEach @(
+            @{ Case = 'omitted'; Omit = $true; States = @() }
+            @{ Case = 'null'; Omit = $false; States = $null }
+            @{ Case = 'missing an assigned SKU'; Omit = $false; States = @() }
+            @{ Case = 'missing assignment source'; Omit = $false; States = @(@{ skuId = '6fd2c87f-b296-42f0-b197-1e91e994b900'; disabledPlans = @() }) }
+            @{ Case = 'missing SKU ID'; Omit = $false; States = @(@{ assignedByGroup = $null; disabledPlans = @() }) }
+            @{ Case = 'missing disabled plans'; Omit = $false; States = @(@{ skuId = '6fd2c87f-b296-42f0-b197-1e91e994b900'; assignedByGroup = $null }) }
+        ) {
+            $global:OmitAssignmentStates = $Omit
+            $global:LicenseAssignmentStatesForUsers = $States
+            Set-UserMsolAccountSku user1@contoso.com -AddLicense NEWPACK -RemoveLicense ENTERPRISEPACK -Confirm:$false
+            @($global:SeenRequests | Where-Object method -eq POST).Count | Should -Be 0
+            Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*assignment state*' }
         }
 
         It 'resolves friendly names through the catalog' {
@@ -452,7 +482,7 @@ Describe 'License assignment batching' {
                     param($request)
                     $global:SeenRequests.Add($request)
                     if ($request.url -like '*/licenseDetails*') { return @{ status = 200; body = @{ value = @(@{ skuId = $global:skuId; skuPartNumber = 'ENTERPRISEPACK' }) } } }
-                    @{ status = 200; body = @{ id = 'id1'; userPrincipalName = 'user1@contoso.com' } }
+                    @{ status = 200; body = @{ id = 'id1'; userPrincipalName = 'user1@contoso.com'; licenseAssignmentStates = $global:LicenseAssignmentStatesForUsers } }
                 }
             }
             @(

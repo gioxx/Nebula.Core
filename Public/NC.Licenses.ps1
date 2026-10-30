@@ -2457,7 +2457,7 @@ function Set-UserMsolAccountSku {
             }
 
             $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            $resolvedUsers = Resolve-NCGraphUserBatch -Identifier @($queue.Identifier) -Property @('id', 'userPrincipalName', 'displayName') -FailedIdentifier $failedUsers
+            $resolvedUsers = Resolve-NCGraphUserBatch -Identifier @($queue.Identifier) -Property @('id', 'userPrincipalName', 'displayName', 'licenseAssignmentStates') -FailedIdentifier $failedUsers
             $byId = @{}
             $targets = [System.Collections.Generic.List[object]]::new()
             foreach ($row in $queue) {
@@ -2471,6 +2471,7 @@ function Set-UserMsolAccountSku {
                 if (-not $byId.ContainsKey($id)) {
                     $target = [pscustomobject]@{
                         Id = $id; UserPrincipalName = [string]$user.userPrincipalName
+                        AssignmentStates = $user.licenseAssignmentStates
                         Add = [System.Collections.Generic.List[string]]::new()
                         Remove = [System.Collections.Generic.List[string]]::new()
                         Invalid = $false
@@ -2506,6 +2507,30 @@ function Set-UserMsolAccountSku {
                     continue
                 }
                 if ($target.Invalid) { continue }
+                # licenseDetails includes group-inherited licenses as well as direct assignments.
+                # Require the explicit assignment source before deciding whether an addition is redundant.
+                $assignmentStateComplete = $target.AssignmentStates -is [array]
+                $assignedSkuIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                $directSkuIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($state in $target.AssignmentStates) {
+                    $assignment = [pscustomobject]$state
+                    if (-not $assignment -or [string]::IsNullOrWhiteSpace([string]$assignment.skuId) -or
+                        -not $assignment.PSObject.Properties['assignedByGroup'] -or
+                        -not $assignment.PSObject.Properties['disabledPlans'] -or
+                        $assignment.disabledPlans -isnot [array]) {
+                        $assignmentStateComplete = $false
+                        continue
+                    }
+                    $null = $assignedSkuIds.Add([string]$assignment.skuId)
+                    if ($null -eq $assignment.assignedByGroup) { $null = $directSkuIds.Add([string]$assignment.skuId) }
+                }
+                foreach ($license in $detail.Items) {
+                    if (-not $assignedSkuIds.Contains([string]$license.skuId)) { $assignmentStateComplete = $false }
+                }
+                if (-not $assignmentStateComplete) {
+                    Write-NCMessage "Unable to read complete license assignment state for $($target.UserPrincipalName)." -Level ERROR
+                    continue
+                }
                 $resolved = @{ Add = @{}; Remove = @{} }
                 foreach ($operation in @('Add', 'Remove')) {
                     $candidates = if ($operation -eq 'Add') { $tenantSkus } else { @($detail.Items) }
@@ -2536,9 +2561,9 @@ function Set-UserMsolAccountSku {
                 }
                 if ($target.Invalid) { continue }
 
-                # Reassigning an owned SKU with empty disabledPlans would reset its existing selections.
-                $ownedIds = @($detail.Items | ForEach-Object { [string]$_.skuId })
-                $addIds = @($resolved.Add.Keys | Where-Object { $ownedIds -notcontains $_ })
+                # Omit only existing direct assignments to preserve their disabled service plans.
+                # A group-inherited SKU still needs the direct addition the caller requested.
+                $addIds = @($resolved.Add.Keys | Where-Object { -not $directSkuIds.Contains($_) })
                 $removeIds = @($resolved.Remove.Keys)
                 if ($addIds.Count + $removeIds.Count -eq 0) { continue }
                 $summary = "Add license(s): {0}; remove license(s): {1}" -f ($resolved.Add.Values -join ', '), ($resolved.Remove.Values -join ', ')
