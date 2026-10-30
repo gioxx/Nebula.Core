@@ -2378,6 +2378,693 @@ function Remove-UserMsolAccountSku {
     }
 }
 
+function Set-UserMsolAccountSku {
+    <#
+    .SYNOPSIS
+        Adds and removes user licenses together in one Microsoft Graph request.
+    .DESCRIPTION
+        Accepts friendly product names, SKU part numbers, or SKU IDs. Collects pipeline records,
+        merges them by resolved user ID, and validates the complete change before writing.
+        Each user is updated independently; changes across users are not transactional.
+        Existing service-plan selections on retained licenses are preserved.
+    .PARAMETER UserPrincipalName
+        Target user UPN or object ID. Accepts pipeline values and properties.
+    .PARAMETER AddLicense
+        Licenses to add. Accepts pipeline properties.
+    .PARAMETER RemoveLicense
+        Licenses to remove. Accepts pipeline properties. At least one operation is required.
+    .PARAMETER ForceLicenseCatalogRefresh
+        Force a refresh of the cached license catalog before resolving friendly names.
+    .PARAMETER ShowErrorDetails
+        Kept for compatibility. Graph errors always include details.
+    .PARAMETER QuietNoChanges
+        Suppress per-user messages when the requested licenses are already in the desired state.
+    .EXAMPLE
+        Set-UserMsolAccountSku user@contoso.com -AddLicense 'NEWPACK' -RemoveLicense 'ENTERPRISEPACK' -WhatIf
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('User', 'UPN')]
+        [string]$UserPrincipalName,
+        [Parameter(ValueFromPipelineByPropertyName = $true)]
+        [string[]]$AddLicense,
+        [Parameter(ValueFromPipelineByPropertyName = $true)]
+        [string[]]$RemoveLicense,
+        [switch]$ForceLicenseCatalogRefresh,
+        [switch]$ShowErrorDetails,
+        [switch]$QuietNoChanges
+    )
+
+    begin {
+        Set-ProgressAndInfoPreferences
+        $graphConnected = Test-MgGraphConnection -Scopes @('User.Read.All', 'User.ReadWrite.All', 'LicenseAssignment.Read.All', 'LicenseAssignment.ReadWrite.All')
+        if (-not $graphConnected) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+        }
+        $queue = [System.Collections.Generic.List[object]]::new()
+    }
+
+    process {
+        if ($graphConnected) {
+            # Snapshot the per-record arrays; do not write until all aliases and rows have been merged.
+            $queue.Add([pscustomobject]@{
+                    Identifier = $UserPrincipalName
+                    Add = @($AddLicense | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                    Remove = @($RemoveLicense)
+                })
+        }
+    }
+
+    end {
+        $batchResults = @{}
+        $shouldSummarize = $false
+        $recordResult = {
+            param([string]$Key, [string]$UserPrincipalName, [string]$Status, [string]$Reason)
+            $batchResults[$Key] = [pscustomobject]@{
+                UserPrincipalName = $UserPrincipalName
+                Status = $Status
+                Reason = $Reason
+            }
+        }
+        try {
+            if (-not $graphConnected -or $queue.Count -eq 0) { return }
+            $shouldSummarize = $true
+            Write-NCGraphBatchNotice -Count $queue.Count -Noun 'users'
+            $licenseLookup = $null
+            $customLookup = $null
+            try {
+                $catalog = Get-LicenseCatalog -IncludeMetadata -ForceRefresh:$ForceLicenseCatalogRefresh.IsPresent
+                if ($catalog) {
+                    $licenseLookup = $catalog.Lookup
+                    $customLookup = $catalog.CustomLookup
+                }
+            }
+            catch { Write-NCMessage $_ -Level WARNING }
+
+            $tenantSkus = @()
+            if (@($queue | Where-Object { $_.Add.Count -gt 0 }).Count -gt 0) {
+                try {
+                    $tenantSkus = @(Invoke-NCRetry -Action { Get-MgSubscribedSku -All -ErrorAction Stop } -MaxAttempts 3 -DelaySeconds 5 -OperationDescription 'retrieve tenant licenses' -OnError {
+                            param($attempt, $max, $err)
+                            Write-NCMessage "Failed to retrieve tenant licenses, attempt $attempt of $max." -Level ERROR
+                        })
+                }
+                catch { Write-NCMessage 'Unable to retrieve tenant licenses after 3 attempts.' -Level ERROR }
+            }
+
+            $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $resolvedUsers = Resolve-NCGraphUserBatch -Identifier @($queue.Identifier) -Property @('id', 'userPrincipalName', 'displayName', 'usageLocation', 'licenseAssignmentStates') -FailedIdentifier $failedUsers
+            $byId = @{}
+            $targets = [System.Collections.Generic.List[object]]::new()
+            foreach ($row in $queue) {
+                $identifier = $row.Identifier.Trim()
+                $user = $resolvedUsers[$identifier]
+                if (-not $user -or -not $user.id) {
+                    if (-not $failedUsers.Contains($identifier)) { Write-NCMessage "Unable to resolve user recipient for $identifier" -Level ERROR }
+                    & $recordResult "unresolved:$identifier" $identifier 'Failed' 'Unable to resolve user.'
+                    continue
+                }
+                $id = [string]$user.id
+                if (-not $byId.ContainsKey($id)) {
+                    $target = [pscustomobject]@{
+                        Id = $id; UserPrincipalName = [string]$user.userPrincipalName
+                        AssignmentStates = $user.licenseAssignmentStates
+                        UsageLocation = [string]$user.usageLocation
+                        Add = [System.Collections.Generic.List[string]]::new()
+                        Remove = [System.Collections.Generic.List[string]]::new()
+                        EffectiveAdds = @()
+                        EffectiveRemoves = @()
+                        AlreadyAssignedAdds = @()
+                        AlreadyAbsentRemovals = @()
+                        FailureReasons = [System.Collections.Generic.List[string]]::new()
+                        Invalid = $false
+                    }
+                    $byId[$id] = $target
+                    $targets.Add($target)
+                    & $recordResult "user:$id" $target.UserPrincipalName 'Pending' ''
+                }
+                $target = $byId[$id]
+                $adds = @($row.Add | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                $removes = @($row.Remove | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                if ($adds.Count + $removes.Count -eq 0) {
+                    Write-NCMessage "No license changes requested for $identifier." -Level ERROR
+                    $target.Invalid = $true
+                    $target.FailureReasons.Add('No license changes were specified.')
+                }
+                foreach ($entry in $adds) { $target.Add.Add($entry.Trim()) }
+                foreach ($entry in $removes) { $target.Remove.Add($entry.Trim()) }
+            }
+            if ($targets.Count -eq 0) { return }
+
+            $detailRequests = @(for ($i = 0; $i -lt $targets.Count; $i++) {
+                    @{ Id = "l$i"; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString($targets[$i].Id))/licenseDetails" }
+                })
+            $details = @{}
+            foreach ($result in @(Invoke-NCGraphBatchCollection -Requests $detailRequests -Activity 'Reading user licenses')) { $details[$result.Id] = $result }
+
+            $requests = [System.Collections.Generic.List[object]]::new()
+            $approved = @{}
+            $tenantSkuLookupAttempted = $tenantSkus.Count -gt 0
+            for ($i = 0; $i -lt $targets.Count; $i++) {
+                $target = $targets[$i]
+                $detail = $details["l$i"]
+                if (-not $detail.Success) {
+                    Write-NCMessage "Unable to retrieve licenses for $($target.UserPrincipalName): $($detail.ErrorMessage)" -Level ERROR
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Failed' ([string]$detail.ErrorMessage)
+                    continue
+                }
+                if ($target.Invalid) {
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Failed' ($target.FailureReasons -join '; ')
+                    continue
+                }
+                # licenseDetails includes group-inherited licenses as well as direct assignments.
+                # Require the explicit assignment source before deciding whether an addition is redundant.
+                $assignmentStateComplete = $target.AssignmentStates -is [array]
+                $assignedSkuIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                $directSkuIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($state in $target.AssignmentStates) {
+                    $assignment = [pscustomobject]$state
+                    if (-not $assignment -or [string]::IsNullOrWhiteSpace([string]$assignment.skuId) -or
+                        -not $assignment.PSObject.Properties['assignedByGroup'] -or
+                        -not $assignment.PSObject.Properties['disabledPlans'] -or
+                        $assignment.disabledPlans -isnot [array]) {
+                        $assignmentStateComplete = $false
+                        continue
+                    }
+                    $null = $assignedSkuIds.Add([string]$assignment.skuId)
+                    if ($null -eq $assignment.assignedByGroup) { $null = $directSkuIds.Add([string]$assignment.skuId) }
+                }
+                foreach ($license in $detail.Items) {
+                    if (-not $assignedSkuIds.Contains([string]$license.skuId)) { $assignmentStateComplete = $false }
+                }
+                if (-not $assignmentStateComplete) {
+                    Write-NCMessage "Unable to read complete license assignment state for $($target.UserPrincipalName)." -Level ERROR
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Failed' 'Unable to read complete license assignment state.'
+                    continue
+                }
+                $resolved = @{ Add = @{}; Remove = @{}; AlreadyAbsentRemove = @{} }
+                $presentSkuIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($license in $detail.Items) { $null = $presentSkuIds.Add([string]$license.skuId) }
+                foreach ($operation in @('Add', 'Remove')) {
+                    $candidates = if ($operation -eq 'Add') { $tenantSkus } else { @($detail.Items) }
+                    foreach ($entry in $target.$operation) {
+                        $match = $null
+                        foreach ($sku in $candidates) {
+                            $display = $null
+                            $source = $null
+                            if ($licenseLookup) {
+                                $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $sku.SkuPartNumber -FallbackLookup $customLookup -MatchSource ([ref]$source)
+                            }
+                            if ($entry -ieq [string]$sku.SkuId -or $entry -ieq [string]$sku.SkuPartNumber -or ($display -and $entry -ieq $display)) {
+                                $match = $sku
+                                break
+                            }
+                        }
+                        if (-not $match -and $operation -eq 'Remove') {
+                            if (-not $tenantSkuLookupAttempted) {
+                                $tenantSkuLookupAttempted = $true
+                                try {
+                                    $tenantSkus = @(Invoke-NCRetry -Action { Get-MgSubscribedSku -All -ErrorAction Stop } -MaxAttempts 3 -DelaySeconds 5 -OperationDescription 'retrieve tenant licenses' -OnError {
+                                            param($attempt, $max, $err)
+                                            Write-NCMessage "Failed to retrieve tenant licenses, attempt $attempt of $max." -Level ERROR
+                                        })
+                                }
+                                catch { Write-NCMessage 'Unable to retrieve tenant licenses after 3 attempts.' -Level ERROR }
+                            }
+                            foreach ($sku in $tenantSkus) {
+                                $display = $null
+                                $source = $null
+                                if ($licenseLookup) {
+                                    $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $sku.SkuPartNumber -FallbackLookup $customLookup -MatchSource ([ref]$source)
+                                }
+                                if ($entry -ieq [string]$sku.SkuId -or $entry -ieq [string]$sku.SkuPartNumber -or ($display -and $entry -ieq $display)) {
+                                    $match = $sku
+                                    break
+                                }
+                            }
+                        }
+                        if (-not $match -or -not $match.SkuId) {
+                            Write-NCMessage "Unable to resolve license '$entry' for $operation on $($target.UserPrincipalName)." -Level ERROR
+                            $target.Invalid = $true
+                            $target.FailureReasons.Add("Unable to resolve license '$entry' for $operation.")
+                        }
+                        elseif ($operation -eq 'Remove' -and -not $presentSkuIds.Contains([string]$match.SkuId)) {
+                            $resolved.AlreadyAbsentRemove[[string]$match.SkuId] = $entry
+                        }
+                        else { $resolved[$operation][[string]$match.SkuId] = $entry }
+                    }
+                }
+                $overlap = @($resolved.Add.Keys | Where-Object { $resolved.Remove.ContainsKey($_) })
+                if ($overlap.Count -gt 0) {
+                    Write-NCMessage "Contradictory license additions and removals for $($target.UserPrincipalName): $($overlap -join ', ')" -Level ERROR
+                    $target.Invalid = $true
+                    $target.FailureReasons.Add("Contradictory license additions and removals: $($overlap -join ', ').")
+                }
+                if ($target.Invalid) {
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Failed' ($target.FailureReasons -join '; ')
+                    continue
+                }
+
+                # Omit only existing direct assignments to preserve their disabled service plans.
+                # A group-inherited SKU still needs the direct addition the caller requested.
+                $addIds = @($resolved.Add.Keys | Where-Object { -not $directSkuIds.Contains($_) })
+                $removeIds = @($resolved.Remove.Keys)
+                $target.EffectiveAdds = @($addIds | ForEach-Object { $resolved.Add[$_] })
+                $target.EffectiveRemoves = @($removeIds | ForEach-Object { $resolved.Remove[$_] })
+                $target.AlreadyAssignedAdds = @($resolved.Add.Keys | Where-Object { $directSkuIds.Contains($_) } | ForEach-Object { $resolved.Add[$_] })
+                $target.AlreadyAbsentRemovals = @($resolved.AlreadyAbsentRemove.Values)
+                $inheritedRemovals = @($removeIds | Where-Object { -not $directSkuIds.Contains($_) })
+                if ($inheritedRemovals.Count -gt 0) {
+                    $inheritedNames = @($inheritedRemovals | ForEach-Object { $resolved.Remove[$_] })
+                    Write-NCMessage ("Cannot remove inherited-only license(s) for {0}: {1}. Remove the license assignment from its group." -f $target.UserPrincipalName, ($inheritedNames -join ', ')) -Level ERROR
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Failed' ("Cannot remove inherited-only license(s): {0}." -f ($inheritedNames -join ', '))
+                    continue
+                }
+                $targetUsage = $null
+                if ($addIds.Count -gt 0 -and [string]::IsNullOrWhiteSpace($target.UsageLocation)) {
+                    $targetUsage = if (($NCVars -is [System.Collections.IDictionary]) -and $NCVars.Contains('UsageLocation') -and $NCVars.UsageLocation) { [string]$NCVars.UsageLocation } else { 'US' }
+                }
+                if ($addIds.Count + $removeIds.Count -eq 0) {
+                    $stateSummary = @()
+                    if ($target.AlreadyAssignedAdds.Count -gt 0) { $stateSummary += "already assigned: $($target.AlreadyAssignedAdds -join ', ')" }
+                    if ($target.AlreadyAbsentRemovals.Count -gt 0) { $stateSummary += "already absent: $($target.AlreadyAbsentRemovals -join ', ')" }
+                    if (-not $QuietNoChanges) {
+                        Write-NCMessage ("No license changes needed for {0}; {1}." -f $target.UserPrincipalName, ($stateSummary -join '; ')) -Level SUCCESS
+                    }
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Unchanged' ($stateSummary -join '; ')
+                    continue
+                }
+                $summary = "Add license(s): {0}; remove license(s): {1}" -f ($target.EffectiveAdds -join ', '), ($target.EffectiveRemoves -join ', ')
+                if ($target.AlreadyAssignedAdds.Count -gt 0) { $summary += "; already assigned: $($target.AlreadyAssignedAdds -join ', ')" }
+                if ($target.AlreadyAbsentRemovals.Count -gt 0) { $summary += "; already absent: $($target.AlreadyAbsentRemovals -join ', ')" }
+                if ($targetUsage) { $summary = "Set usage location to {0}; {1}" -f $targetUsage, $summary }
+                if (-not $PSCmdlet.ShouldProcess($target.UserPrincipalName, $summary)) {
+                    $reason = if ($WhatIfPreference) { 'Preview only (-WhatIf).' } else { 'Not approved.' }
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Skipped' $reason
+                    continue
+                }
+                $requestId = "m$i"
+                $approved[$requestId] = $target
+                if ($targetUsage) {
+                    $patchId = "u$i"
+                    $approved[$patchId] = $target
+                    $requests.Add(@{
+                            Id = $patchId; Method = 'PATCH'; Url = "/users/$([uri]::EscapeDataString($target.Id))"
+                            Body = @{ usageLocation = $targetUsage }
+                        })
+                }
+                $requests.Add(@{
+                        Id = $requestId; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString($target.Id))/assignLicense"
+                        Body = @{
+                            addLicenses = @(foreach ($id in $addIds) { @{ skuId = $id; disabledPlans = @() } })
+                            removeLicenses = @($removeIds)
+                        }
+                    })
+            }
+            if ($requests.Count -eq 0) { return }
+            $patches = @($requests | Where-Object { $_.Method -eq 'PATCH' })
+            $readyUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($licenseRequest in @($requests | Where-Object { $_.Method -eq 'POST' })) {
+                $null = $readyUsers.Add([string]$licenseRequest.Id.Substring(1))
+            }
+            if ($patches.Count -gt 0) {
+                foreach ($response in @(Invoke-NCGraphBatch -Requests $patches -Activity 'Setting usage location')) {
+                    $target = $approved[$response.Id]
+                    $key = [string]$response.Id.Substring(1)
+                    if (-not $response.Success) {
+                        $null = $readyUsers.Remove($key)
+                        Write-NCMessage "Unable to set usage location for $($target.UserPrincipalName): $($response.ErrorMessage)" -Level ERROR
+                        & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Failed' ("Unable to set usage location: {0}" -f $response.ErrorMessage)
+                    }
+                }
+            }
+            $licenseRequests = @($requests | Where-Object { $_.Method -eq 'POST' -and $readyUsers.Contains($_.Id.Substring(1)) })
+            foreach ($response in @(Invoke-NCGraphBatch -Requests $licenseRequests -Activity 'Changing user licenses')) {
+                $target = $approved[$response.Id]
+                if ($response.Success) {
+                    $changeSummary = @()
+                    if ($target.EffectiveAdds.Count -gt 0) { $changeSummary += "added: $($target.EffectiveAdds -join ', ')" }
+                    if ($target.EffectiveRemoves.Count -gt 0) { $changeSummary += "removed: $($target.EffectiveRemoves -join ', ')" }
+                    if ($target.AlreadyAssignedAdds.Count -gt 0) { $changeSummary += "already assigned: $($target.AlreadyAssignedAdds -join ', ')" }
+                    if ($target.AlreadyAbsentRemovals.Count -gt 0) { $changeSummary += "already absent: $($target.AlreadyAbsentRemovals -join ', ')" }
+                    Write-NCMessage ("Changed licenses for {0} ({1})." -f $target.UserPrincipalName, ($changeSummary -join '; ')) -Level SUCCESS
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Succeeded' ($changeSummary -join '; ')
+                }
+                else {
+                    Write-NCMessage "License change failed for $($target.UserPrincipalName): $($response.ErrorMessage)" -Level ERROR
+                    & $recordResult "user:$($target.Id)" $target.UserPrincipalName 'Failed' ([string]$response.ErrorMessage)
+                }
+            }
+        }
+        finally {
+            if ($shouldSummarize) {
+                foreach ($key in @($batchResults.Keys)) {
+                    if ($batchResults[$key].Status -eq 'Pending') {
+                        & $recordResult $key $batchResults[$key].UserPrincipalName 'Failed' 'Operation did not complete.'
+                    }
+                }
+                $results = @($batchResults.Values)
+                $succeededCount = @($results | Where-Object Status -eq 'Succeeded').Count
+                $failedCount = @($results | Where-Object Status -eq 'Failed').Count
+                $unchangedCount = @($results | Where-Object Status -eq 'Unchanged').Count
+                $skippedCount = @($results | Where-Object Status -eq 'Skipped').Count
+                Write-NCMessage ("License batch totals — changed successfully: {0}; failed: {1}; unchanged: {2}; skipped/not executed: {3}." -f $succeededCount, $failedCount, $unchangedCount, $skippedCount) -Level INFO
+                if ($failedCount -gt 0) {
+                    $failedDetails = @($results | Where-Object Status -eq 'Failed' | ForEach-Object { "{0} ({1})" -f $_.UserPrincipalName, $_.Reason }) -join '; '
+                    Write-NCMessage "Failed users: $failedDetails" -Level ERROR
+                }
+            }
+            Restore-ProgressAndInfoPreferences
+        }
+    }
+}
+
+function Switch-UserMsolAccountSku {
+    <#
+    .SYNOPSIS
+        Swaps explicitly selected direct licenses between two users without requiring spare tenant seats.
+    .DESCRIPTION
+        Validates both users and their selected direct license assignments, removes the selected licenses
+        from both users, and only then assigns each user's licenses to the other. If a phase fails, it
+        attempts to restore the original assignments and reports any incomplete recovery.
+        Use -AllLicenses to select all direct licenses automatically; -ExcludeLicense leaves the named
+        license assigned to its current user. Explicit license selections remain available otherwise.
+    .PARAMETER FirstUserPrincipalName
+        UPN or object ID of the first user.
+    .PARAMETER FirstUserLicense
+        One or more licenses currently assigned directly to the first user.
+    .PARAMETER SecondUserPrincipalName
+        UPN or object ID of the second user.
+    .PARAMETER SecondUserLicense
+        One or more licenses currently assigned directly to the second user.
+    .PARAMETER AllLicenses
+        Automatically swap all direct licenses currently assigned to both users.
+    .PARAMETER ExcludeLicense
+        In -AllLicenses mode, leave these license(s) assigned to their current user.
+    .EXAMPLE
+        Switch-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -FirstUserLicense ENTERPRISEPACK -SecondUserPrincipalName user2@contoso.com -SecondUserLicense SPE_E3
+    .EXAMPLE
+        Switch-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -SecondUserPrincipalName user2@contoso.com -AllLicenses -ExcludeLicense 'FABRIC_FREE'
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string]$FirstUserPrincipalName,
+        [Parameter(Position = 1)]
+        [string[]]$FirstUserLicense,
+        [Parameter(Mandatory = $true, Position = 2)]
+        [string]$SecondUserPrincipalName,
+        [Parameter(Position = 3)]
+        [string[]]$SecondUserLicense,
+        [switch]$AllLicenses,
+        [string[]]$ExcludeLicense,
+        [switch]$ForceLicenseCatalogRefresh
+    )
+
+    Set-ProgressAndInfoPreferences
+    try {
+        $graphConnected = Test-MgGraphConnection -Scopes @('User.Read.All', 'User.ReadWrite.All', 'LicenseAssignment.Read.All', 'LicenseAssignment.ReadWrite.All')
+        if (-not $graphConnected) {
+            Add-EmptyLine
+            Write-NCMessage "Can't connect or use Microsoft Graph modules. Please check logs." -Level ERROR
+            return
+        }
+
+        $firstSelections = @($FirstUserLicense | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() } | Select-Object -Unique)
+        $secondSelections = @($SecondUserLicense | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() } | Select-Object -Unique)
+        $excludeSelections = @($ExcludeLicense | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() } | Select-Object -Unique)
+        if ($AllLicenses -and ($firstSelections.Count -gt 0 -or $secondSelections.Count -gt 0)) {
+            Write-NCMessage 'Use either -AllLicenses or explicit license selections, not both.' -Level ERROR
+            return
+        }
+        if (-not $AllLicenses -and $excludeSelections.Count -gt 0) {
+            Write-NCMessage '-ExcludeLicense is available only with -AllLicenses.' -Level ERROR
+            return
+        }
+        if (-not $AllLicenses -and ($firstSelections.Count -eq 0 -or $secondSelections.Count -eq 0)) {
+            Write-NCMessage 'Specify at least one license for each user to swap.' -Level ERROR
+            return
+        }
+
+        $failedUsers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $resolvedUsers = Resolve-NCGraphUserBatch -Identifier @($FirstUserPrincipalName, $SecondUserPrincipalName) -Property @('id', 'userPrincipalName', 'displayName', 'usageLocation', 'licenseAssignmentStates') -FailedIdentifier $failedUsers -Activity 'Resolving swap users'
+        $firstUser = $resolvedUsers[$FirstUserPrincipalName.Trim()]
+        $secondUser = $resolvedUsers[$SecondUserPrincipalName.Trim()]
+        if (-not $firstUser -or -not $firstUser.id) {
+            if (-not $failedUsers.Contains($FirstUserPrincipalName.Trim())) { Write-NCMessage "Unable to resolve first user '$FirstUserPrincipalName'." -Level ERROR }
+            return
+        }
+        if (-not $secondUser -or -not $secondUser.id) {
+            if (-not $failedUsers.Contains($SecondUserPrincipalName.Trim())) { Write-NCMessage "Unable to resolve second user '$SecondUserPrincipalName'." -Level ERROR }
+            return
+        }
+        if ([string]$firstUser.id -eq [string]$secondUser.id) {
+            Write-NCMessage 'Both identifiers resolve to the same user; no swap was performed.' -Level ERROR
+            return
+        }
+
+        $catalog = $null
+        try { $catalog = Get-LicenseCatalog -IncludeMetadata -ForceRefresh:$ForceLicenseCatalogRefresh.IsPresent }
+        catch { Write-NCMessage "License catalog unavailable: $($_.Exception.Message)" -Level WARNING }
+        $licenseLookup = if ($catalog -and $catalog.PSObject.Properties['Lookup']) { $catalog.Lookup } else { $null }
+        $customLookup = if ($catalog -and $catalog.PSObject.Properties['CustomLookup']) { $catalog.CustomLookup } else { $null }
+
+        $detailRequests = @(
+            @{ Id = 's0'; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/licenseDetails" }
+            @{ Id = 's1'; Method = 'GET'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/licenseDetails" }
+        )
+        $detailResults = @(Invoke-NCGraphBatchCollection -Requests $detailRequests -Activity 'Reading swap user licenses')
+        if ($detailResults.Count -lt 2 -or -not $detailResults[0].Success -or -not $detailResults[1].Success) {
+            $failedDetail = @($detailResults | Where-Object { -not $_.Success } | ForEach-Object { $_.ErrorMessage }) -join '; '
+            Write-NCMessage "Unable to read both users' license details: $failedDetail" -Level ERROR
+            return
+        }
+
+        if ($AllLicenses) {
+            $excludedSkuIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $allUserLicenses = @($detailResults[0].Items) + @($detailResults[1].Items)
+            foreach ($entry in $excludeSelections) {
+                $match = $null
+                foreach ($license in $allUserLicenses) {
+                    $display = $null
+                    $source = $null
+                    if ($licenseLookup) { $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $license.skuPartNumber -FallbackLookup $customLookup -MatchSource ([ref]$source) }
+                    if ($entry -ieq [string]$license.skuId -or $entry -ieq [string]$license.skuPartNumber -or ($display -and $entry -ieq $display)) {
+                        $match = $license
+                        break
+                    }
+                }
+                if (-not $match) {
+                    Write-NCMessage "Excluded license '$entry' is not assigned to either user." -Level ERROR
+                    return
+                }
+                $null = $excludedSkuIds.Add([string]$match.skuId)
+            }
+            $firstSelections = @($detailResults[0].Items | Where-Object { -not $excludedSkuIds.Contains([string]$_.skuId) } | ForEach-Object { [string]$_.skuId })
+            $secondSelections = @($detailResults[1].Items | Where-Object { -not $excludedSkuIds.Contains([string]$_.skuId) } | ForEach-Object { [string]$_.skuId })
+            if ($firstSelections.Count -eq 0 -or $secondSelections.Count -eq 0) {
+                Write-NCMessage 'After exclusions, each user must have at least one license to swap.' -Level ERROR
+                return
+            }
+        }
+
+        $resolveSelections = {
+            param($User, $Items, [string[]]$Selections)
+            $states = @{}
+            $stateComplete = $User.licenseAssignmentStates -is [array]
+            foreach ($state in $User.licenseAssignmentStates) {
+                $assignment = [pscustomobject]$state
+                if (-not $assignment -or [string]::IsNullOrWhiteSpace([string]$assignment.skuId) -or
+                    -not $assignment.PSObject.Properties['assignedByGroup'] -or
+                    -not $assignment.PSObject.Properties['disabledPlans'] -or
+                    $assignment.disabledPlans -isnot [array]) {
+                    $stateComplete = $false
+                    continue
+                }
+                $skuKey = [string]$assignment.skuId
+                if (-not $states.ContainsKey($skuKey)) {
+                    $states[$skuKey] = [pscustomobject]@{ Direct = $false; Group = $false; DisabledPlans = @() }
+                }
+                if ($null -eq $assignment.assignedByGroup) {
+                    $states[$skuKey].Direct = $true
+                    $states[$skuKey].DisabledPlans = @($assignment.disabledPlans)
+                }
+                else { $states[$skuKey].Group = $true }
+            }
+            foreach ($license in $Items) {
+                if (-not $states.ContainsKey([string]$license.skuId)) { $stateComplete = $false }
+            }
+            if (-not $stateComplete) {
+                Write-NCMessage "Unable to read complete license assignment state for $($User.userPrincipalName)." -Level ERROR
+                return $null
+            }
+
+            $resolved = [System.Collections.Generic.List[object]]::new()
+            foreach ($entry in $Selections) {
+                $match = $null
+                foreach ($license in $Items) {
+                    $display = $null
+                    $source = $null
+                    if ($licenseLookup) { $display = Get-LicenseDisplayName -Lookup $licenseLookup -SkuPartNumber $license.skuPartNumber -FallbackLookup $customLookup -MatchSource ([ref]$source) }
+                    if ($entry -ieq [string]$license.skuId -or $entry -ieq [string]$license.skuPartNumber -or ($display -and $entry -ieq $display)) {
+                        $match = $license
+                        break
+                    }
+                }
+                if (-not $match) {
+                    Write-NCMessage "License '$entry' is not currently assigned to $($User.userPrincipalName)." -Level ERROR
+                    return $null
+                }
+                $state = $states[[string]$match.skuId]
+                if ($state.Group) {
+                    Write-NCMessage "License '$entry' is assigned to $($User.userPrincipalName) through a group and cannot be moved directly." -Level ERROR
+                    return $null
+                }
+                if (-not $state.Direct) {
+                    Write-NCMessage "License '$entry' is not a direct assignment on $($User.userPrincipalName)." -Level ERROR
+                    return $null
+                }
+                $resolved.Add([pscustomobject]@{
+                        SkuId = [string]$match.skuId
+                        Name = if ($display) { [string]$display } else { [string]$match.skuPartNumber }
+                        DisabledPlans = @($state.DisabledPlans)
+                    })
+            }
+            return ,@($resolved)
+        }
+
+        $firstLicenses = & $resolveSelections $firstUser @($detailResults[0].Items) $firstSelections
+        if ($null -eq $firstLicenses) { return }
+        $secondLicenses = & $resolveSelections $secondUser @($detailResults[1].Items) $secondSelections
+        if ($null -eq $secondLicenses) { return }
+
+        $firstSkuIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $secondSkuIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($license in $firstLicenses) { $null = $firstSkuIds.Add([string]$license.SkuId) }
+        foreach ($license in $secondLicenses) { $null = $secondSkuIds.Add([string]$license.SkuId) }
+        $firstAlreadyOnSecond = @($firstLicenses | Where-Object { $secondSkuIds.Contains([string]$_.SkuId) })
+        $secondAlreadyOnFirst = @($secondLicenses | Where-Object { $firstSkuIds.Contains([string]$_.SkuId) })
+        if ($firstAlreadyOnSecond.Count -gt 0 -or $secondAlreadyOnFirst.Count -gt 0) {
+            if (-not $AllLicenses) {
+                $overlapNames = @($firstAlreadyOnSecond + $secondAlreadyOnFirst | ForEach-Object { $_.Name } | Select-Object -Unique)
+                Write-NCMessage ("The selected licenses overlap between users ({0}); no swap was performed." -f ($overlapNames -join ', ')) -Level ERROR
+                return
+            }
+            $firstLicenses = @($firstLicenses | Where-Object { -not $secondSkuIds.Contains([string]$_.SkuId) })
+            $secondLicenses = @($secondLicenses | Where-Object { -not $firstSkuIds.Contains([string]$_.SkuId) })
+            if ($firstLicenses.Count -eq 0 -and $secondLicenses.Count -eq 0) {
+                Write-NCMessage 'Both users already have the same direct license set; no swap is needed.' -Level SUCCESS
+                return
+            }
+            if ($firstLicenses.Count -eq 0 -or $secondLicenses.Count -eq 0) {
+                Write-NCMessage 'After retaining licenses shared by both users, each user must have at least one license to swap.' -Level ERROR
+                return
+            }
+        }
+        $firstCurrentlyAssignedAtSecond = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $secondCurrentlyAssignedAtFirst = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($license in $detailResults[1].Items) { $null = $firstCurrentlyAssignedAtSecond.Add([string]$license.skuId) }
+        foreach ($license in $detailResults[0].Items) { $null = $secondCurrentlyAssignedAtFirst.Add([string]$license.skuId) }
+        $firstSkuAlreadyHeldBySecond = @($firstLicenses | Where-Object { $firstCurrentlyAssignedAtSecond.Contains([string]$_.SkuId) })
+        $secondSkuAlreadyHeldByFirst = @($secondLicenses | Where-Object { $secondCurrentlyAssignedAtFirst.Contains([string]$_.SkuId) })
+        if ($firstSkuAlreadyHeldBySecond.Count -gt 0 -or $secondSkuAlreadyHeldByFirst.Count -gt 0) {
+            $alreadyHeldNames = @($firstSkuAlreadyHeldBySecond + $secondSkuAlreadyHeldByFirst | ForEach-Object { $_.Name } | Select-Object -Unique)
+            Write-NCMessage ("The destination already has selected license(s) ({0}); no swap was performed." -f ($alreadyHeldNames -join ', ')) -Level ERROR
+            return
+        }
+
+        $summary = "Remove {0} from {1} and {2} from {3}, then assign them reciprocally" -f ($firstLicenses.Name -join ', '), $firstUser.userPrincipalName, ($secondLicenses.Name -join ', '), $secondUser.userPrincipalName
+        if (-not $PSCmdlet.ShouldProcess("$($firstUser.userPrincipalName) <-> $($secondUser.userPrincipalName)", $summary)) {
+            Write-NCMessage "License swap skipped for $($firstUser.userPrincipalName) and $($secondUser.userPrincipalName)." -Level INFO
+            return
+        }
+
+        $defaultUsageLocation = if (($NCVars -is [System.Collections.IDictionary]) -and $NCVars.Contains('UsageLocation') -and $NCVars.UsageLocation) { [string]$NCVars.UsageLocation } else { 'US' }
+        $usagePatches = [System.Collections.Generic.List[object]]::new()
+        $patchTargets = @{}
+        if ($firstLicenses.Count -gt 0 -and [string]::IsNullOrWhiteSpace([string]$secondUser.usageLocation)) {
+            $usagePatches.Add(@{ Id = 'u0'; Method = 'PATCH'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))"; Body = @{ usageLocation = $defaultUsageLocation } })
+            $patchTargets['u0'] = $secondUser
+        }
+        if ($secondLicenses.Count -gt 0 -and [string]::IsNullOrWhiteSpace([string]$firstUser.usageLocation)) {
+            $usagePatches.Add(@{ Id = 'u1'; Method = 'PATCH'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))"; Body = @{ usageLocation = $defaultUsageLocation } })
+            $patchTargets['u1'] = $firstUser
+        }
+        if ($usagePatches.Count -gt 0) {
+            $patchResults = @(Invoke-NCGraphBatch -Requests @($usagePatches) -Activity 'Preparing license swap users')
+            $patchFailed = @($patchResults | Where-Object { -not $_.Success })
+            if ($patchFailed.Count -gt 0) {
+                foreach ($failure in $patchFailed) {
+                    Write-NCMessage "Unable to set usage location for $($patchTargets[$failure.Id].userPrincipalName): $($failure.ErrorMessage). No licenses were moved." -Level ERROR
+                }
+                return
+            }
+        }
+
+        $removeRequests = @(
+            @{ Id = 'r0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @(); removeLicenses = @($firstLicenses.SkuId) } }
+            @{ Id = 'r1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @(); removeLicenses = @($secondLicenses.SkuId) } }
+        )
+        $removeResults = @(Invoke-NCGraphBatch -Requests $removeRequests -Activity 'Removing licenses before swap')
+        $removeById = @{}
+        foreach ($result in $removeResults) { $removeById[$result.Id] = $result }
+        $removeFailed = @($removeRequests | Where-Object { -not $removeById[$_.Id].Success })
+        if ($removeFailed.Count -gt 0) {
+            foreach ($request in $removeFailed) { Write-NCMessage "License removal failed for $($request.Url): $($removeById[$request.Id].ErrorMessage)" -Level ERROR }
+            $restoreRequests = [System.Collections.Generic.List[object]]::new()
+            if ($removeById['r0'].Success) { $restoreRequests.Add(@{ Id = 'restore0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @($firstLicenses | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }) }
+            if ($removeById['r1'].Success) { $restoreRequests.Add(@{ Id = 'restore1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @($secondLicenses | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }) }
+            if ($restoreRequests.Count -gt 0) {
+                foreach ($result in @(Invoke-NCGraphBatch -Requests @($restoreRequests) -Activity 'Restoring licenses after failed removal')) {
+                    $user = if ($result.Id -eq 'restore0') { $firstUser } else { $secondUser }
+                    if ($result.Success) { Write-NCMessage "Restored original licenses for $($user.userPrincipalName)." -Level WARNING }
+                    else { Write-NCMessage "Failed to restore original licenses for $($user.userPrincipalName): $($result.ErrorMessage)" -Level ERROR }
+                }
+            }
+            Write-NCMessage "License swap aborted for $($firstUser.userPrincipalName) and $($secondUser.userPrincipalName); reciprocal assignments were not attempted." -Level ERROR
+            return
+        }
+
+        $addRequests = @(
+            @{ Id = 'a0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @($secondLicenses | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }
+            @{ Id = 'a1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @($firstLicenses | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }
+        )
+        $addResults = @(Invoke-NCGraphBatch -Requests $addRequests -Activity 'Assigning swapped licenses')
+        $addById = @{}
+        foreach ($result in $addResults) { $addById[$result.Id] = $result }
+        $addFailed = @($addRequests | Where-Object { -not $addById[$_.Id].Success })
+        if ($addFailed.Count -eq 0) {
+            Write-NCMessage ("{0} received {1}." -f $firstUser.userPrincipalName, ($secondLicenses.Name -join ', ')) -Level SUCCESS
+            Write-NCMessage ("{0} received {1}." -f $secondUser.userPrincipalName, ($firstLicenses.Name -join ', ')) -Level SUCCESS
+            return
+        }
+
+        foreach ($request in $addFailed) { Write-NCMessage "License assignment failed for $($request.Url): $($addById[$request.Id].ErrorMessage)" -Level ERROR }
+        $rollbackRemovals = [System.Collections.Generic.List[object]]::new()
+        if ($addById['a0'].Success) { $rollbackRemovals.Add(@{ Id = 'undo0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @(); removeLicenses = @($secondLicenses.SkuId) } }) }
+        if ($addById['a1'].Success) { $rollbackRemovals.Add(@{ Id = 'undo1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @(); removeLicenses = @($firstLicenses.SkuId) } }) }
+        if ($rollbackRemovals.Count -gt 0) {
+            foreach ($result in @(Invoke-NCGraphBatch -Requests @($rollbackRemovals) -Activity 'Removing partial swap assignments')) {
+                $user = if ($result.Id -eq 'undo0') { $firstUser } else { $secondUser }
+                if (-not $result.Success) { Write-NCMessage "Failed to remove partial swap assignment from $($user.userPrincipalName): $($result.ErrorMessage)" -Level ERROR }
+            }
+        }
+        $restoreOriginals = @(
+            @{ Id = 'return0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @($firstLicenses | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }
+            @{ Id = 'return1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @($secondLicenses | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }
+        )
+        foreach ($result in @(Invoke-NCGraphBatch -Requests $restoreOriginals -Activity 'Restoring original swap licenses')) {
+            $user = if ($result.Id -eq 'return0') { $firstUser } else { $secondUser }
+            if ($result.Success) { Write-NCMessage "Restored original licenses for $($user.userPrincipalName)." -Level WARNING }
+            else { Write-NCMessage "Failed to restore original licenses for $($user.userPrincipalName): $($result.ErrorMessage)" -Level ERROR }
+        }
+        Write-NCMessage "License swap failed for $($firstUser.userPrincipalName) and $($secondUser.userPrincipalName); restoration was attempted." -Level ERROR
+    }
+    finally { Restore-ProgressAndInfoPreferences }
+}
+
 function Set-UserUsageLocation {
     <#
     .SYNOPSIS
