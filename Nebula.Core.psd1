@@ -98,6 +98,7 @@
         'Set-MboxRulesQuota',
         'Set-OoO',
         'Set-SharedMboxCopyForSent',
+        'Set-UserMsolAccountSku',
         'Set-UserUsageLocation',
         'Sync-NebulaConfig',
         'Test-SharedMailboxCompliance',

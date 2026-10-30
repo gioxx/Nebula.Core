@@ -343,6 +343,139 @@ Describe 'License assignment batching' {
         ($rows.Licenses | Select-Object -Unique) | Should -Be 'ENTERPRISEPACK'
     }
 
+    Context 'Set user licenses in one operation' {
+        BeforeEach {
+            $global:newSkuId = '11111111-1111-1111-1111-111111111111'
+            Mock Get-MgSubscribedSku {
+                @(
+                    [pscustomobject]@{ SkuId = $global:skuId; SkuPartNumber = 'ENTERPRISEPACK' }
+                    [pscustomobject]@{ SkuId = $global:newSkuId; SkuPartNumber = 'NEWPACK' }
+                )
+            }
+            Set-LicenseGraphMock
+        }
+
+        It 'combines additions and removals in a single user write' {
+            Set-UserMsolAccountSku user1@contoso.com -AddLicense NEWPACK -RemoveLicense ENTERPRISEPACK -Confirm:$false
+            $writes = @($global:SeenRequests | Where-Object method -eq POST)
+            $writes.Count | Should -Be 1
+            $writes[0].url | Should -Be '/users/id1/assignLicense'
+            $writes[0].body.addLicenses.skuId | Should -Be $global:newSkuId
+            $writes[0].body.removeLicenses | Should -Be @($global:skuId)
+        }
+
+        It 'merges repeated users across more than twenty pipeline rows' {
+            $rows = @(1..21 | ForEach-Object { [pscustomobject]@{ UserPrincipalName = 'user1@contoso.com'; AddLicense = 'NEWPACK' } })
+            $rows += [pscustomobject]@{ UserPrincipalName = 'user1@contoso.com'; RemoveLicense = 'ENTERPRISEPACK' }
+            $rows | Set-UserMsolAccountSku -Confirm:$false
+            $writes = @($global:SeenRequests | Where-Object method -eq POST)
+            $writes.Count | Should -Be 1
+            @($writes[0].body.addLicenses).Count | Should -Be 1
+            $writes[0].body.removeLicenses | Should -Be @($global:skuId)
+        }
+
+        It 'rejects overlapping SKU operations even when identified differently' {
+            Set-UserMsolAccountSku user1@contoso.com -AddLicense ENTERPRISEPACK -RemoveLicense $global:skuId -Confirm:$false
+            @($global:SeenRequests | Where-Object method -eq POST).Count | Should -Be 0
+            Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' }
+        }
+
+        It 'rejects all changes for a user with an unresolved license on another row' {
+            @(
+                [pscustomobject]@{ UserPrincipalName = 'user1@contoso.com'; AddLicense = 'NEWPACK' }
+                [pscustomobject]@{ UserPrincipalName = 'user1@contoso.com'; RemoveLicense = 'missing' }
+            ) | Set-UserMsolAccountSku -Confirm:$false
+            @($global:SeenRequests | Where-Object method -eq POST).Count | Should -Be 0
+            Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' }
+        }
+
+        It 'skips users whose license state cannot be read' {
+            Mock Invoke-MgGraphRequest {
+                New-TestBatchResponse -Body $Body -Responder {
+                    param($request)
+                    $global:SeenRequests.Add($request)
+                    if ($request.url -like '*/licenseDetails*') { return @{ status = 403; body = @{ error = @{ message = 'denied' } } } }
+                    @{ status = 200; body = @{ id = 'id1'; userPrincipalName = 'user1@contoso.com' } }
+                }
+            }
+            Set-UserMsolAccountSku user1@contoso.com -AddLicense NEWPACK -RemoveLicense ENTERPRISEPACK -Confirm:$false
+            @($global:SeenRequests | Where-Object method -eq POST).Count | Should -Be 0
+            Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' }
+        }
+
+        It 'previews the combined operation without writing' {
+            Set-UserMsolAccountSku user1@contoso.com -AddLicense NEWPACK -RemoveLicense ENTERPRISEPACK -WhatIf
+            @($global:SeenRequests | Where-Object method -eq POST).Count | Should -Be 0
+        }
+
+        It 'supplies an empty opposite array for <Operation> only' -ForEach @(
+            @{ Operation = 'Add'; Parameters = @{ AddLicense = 'NEWPACK' }; Empty = 'removeLicenses'; Populated = 'addLicenses' }
+            @{ Operation = 'Remove'; Parameters = @{ RemoveLicense = 'ENTERPRISEPACK' }; Empty = 'addLicenses'; Populated = 'removeLicenses' }
+        ) {
+            Set-UserMsolAccountSku user1@contoso.com @Parameters -Confirm:$false
+            $writes = @($global:SeenRequests | Where-Object method -eq POST)
+            $writes.Count | Should -Be 1
+            ($writes[0].body.$Empty -is [array]) | Should -BeTrue
+            @($writes[0].body.$Empty).Count | Should -Be 0
+            @($writes[0].body.$Populated).Count | Should -Be 1
+        }
+
+        It 'rejects an empty change' {
+            Set-UserMsolAccountSku user1@contoso.com -Confirm:$false
+            @($global:SeenRequests | Where-Object method -eq POST).Count | Should -Be 0
+            Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' }
+        }
+
+        It 'preserves service plans by omitting additions already present in license details' {
+            Set-UserMsolAccountSku user1@contoso.com -AddLicense ENTERPRISEPACK,NEWPACK -Confirm:$false
+            $writes = @($global:SeenRequests | Where-Object method -eq POST)
+            $writes.Count | Should -Be 1
+            @($writes[0].body.addLicenses).Count | Should -Be 1
+            $writes[0].body.addLicenses.skuId | Should -Be $global:newSkuId
+            ($writes[0].body.addLicenses[0].disabledPlans -is [array]) | Should -BeTrue
+            @($writes[0].body.addLicenses[0].disabledPlans).Count | Should -Be 0
+        }
+
+        It 'resolves friendly names through the catalog' {
+            Mock Get-LicenseCatalog { [pscustomobject]@{ Lookup = @{ NEWPACK = 'New Product' }; CustomLookup = @{} } }
+            Mock Get-LicenseDisplayName { if ($SkuPartNumber -eq 'NEWPACK') { 'New Product' } else { 'Old Product' } }
+            Set-UserMsolAccountSku user1@contoso.com -AddLicense ' New Product ' -RemoveLicense 'old product' -Confirm:$false
+            $writes = @($global:SeenRequests | Where-Object method -eq POST)
+            $writes.Count | Should -Be 1
+            $writes[0].body.addLicenses.skuId | Should -Be $global:newSkuId
+            $writes[0].body.removeLicenses | Should -Be @($global:skuId)
+        }
+
+        It 'merges different identifiers that resolve to the same user ID' {
+            Mock Invoke-MgGraphRequest {
+                New-TestBatchResponse -Body $Body -Responder {
+                    param($request)
+                    $global:SeenRequests.Add($request)
+                    if ($request.url -like '*/licenseDetails*') { return @{ status = 200; body = @{ value = @(@{ skuId = $global:skuId; skuPartNumber = 'ENTERPRISEPACK' }) } } }
+                    @{ status = 200; body = @{ id = 'id1'; userPrincipalName = 'user1@contoso.com' } }
+                }
+            }
+            @(
+                [pscustomobject]@{ UserPrincipalName = 'user1@contoso.com'; AddLicense = 'NEWPACK' }
+                [pscustomobject]@{ UserPrincipalName = 'id1'; RemoveLicense = 'ENTERPRISEPACK' }
+            ) | Set-UserMsolAccountSku -Confirm:$false
+            $writes = @($global:SeenRequests | Where-Object method -eq POST)
+            $writes.Count | Should -Be 1
+            $writes[0].url | Should -Be '/users/id1/assignLicense'
+            $writes[0].body.addLicenses.skuId | Should -Be $global:newSkuId
+            $writes[0].body.removeLicenses | Should -Be @($global:skuId)
+            @($global:SeenRequests | Where-Object url -like '*/licenseDetails*').Count | Should -Be 1
+        }
+
+        It 'continues independent users when another user cannot be resolved' {
+            @('ghost@contoso.com', 'user1@contoso.com') | Set-UserMsolAccountSku -AddLicense NEWPACK -RemoveLicense ENTERPRISEPACK -Confirm:$false
+            $writes = @($global:SeenRequests | Where-Object method -eq POST)
+            $writes.Count | Should -Be 1
+            $writes[0].url | Should -Be '/users/id1/assignLicense'
+            Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*ghost@contoso.com*' }
+        }
+    }
+
     Context 'Copy and Move user licenses' {
         BeforeEach {
             Mock Update-MgUser {}
