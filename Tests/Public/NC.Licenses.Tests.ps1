@@ -609,7 +609,7 @@ Describe 'License assignment batching' {
         }
     }
 
-    Context 'Swap user licenses without spare tenant seats' {
+    Context 'Switch user licenses without spare tenant seats' {
         BeforeEach {
             $global:swapFirstSkuId = [guid]'11111111-1111-1111-1111-111111111111'
             $global:swapSecondSkuId = [guid]'22222222-2222-2222-2222-222222222222'
@@ -652,7 +652,7 @@ Describe 'License assignment batching' {
         }
 
         It 'removes both selected licenses before assigning them reciprocally' {
-            Swap-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -FirstUserLicense FIRSTPACK -SecondUserPrincipalName user2@contoso.com -SecondUserLicense SECONDPACK -Confirm:$false
+            Switch-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -FirstUserLicense FIRSTPACK -SecondUserPrincipalName user2@contoso.com -SecondUserLicense SECONDPACK -Confirm:$false
 
             $writes = @($global:SeenRequests | Where-Object method -eq POST)
             $writes.Count | Should -Be 4
@@ -669,7 +669,7 @@ Describe 'License assignment batching' {
         }
 
         It 'automatically swaps all direct licenses while leaving excluded SKUs with their current user' {
-            Swap-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -SecondUserPrincipalName user2@contoso.com -AllLicenses -ExcludeLicense FABRIC_FREE -Confirm:$false
+            Switch-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -SecondUserPrincipalName user2@contoso.com -AllLicenses -ExcludeLicense FABRIC_FREE -Confirm:$false
 
             $writes = @($global:SeenRequests | Where-Object method -eq POST)
             $writes.Count | Should -Be 4
@@ -683,7 +683,7 @@ Describe 'License assignment batching' {
         It 'restores a successful removal and does not start additions if the other removal fails' {
             $global:SwapFailOn = @('remove:id2')
 
-            Swap-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -FirstUserLicense FIRSTPACK -SecondUserPrincipalName user2@contoso.com -SecondUserLicense SECONDPACK -Confirm:$false
+            Switch-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -FirstUserLicense FIRSTPACK -SecondUserPrincipalName user2@contoso.com -SecondUserLicense SECONDPACK -Confirm:$false
 
             $writes = @($global:SeenRequests | Where-Object method -eq POST)
             $writes.Count | Should -Be 3
@@ -695,7 +695,7 @@ Describe 'License assignment batching' {
         It 'removes partial reciprocal additions and restores both original licenses after an add failure' {
             $global:SwapFailOn = @("add:id2:$($global:swapFirstSkuId)")
 
-            Swap-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -FirstUserLicense FIRSTPACK -SecondUserPrincipalName user2@contoso.com -SecondUserLicense SECONDPACK -Confirm:$false
+            Switch-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -FirstUserLicense FIRSTPACK -SecondUserPrincipalName user2@contoso.com -SecondUserLicense SECONDPACK -Confirm:$false
 
             $writes = @($global:SeenRequests | Where-Object method -eq POST)
             $writes.Count | Should -Be 7

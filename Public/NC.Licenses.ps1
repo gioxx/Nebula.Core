@@ -2741,7 +2741,7 @@ function Set-UserMsolAccountSku {
     }
 }
 
-function Swap-UserMsolAccountSku {
+function Switch-UserMsolAccountSku {
     <#
     .SYNOPSIS
         Swaps explicitly selected direct licenses between two users without requiring spare tenant seats.
@@ -2764,9 +2764,9 @@ function Swap-UserMsolAccountSku {
     .PARAMETER ExcludeLicense
         In -AllLicenses mode, leave these license(s) assigned to their current user.
     .EXAMPLE
-        Swap-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -FirstUserLicense ENTERPRISEPACK -SecondUserPrincipalName user2@contoso.com -SecondUserLicense SPE_E3
+        Switch-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -FirstUserLicense ENTERPRISEPACK -SecondUserPrincipalName user2@contoso.com -SecondUserLicense SPE_E3
     .EXAMPLE
-        Swap-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -SecondUserPrincipalName user2@contoso.com -AllLicenses -ExcludeLicense 'FABRIC_FREE'
+        Switch-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -SecondUserPrincipalName user2@contoso.com -AllLicenses -ExcludeLicense 'FABRIC_FREE'
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
