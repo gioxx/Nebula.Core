@@ -157,6 +157,10 @@
 ReleaseNotes = @'
 Full release notes: https://github.com/gioxx/Nebula.Core/releases/tag/v1.3.1
 
+New commands
+- Set-UserMsolAccountSku: adds and removes a user's licenses in one Microsoft Graph request (-AddLicense, -RemoveLicense), so a license replacement never leaves the user without one. Accepts pipeline input, merges rows by user, keeps disabled service plans on retained licenses, and reports applied changes and batch totals (-QuietNoChanges hides users already in the desired state).
+- Switch-UserMsolAccountSku: swaps direct licenses between two users without spare tenant seats: it removes the selected licenses from both users, then assigns them reciprocally, and tries to restore the original assignments if a step fails. Pick the licenses per user, or use -AllLicenses (with -ExcludeLicense to keep some with their current user).
+
 Improvements
 - Update check: on PowerShell 7 it now also reports a newer stable PowerShell release (read from gioxx/SWUpdates-Alert), since PowerShell 7.6.8 no longer shows its own update notice. Turn it off with CheckPowerShellUpdates = $false.
 
