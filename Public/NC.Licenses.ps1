@@ -2749,8 +2749,10 @@ function Switch-UserMsolAccountSku {
         Validates both users and their selected direct license assignments, removes the selected licenses
         from both users, and only then assigns each user's licenses to the other. If a phase fails, it
         attempts to restore the original assignments and reports any incomplete recovery.
-        Use -AllLicenses to select all direct licenses automatically; -ExcludeLicense leaves the named
-        license assigned to its current user. Explicit license selections remain available otherwise.
+        Use -AllLicenses to select all direct licenses automatically. Licenses named in -ExcludeLicense, and
+        direct licenses held by both users, are removed together with the swapped ones (so both users are
+        emptied) and given back to the same user afterwards: this avoids failures when one of their service
+        plans depends on a plan being swapped. Explicit license selections remain available otherwise.
     .PARAMETER FirstUserPrincipalName
         UPN or object ID of the first user.
     .PARAMETER FirstUserLicense
@@ -2762,21 +2764,19 @@ function Switch-UserMsolAccountSku {
     .PARAMETER AllLicenses
         Automatically swap all direct licenses currently assigned to both users.
     .PARAMETER ExcludeLicense
-        In -AllLicenses mode, leave these license(s) assigned to their current user.
+        In -AllLicenses mode, give these license(s) back to their current user after the swap.
     .EXAMPLE
         Switch-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -FirstUserLicense ENTERPRISEPACK -SecondUserPrincipalName user2@contoso.com -SecondUserLicense SPE_E3
     .EXAMPLE
-        Switch-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -SecondUserPrincipalName user2@contoso.com -AllLicenses -ExcludeLicense 'FABRIC_FREE'
+        Switch-UserMsolAccountSku user1@contoso.com user2@contoso.com -AllLicenses -ExcludeLicense 'FABRIC_FREE'
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
         [Parameter(Mandatory = $true, Position = 0)]
         [string]$FirstUserPrincipalName,
-        [Parameter(Position = 1)]
-        [string[]]$FirstUserLicense,
-        [Parameter(Mandatory = $true, Position = 2)]
+        [Parameter(Mandatory = $true, Position = 1)]
         [string]$SecondUserPrincipalName,
-        [Parameter(Position = 3)]
+        [string[]]$FirstUserLicense,
         [string[]]$SecondUserLicense,
         [switch]$AllLicenses,
         [string[]]$ExcludeLicense,
@@ -2871,7 +2871,7 @@ function Switch-UserMsolAccountSku {
         }
 
         $resolveSelections = {
-            param($User, $Items, [string[]]$Selections)
+            param($User, $Items, [string[]]$Selections, [bool]$SkipGroup)
             $states = @{}
             $stateComplete = $User.licenseAssignmentStates -is [array]
             foreach ($state in $User.licenseAssignmentStates) {
@@ -2918,6 +2918,8 @@ function Switch-UserMsolAccountSku {
                     return $null
                 }
                 $state = $states[[string]$match.skuId]
+                # Set-aside licenses: a group assignment cannot be removed, so it simply stays where it is.
+                if ($state.Group -and $SkipGroup) { continue }
                 if ($state.Group) {
                     Write-NCMessage "License '$entry' is assigned to $($User.userPrincipalName) through a group and cannot be moved directly." -Level ERROR
                     return $null
@@ -2940,6 +2942,17 @@ function Switch-UserMsolAccountSku {
         $secondLicenses = & $resolveSelections $secondUser @($detailResults[1].Items) $secondSelections
         if ($null -eq $secondLicenses) { return }
 
+        # Licenses kept by their user (excluded or shared) are removed with the swap and given back afterwards:
+        # leaving them in place can block the removal when one of their plans depends on a swapped plan.
+        $firstParked = @()
+        $secondParked = @()
+        if ($AllLicenses -and $excludedSkuIds.Count -gt 0) {
+            $firstParked = & $resolveSelections $firstUser @($detailResults[0].Items) @($detailResults[0].Items | Where-Object { $excludedSkuIds.Contains([string]$_.skuId) } | ForEach-Object { [string]$_.skuId }) $true
+            if ($null -eq $firstParked) { return }
+            $secondParked = & $resolveSelections $secondUser @($detailResults[1].Items) @($detailResults[1].Items | Where-Object { $excludedSkuIds.Contains([string]$_.skuId) } | ForEach-Object { [string]$_.skuId }) $true
+            if ($null -eq $secondParked) { return }
+        }
+
         $firstSkuIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $secondSkuIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($license in $firstLicenses) { $null = $firstSkuIds.Add([string]$license.SkuId) }
@@ -2952,6 +2965,8 @@ function Switch-UserMsolAccountSku {
                 Write-NCMessage ("The selected licenses overlap between users ({0}); no swap was performed." -f ($overlapNames -join ', ')) -Level ERROR
                 return
             }
+            $firstParked = @($firstParked) + @($firstAlreadyOnSecond)
+            $secondParked = @($secondParked) + @($secondAlreadyOnFirst)
             $firstLicenses = @($firstLicenses | Where-Object { -not $secondSkuIds.Contains([string]$_.SkuId) })
             $secondLicenses = @($secondLicenses | Where-Object { -not $firstSkuIds.Contains([string]$_.SkuId) })
             if ($firstLicenses.Count -eq 0 -and $secondLicenses.Count -eq 0) {
@@ -2976,6 +2991,14 @@ function Switch-UserMsolAccountSku {
         }
 
         $summary = "Remove {0} from {1} and {2} from {3}, then assign them reciprocally" -f ($firstLicenses.Name -join ', '), $firstUser.userPrincipalName, ($secondLicenses.Name -join ', '), $secondUser.userPrincipalName
+        $parkedNames = @(@($firstParked) + @($secondParked) | ForEach-Object { $_.Name } | Select-Object -Unique)
+        if ($parkedNames.Count -gt 0) { $summary += "; {0} will be removed too and given back to the same user" -f ($parkedNames -join ', ') }
+        # What each user holds now (removed, or restored on rollback) and what each user gets after the swap.
+        $firstOwned = @($firstLicenses) + @($firstParked)
+        $secondOwned = @($secondLicenses) + @($secondParked)
+        $firstFinal = @($secondLicenses) + @($firstParked)
+        $secondFinal = @($firstLicenses) + @($secondParked)
+        $requestUser = { param($Id) if ($Id -like '*0') { $firstUser.userPrincipalName } else { $secondUser.userPrincipalName } }
         if (-not $PSCmdlet.ShouldProcess("$($firstUser.userPrincipalName) <-> $($secondUser.userPrincipalName)", $summary)) {
             Write-NCMessage "License swap skipped for $($firstUser.userPrincipalName) and $($secondUser.userPrincipalName)." -Level INFO
             return
@@ -3004,18 +3027,18 @@ function Switch-UserMsolAccountSku {
         }
 
         $removeRequests = @(
-            @{ Id = 'r0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @(); removeLicenses = @($firstLicenses.SkuId) } }
-            @{ Id = 'r1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @(); removeLicenses = @($secondLicenses.SkuId) } }
+            @{ Id = 'r0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @(); removeLicenses = @($firstOwned.SkuId) } }
+            @{ Id = 'r1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @(); removeLicenses = @($secondOwned.SkuId) } }
         )
         $removeResults = @(Invoke-NCGraphBatch -Requests $removeRequests -Activity 'Removing licenses before swap')
         $removeById = @{}
         foreach ($result in $removeResults) { $removeById[$result.Id] = $result }
         $removeFailed = @($removeRequests | Where-Object { -not $removeById[$_.Id].Success })
         if ($removeFailed.Count -gt 0) {
-            foreach ($request in $removeFailed) { Write-NCMessage "License removal failed for $($request.Url): $($removeById[$request.Id].ErrorMessage)" -Level ERROR }
+            foreach ($request in $removeFailed) { Write-NCMessage "License removal failed for $(& $requestUser $request.Id):$($removeById[$request.Id].ErrorMessage)" -Level ERROR }
             $restoreRequests = [System.Collections.Generic.List[object]]::new()
-            if ($removeById['r0'].Success) { $restoreRequests.Add(@{ Id = 'restore0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @($firstLicenses | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }) }
-            if ($removeById['r1'].Success) { $restoreRequests.Add(@{ Id = 'restore1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @($secondLicenses | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }) }
+            if ($removeById['r0'].Success) { $restoreRequests.Add(@{ Id = 'restore0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @($firstOwned | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }) }
+            if ($removeById['r1'].Success) { $restoreRequests.Add(@{ Id = 'restore1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @($secondOwned | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }) }
             if ($restoreRequests.Count -gt 0) {
                 foreach ($result in @(Invoke-NCGraphBatch -Requests @($restoreRequests) -Activity 'Restoring licenses after failed removal')) {
                     $user = if ($result.Id -eq 'restore0') { $firstUser } else { $secondUser }
@@ -3028,8 +3051,8 @@ function Switch-UserMsolAccountSku {
         }
 
         $addRequests = @(
-            @{ Id = 'a0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @($secondLicenses | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }
-            @{ Id = 'a1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @($firstLicenses | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }
+            @{ Id = 'a0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @($firstFinal | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }
+            @{ Id = 'a1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @($secondFinal | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }
         )
         $addResults = @(Invoke-NCGraphBatch -Requests $addRequests -Activity 'Assigning swapped licenses')
         $addById = @{}
@@ -3041,10 +3064,10 @@ function Switch-UserMsolAccountSku {
             return
         }
 
-        foreach ($request in $addFailed) { Write-NCMessage "License assignment failed for $($request.Url): $($addById[$request.Id].ErrorMessage)" -Level ERROR }
+        foreach ($request in $addFailed) { Write-NCMessage "License assignment failed for $(& $requestUser $request.Id):$($addById[$request.Id].ErrorMessage)" -Level ERROR }
         $rollbackRemovals = [System.Collections.Generic.List[object]]::new()
-        if ($addById['a0'].Success) { $rollbackRemovals.Add(@{ Id = 'undo0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @(); removeLicenses = @($secondLicenses.SkuId) } }) }
-        if ($addById['a1'].Success) { $rollbackRemovals.Add(@{ Id = 'undo1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @(); removeLicenses = @($firstLicenses.SkuId) } }) }
+        if ($addById['a0'].Success) { $rollbackRemovals.Add(@{ Id = 'undo0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @(); removeLicenses = @($firstFinal.SkuId) } }) }
+        if ($addById['a1'].Success) { $rollbackRemovals.Add(@{ Id = 'undo1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @(); removeLicenses = @($secondFinal.SkuId) } }) }
         if ($rollbackRemovals.Count -gt 0) {
             foreach ($result in @(Invoke-NCGraphBatch -Requests @($rollbackRemovals) -Activity 'Removing partial swap assignments')) {
                 $user = if ($result.Id -eq 'undo0') { $firstUser } else { $secondUser }
@@ -3052,8 +3075,8 @@ function Switch-UserMsolAccountSku {
             }
         }
         $restoreOriginals = @(
-            @{ Id = 'return0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @($firstLicenses | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }
-            @{ Id = 'return1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @($secondLicenses | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }
+            @{ Id = 'return0'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$firstUser.id))/assignLicense"; Body = @{ addLicenses = @($firstOwned | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }
+            @{ Id = 'return1'; Method = 'POST'; Url = "/users/$([uri]::EscapeDataString([string]$secondUser.id))/assignLicense"; Body = @{ addLicenses = @($secondOwned | ForEach-Object { @{ skuId = $_.SkuId; disabledPlans = @($_.DisabledPlans) } }); removeLicenses = @() } }
         )
         foreach ($result in @(Invoke-NCGraphBatch -Requests $restoreOriginals -Activity 'Restoring original swap licenses')) {
             $user = if ($result.Id -eq 'return0') { $firstUser } else { $secondUser }

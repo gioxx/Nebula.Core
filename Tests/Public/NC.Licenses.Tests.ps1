@@ -615,6 +615,7 @@ Describe 'License assignment batching' {
             $global:swapSecondSkuId = [guid]'22222222-2222-2222-2222-222222222222'
             $global:swapExcludedSkuId = [guid]'33333333-3333-3333-3333-333333333333'
             $global:SwapFailOn = @()
+            $global:SwapSharedSku = $false
             $global:SeenRequests = [System.Collections.Generic.List[object]]::new()
             Mock Get-LicenseCatalog { $null }
             Mock Invoke-MgGraphRequest {
@@ -625,7 +626,9 @@ Describe 'License assignment batching' {
                     if ($request.method -eq 'GET' -and $url -match '^/users/(user[12]%40contoso\.com)\?') {
                         $user = $Matches[1]
                         if ($user -like 'user1*') {
-                            return @{ status = 200; body = @{ id = 'id1'; userPrincipalName = 'user1@contoso.com'; usageLocation = 'IT'; licenseAssignmentStates = @(@{ skuId = $global:swapFirstSkuId; assignedByGroup = $null; disabledPlans = @('first-disabled') }) } }
+                            $states = @(@{ skuId = $global:swapFirstSkuId; assignedByGroup = $null; disabledPlans = @('first-disabled') })
+                            if ($global:SwapSharedSku) { $states += @{ skuId = $global:swapExcludedSkuId; assignedByGroup = $null; disabledPlans = @('shared-disabled') } }
+                            return @{ status = 200; body = @{ id = 'id1'; userPrincipalName = 'user1@contoso.com'; usageLocation = 'IT'; licenseAssignmentStates = $states } }
                         }
                         return @{ status = 200; body = @{ id = 'id2'; userPrincipalName = 'user2@contoso.com'; usageLocation = 'IT'; licenseAssignmentStates = @(
                                     @{ skuId = $global:swapSecondSkuId; assignedByGroup = $null; disabledPlans = @('second-disabled') }
@@ -633,7 +636,11 @@ Describe 'License assignment batching' {
                                 ) } }
                     }
                     if ($request.method -eq 'GET' -and $url -match '^/users/(id[12])/licenseDetails$') {
-                        if ($Matches[1] -eq 'id1') { return @{ status = 200; body = @{ value = @(@{ skuId = $global:swapFirstSkuId; skuPartNumber = 'FIRSTPACK' }) } } }
+                        if ($Matches[1] -eq 'id1') {
+                            $items = @(@{ skuId = $global:swapFirstSkuId; skuPartNumber = 'FIRSTPACK' })
+                            if ($global:SwapSharedSku) { $items += @{ skuId = $global:swapExcludedSkuId; skuPartNumber = 'FABRIC_FREE' } }
+                            return @{ status = 200; body = @{ value = $items } }
+                        }
                         return @{ status = 200; body = @{ value = @(
                                     @{ skuId = $global:swapSecondSkuId; skuPartNumber = 'SECONDPACK' }
                                     @{ skuId = $global:swapExcludedSkuId; skuPartNumber = 'FABRIC_FREE' }
@@ -668,16 +675,36 @@ Describe 'License assignment batching' {
             $writes[3].body.addLicenses.disabledPlans | Should -Be @('first-disabled')
         }
 
-        It 'automatically swaps all direct licenses while leaving excluded SKUs with their current user' {
+        It 'empties both users and gives excluded SKUs back to their original user after the swap' {
             Switch-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -SecondUserPrincipalName user2@contoso.com -AllLicenses -ExcludeLicense FABRIC_FREE -Confirm:$false
 
             $writes = @($global:SeenRequests | Where-Object method -eq POST)
             $writes.Count | Should -Be 4
             @($writes[0].body.removeLicenses) | Should -Be @($global:swapFirstSkuId)
-            @($writes[1].body.removeLicenses) | Should -Be @($global:swapSecondSkuId)
-            @($writes[1].body.removeLicenses) | Should -Not -Contain $global:swapExcludedSkuId
+            @($writes[1].body.removeLicenses) | Should -Be @($global:swapSecondSkuId, $global:swapExcludedSkuId)
             @($writes[2].body.addLicenses.skuId) | Should -Be @($global:swapSecondSkuId)
-            @($writes[3].body.addLicenses.skuId) | Should -Be @($global:swapFirstSkuId)
+            $writes[3].url | Should -Be '/users/id2/assignLicense'
+            @($writes[3].body.addLicenses.skuId) | Should -Be @($global:swapFirstSkuId, $global:swapExcludedSkuId)
+        }
+
+        It 'accepts both users as the first two positional parameters' {
+            Switch-UserMsolAccountSku user1@contoso.com user2@contoso.com -AllLicenses -ExcludeLicense FABRIC_FREE -Confirm:$false
+
+            @($global:SeenRequests | Where-Object method -eq POST).Count | Should -Be 4
+        }
+
+        It 'temporarily removes SKUs shared by both users and gives them back to each user' {
+            $global:SwapSharedSku = $true
+
+            Switch-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -SecondUserPrincipalName user2@contoso.com -AllLicenses -Confirm:$false
+
+            $writes = @($global:SeenRequests | Where-Object method -eq POST)
+            $writes.Count | Should -Be 4
+            @($writes[0].body.removeLicenses) | Should -Be @($global:swapFirstSkuId, $global:swapExcludedSkuId)
+            @($writes[1].body.removeLicenses) | Should -Be @($global:swapSecondSkuId, $global:swapExcludedSkuId)
+            @($writes[2].body.addLicenses.skuId) | Should -Be @($global:swapSecondSkuId, $global:swapExcludedSkuId)
+            $writes[2].body.addLicenses[1].disabledPlans | Should -Be @('shared-disabled')
+            @($writes[3].body.addLicenses.skuId) | Should -Be @($global:swapFirstSkuId, $global:swapExcludedSkuId)
         }
 
         It 'restores a successful removal and does not start additions if the other removal fails' {
@@ -689,7 +716,7 @@ Describe 'License assignment batching' {
             $writes.Count | Should -Be 3
             @($writes[2].body.addLicenses.skuId) | Should -Be @($global:swapFirstSkuId)
             $writes[2].url | Should -Be '/users/id1/assignLicense'
-            Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*simulated failure*' }
+            Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like 'License removal failed for user2@contoso.com:*simulated failure*' }
         }
 
         It 'removes partial reciprocal additions and restores both original licenses after an add failure' {
@@ -705,7 +732,21 @@ Describe 'License assignment batching' {
             @($writes[5].body.addLicenses.skuId) | Should -Be @($global:swapFirstSkuId)
             $writes[6].url | Should -Be '/users/id2/assignLicense'
             @($writes[6].body.addLicenses.skuId) | Should -Be @($global:swapSecondSkuId)
-            Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like '*simulated failure*' }
+            Should -Invoke Write-NCMessage -Scope It -ParameterFilter { $Level -eq 'ERROR' -and $Message -like 'License assignment failed for user2@contoso.com:*simulated failure*' }
+        }
+
+        It 'includes set-aside SKUs when rolling back a failed reciprocal assignment' {
+            $global:SwapFailOn = @("add:id1:$($global:swapSecondSkuId)")
+
+            Switch-UserMsolAccountSku -FirstUserPrincipalName user1@contoso.com -SecondUserPrincipalName user2@contoso.com -AllLicenses -ExcludeLicense FABRIC_FREE -Confirm:$false
+
+            $writes = @($global:SeenRequests | Where-Object method -eq POST)
+            $writes.Count | Should -Be 7
+            $writes[4].url | Should -Be '/users/id2/assignLicense'
+            @($writes[4].body.removeLicenses) | Should -Be @($global:swapFirstSkuId, $global:swapExcludedSkuId)
+            @($writes[5].body.addLicenses.skuId) | Should -Be @($global:swapFirstSkuId)
+            $writes[6].url | Should -Be '/users/id2/assignLicense'
+            @($writes[6].body.addLicenses.skuId) | Should -Be @($global:swapSecondSkuId, $global:swapExcludedSkuId)
         }
     }
 
