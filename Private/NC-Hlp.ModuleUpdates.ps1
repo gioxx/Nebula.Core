@@ -220,7 +220,8 @@ function Get-NCPowerShellUpdate {
     .SYNOPSIS
         Returns the PowerShell update available for this session, if any.
     .DESCRIPTION
-        Compares the running PowerShell 7+ version with the latest stable release published by gioxx/SWUpdates-Alert.
+        Compares the running PowerShell 7+ version with the releases published by gioxx/SWUpdates-Alert:
+        the latest LTS release when the running version is on the LTS line or older, the latest stable release when it is newer.
         Returns $null on Windows PowerShell, when PowerShell is up to date, or when the check fails (with a warning).
     .PARAMETER CurrentVersion
         Version to compare (Major.Minor.Patch). Defaults to the running PowerShell version.
@@ -243,9 +244,19 @@ function Get-NCPowerShellUpdate {
         $CurrentVersion = [version]::new($running.Major, $running.Minor, $running.Patch)
     }
 
+    $readVersion = {
+        param([string]$File)
+        $raw = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/gioxx/SWUpdates-Alert/main/updates/$File" -TimeoutSec 10 -ErrorAction Stop
+        [version](([string]$raw).Trim().TrimStart('v'))
+    }
+
     try {
-        $raw = Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/gioxx/SWUpdates-Alert/main/updates/LATEST_PWSH' -TimeoutSec 10 -ErrorAction Stop
-        $latestVersion = [version](([string]$raw).Trim().TrimStart('v'))
+        # Up to the LTS line, compare with the latest LTS release: 7.7+ ships no MSI, so servers stay on 7.6 LTS
+        # and must not be told about a stable release they cannot install the same way.
+        $latestVersion = & $readVersion 'LATEST_PWSH_LTS'
+        if ([version]::new($CurrentVersion.Major, $CurrentVersion.Minor) -gt [version]::new($latestVersion.Major, $latestVersion.Minor)) {
+            $latestVersion = & $readVersion 'LATEST_PWSH'
+        }
     }
     catch {
         Write-NCMessage "Unable to check the latest PowerShell version. $($_.Exception.Message)" -Level WARNING

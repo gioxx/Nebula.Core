@@ -162,7 +162,7 @@ New commands
 - Switch-UserMsolAccountSku: swaps direct licenses between two users without spare tenant seats: it removes the selected licenses from both users, then assigns them reciprocally, and tries to restore the original assignments if a step fails. Pick the licenses per user, or use -AllLicenses: excluded (-ExcludeLicense) and shared licenses are removed too, so service plan dependencies (e.g. Power Automate Free on Exchange Online) do not block the swap, and are given back to the same user. The two users can be passed by position.
 
 Improvements
-- Update check: on PowerShell 7 it now also reports a newer stable PowerShell release (read from gioxx/SWUpdates-Alert), since PowerShell 7.6.8 no longer shows its own update notice. Turn it off with CheckPowerShellUpdates = $false.
+- Update check: on PowerShell 7 it now also reports a newer PowerShell release (read from gioxx/SWUpdates-Alert), since PowerShell 7.6.8 no longer shows its own update notice. On the LTS line (7.6) or older it reports the latest LTS release, above it the latest stable one, so servers kept on 7.6 LTS (7.7 ships no MSI) are not told about 7.7. Turn it off with CheckPowerShellUpdates = $false.
 
 Fixes
 - License catalog cache: the 7-day check against GitHub now counts from the last real check, not the last use, so new catalog versions are downloaded again. When the commit date cannot be read, the download time is no longer recorded as the catalog's "last updated" date (it blocked later updates). Run any license cmdlet once with `-ForceLicenseCatalogRefresh` to repair an existing cache.

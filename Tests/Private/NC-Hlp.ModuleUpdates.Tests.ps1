@@ -9,27 +9,52 @@ Describe 'Get-NCPowerShellUpdate' {
         Mock Write-NCMessage {}
     }
 
-    It 'returns the update when a newer stable release exists' {
-        Mock Invoke-RestMethod { "v7.6.9`n" }
+    It 'returns the newer LTS release on the LTS line, without reading the stable one' {
+        Mock Invoke-RestMethod { "v7.6.10`n" } -ParameterFilter { $Uri -like '*/LATEST_PWSH_LTS' }
+        Mock Invoke-RestMethod { 'v7.7.0' } -ParameterFilter { $Uri -like '*/LATEST_PWSH' }
 
         $result = Get-NCPowerShellUpdate -CurrentVersion '7.6.8' -Edition 'Core'
 
         $result.Name | Should -Be 'PowerShell'
         $result.InstalledVersion | Should -Be ([version]'7.6.8')
-        $result.LatestVersion | Should -Be ([version]'7.6.9')
-        Should -Invoke Invoke-RestMethod -Times 1 -ParameterFilter { $Uri -eq 'https://raw.githubusercontent.com/gioxx/SWUpdates-Alert/main/updates/LATEST_PWSH' }
+        $result.LatestVersion | Should -Be ([version]'7.6.10')
+        Should -Invoke Invoke-RestMethod -Times 1 -ParameterFilter { $Uri -eq 'https://raw.githubusercontent.com/gioxx/SWUpdates-Alert/main/updates/LATEST_PWSH_LTS' }
+        Should -Invoke Invoke-RestMethod -Times 0 -ParameterFilter { $Uri -like '*/LATEST_PWSH' }
+    }
+
+    It 'returns nothing on the latest LTS release even if a newer stable release exists' {
+        Mock Invoke-RestMethod { 'v7.6.10' } -ParameterFilter { $Uri -like '*/LATEST_PWSH_LTS' }
+        Mock Invoke-RestMethod { 'v7.7.0' } -ParameterFilter { $Uri -like '*/LATEST_PWSH' }
+
+        Get-NCPowerShellUpdate -CurrentVersion '7.6.10' -Edition 'Core' | Should -BeNullOrEmpty
+    }
+
+    It 'points releases older than the LTS line to the latest LTS release' {
+        Mock Invoke-RestMethod { 'v7.6.10' } -ParameterFilter { $Uri -like '*/LATEST_PWSH_LTS' }
+        Mock Invoke-RestMethod { 'v7.7.0' } -ParameterFilter { $Uri -like '*/LATEST_PWSH' }
+
+        (Get-NCPowerShellUpdate -CurrentVersion '7.4.6' -Edition 'Core').LatestVersion | Should -Be ([version]'7.6.10')
+    }
+
+    It 'returns the newer stable release above the LTS line' {
+        Mock Invoke-RestMethod { 'v7.6.10' } -ParameterFilter { $Uri -like '*/LATEST_PWSH_LTS' }
+        Mock Invoke-RestMethod { "v7.7.1`n" } -ParameterFilter { $Uri -eq 'https://raw.githubusercontent.com/gioxx/SWUpdates-Alert/main/updates/LATEST_PWSH' }
+
+        (Get-NCPowerShellUpdate -CurrentVersion '7.7.0' -Edition 'Core').LatestVersion | Should -Be ([version]'7.7.1')
     }
 
     It 'returns nothing when the running version is current' {
-        Mock Invoke-RestMethod { 'v7.6.9' }
+        Mock Invoke-RestMethod { 'v7.6.10' } -ParameterFilter { $Uri -like '*/LATEST_PWSH_LTS' }
+        Mock Invoke-RestMethod { 'v7.7.1' } -ParameterFilter { $Uri -like '*/LATEST_PWSH' }
 
-        Get-NCPowerShellUpdate -CurrentVersion '7.6.9' -Edition 'Core' | Should -BeNullOrEmpty
+        Get-NCPowerShellUpdate -CurrentVersion '7.7.1' -Edition 'Core' | Should -BeNullOrEmpty
     }
 
     It 'returns nothing when the running version is ahead (preview)' {
-        Mock Invoke-RestMethod { 'v7.6.9' }
+        Mock Invoke-RestMethod { 'v7.6.10' } -ParameterFilter { $Uri -like '*/LATEST_PWSH_LTS' }
+        Mock Invoke-RestMethod { 'v7.7.1' } -ParameterFilter { $Uri -like '*/LATEST_PWSH' }
 
-        Get-NCPowerShellUpdate -CurrentVersion '7.7.0' -Edition 'Core' | Should -BeNullOrEmpty
+        Get-NCPowerShellUpdate -CurrentVersion '7.8.0' -Edition 'Core' | Should -BeNullOrEmpty
     }
 
     It 'uses the running version when none is given' {
